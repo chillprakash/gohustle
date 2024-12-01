@@ -109,3 +109,12 @@ func (db *TimescaleDB) HealthCheck(ctx context.Context) error {
 func (db *TimescaleDB) Stats() *pgxpool.Stat {
 	return db.pool.Stat()
 }
+
+// ExecContext executes a query without returning any rows
+func (db *TimescaleDB) ExecContext(ctx context.Context, query string, args ...interface{}) error {
+	_, err := db.pool.Exec(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to execute query: %w", err)
+	}
+	return nil
+}

@@ -3,14 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"gohustle/config"
+	"gohustle/db"
+	"gohustle/logger"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"gohustle/config"
-	"gohustle/db"
-	"gohustle/logger"
 )
 
 // SensorData represents a sample data structure
@@ -58,7 +57,7 @@ func main() {
 	service := NewSensorDataService(database)
 
 	// Generate sample data
-	data := service.generateSampleData(10000000)
+	data := service.generateSampleData(1000)
 	log.Info("Generated sample data", map[string]interface{}{
 		"count": len(data),
 	})

@@ -3,114 +3,124 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
-	"sync"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"hustleapp/go/config"
+	"gohustle/config"
+	"gohustle/db"
+	"gohustle/logger"
 )
 
 func main() {
+	log := logger.GetLogger()
+	ctx := context.Background()
+
 	// Load config
-	cfg, err := config.Load("development")
+	cfg, err := config.GetConfig()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Error("Failed to load config", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
 
-	// Initialize DB
-	database, err := NewTimescaleDB(&cfg.Timescale)
+	// Initialize TimescaleDB
+	database, err := db.NewTimescaleDB(cfg.Timescale)
 	if err != nil {
-		log.Fatalf("Failed to initialize database: %v", err)
+		log.Error("Failed to initialize TimescaleDB", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
 	defer database.Close()
 
-	ctx := context.Background()
-
-	// Create test table
-	createTableSQL := `
-        CREATE TABLE IF NOT EXISTS concurrent_test (
-            id SERIAL PRIMARY KEY,
-            value TEXT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-        );
-    `
-
-	if _, err := database.Exec(ctx, createTableSQL); err != nil {
-		log.Fatalf("Failed to create table: %v", err)
+	// Initialize KiteConnect
+	kiteConnect, err := NewKiteConnect(database, &cfg.Kite)
+	if err != nil {
+		log.Error("Failed to initialize KiteConnect", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
 
-	// Configuration
-	numWorkers := 5
-	insertsPerWorker := 10
+	// Refresh access token
+	_, err = kiteConnect.RefreshAccessToken(ctx)
+	if err != nil {
+		log.Error("Failed to refresh access token", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
 
-	var wg sync.WaitGroup
-	startTime := time.Now()
+	// Initialize KiteData
+	kiteData, err := NewKiteData(database, &cfg.Kite)
+	if err != nil {
+		log.Error("Failed to initialize KiteData", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
 
-	// Launch workers
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
+	// Setup graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-			for j := 0; j < insertsPerWorker; j++ {
-				value := fmt.Sprintf("worker-%d-value-%d", workerID, j)
+	// Create ticker for periodic updates
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
 
-				_, err := database.Exec(ctx,
-					"INSERT INTO concurrent_test (value) VALUES ($1)",
-					value,
-				)
+	log.Info("Starting market data collection")
 
-				if err != nil {
-					log.Printf("Worker %d insert %d failed: %v", workerID, j, err)
-					continue
-				}
-
-				log.Printf("Worker %d inserted value %d", workerID, j)
+	for {
+		select {
+		case <-ticker.C:
+			// Get spot prices
+			prices, err := kiteData.GetCurrentSpotPriceOfAllIndices(ctx)
+			if err != nil {
+				log.Error("Failed to get spot prices", map[string]interface{}{
+					"error": err.Error(),
+				})
+				continue
 			}
-		}(i)
-	}
 
-	// Wait for completion
-	wg.Wait()
-	duration := time.Since(startTime)
+			log.Info("Fetched spot prices", map[string]interface{}{
+				"prices": prices,
+			})
 
-	// Verify results
-	var count int
-	err = database.QueryRow(ctx, "SELECT COUNT(*) FROM concurrent_test").Scan(&count)
-	if err != nil {
-		log.Fatalf("Failed to count records: %v", err)
-	}
+			// Add more periodic tasks here
 
-	log.Printf("Total records: %d", count)
-	log.Printf("Time taken: %v", duration)
-	log.Printf("Average insert rate: %.2f records/second",
-		float64(count)/duration.Seconds())
-
-	// Display some records
-	rows, err := database.Query(ctx,
-		"SELECT id, value, created_at FROM concurrent_test LIMIT 5")
-	if err != nil {
-		log.Fatalf("Failed to query records: %v", err)
-	}
-	defer rows.Close()
-
-	log.Println("\nSample records:")
-	for rows.Next() {
-		var (
-			id        int
-			value     string
-			createdAt time.Time
-		)
-		if err := rows.Scan(&id, &value, &createdAt); err != nil {
-			log.Printf("Failed to scan row: %v", err)
-			continue
+		case sig := <-sigChan:
+			log.Info("Received shutdown signal", map[string]interface{}{
+				"signal": sig.String(),
+			})
+			return
 		}
-		log.Printf("ID: %d, Value: %s, Created: %v", id, value, createdAt)
+	}
+}
+
+// Optional: Add helper function for initialization
+func initializeServices(cfg *config.Config) (*db.TimescaleDB, *KiteConnect, *KiteData, error) {
+	// Initialize database
+	database, err := db.NewTimescaleDB(cfg.Timescale)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to initialize database: %w", err)
 	}
 
-	// Optional: Clean up
-	_, err = database.Exec(ctx, "DROP TABLE concurrent_test")
+	// Initialize KiteConnect
+	kiteConnect, err := NewKiteConnect(database, &cfg.Kite)
 	if err != nil {
-		log.Printf("Failed to clean up table: %v", err)
+		database.Close()
+		return nil, nil, nil, fmt.Errorf("failed to initialize KiteConnect: %w", err)
 	}
+
+	// Initialize KiteData
+	kiteData, err := NewKiteData(database, &cfg.Kite)
+	if err != nil {
+		database.Close()
+		return nil, nil, nil, fmt.Errorf("failed to initialize KiteData: %w", err)
+	}
+
+	return database, kiteConnect, kiteData, nil
 }

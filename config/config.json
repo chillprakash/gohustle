@@ -15,5 +15,14 @@
         "port": 6379,
         "db": 0,
         "max_connections": 50
+    },
+    "kite": {
+        "api_key": "mpztqt5n7hujwxhy",
+        "api_secret": "lokvoi4wl1dpyegm1j7g4svf46ckoell",
+        "user_id": "QUM025",
+        "user_password": "Test@1122",
+        "totp_key": "WGUKEQ5RS5TNUWHWCE65HZD6VGZACVF2",
+        "login_url": "https://kite.zerodha.com/api/login",
+        "twofa_url": "https://kite.zerodha.com/api/twofa"
     }
 } 

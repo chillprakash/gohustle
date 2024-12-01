@@ -13,6 +13,7 @@ import (
 type Config struct {
 	Timescale TimescaleConfig `json:"timescale"`
 	Redis     RedisConfig     `json:"redis"`
+	Kite      KiteConfig      `json:"kite"`
 }
 
 type TimescaleConfig struct {
@@ -36,6 +37,16 @@ type RedisConfig struct {
 	Port           int    `json:"port"`
 	DB             int    `json:"db"`
 	MaxConnections int    `json:"max_connections"`
+}
+
+type KiteConfig struct {
+	APIKey       string `json:"api_key"`
+	APISecret    string `json:"api_secret"`
+	UserID       string `json:"user_id"`
+	UserPassword string `json:"user_password"`
+	TOTPKey      string `json:"totp_key"`
+	LoginURL     string `json:"login_url"`
+	TwoFAURL     string `json:"twofa_url"`
 }
 
 // GetConfig returns the configuration from the default location

@@ -16,11 +16,11 @@ type Logger struct {
 }
 
 var (
-	instance *Logger
-	once     sync.Once
+	instance    *Logger
+	once        sync.Once
 	istLocation *time.Location
 )
-		
+
 func init() {
 	var err error
 	istLocation, err = time.LoadLocation("Asia/Kolkata")
@@ -42,7 +42,7 @@ type LogEntry struct {
 // GetLogger returns a singleton logger instance
 func GetLogger() *Logger {
 	once.Do(func() {
-		instance = setupLogger() dsp
+		instance = setupLogger()
 	})
 	return instance
 }

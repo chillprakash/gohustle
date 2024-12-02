@@ -340,3 +340,36 @@ KITE_API_SECRET=lokvoi4wl1dpyegm1j7g4svf46ckoell
 02-12-24:13:45:16 | INFO | zerodha.go:75 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
 02-12-24:13:45:16 | INFO | main.go:40 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
 02-12-24:13:45:16 | INFO | zerodha.go:463 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59010.55 BANKNIFTY:51847.25 FINNIFTY:23958.7 MIDCPNIFTY:12700.85 NIFTY:24180.5 SENSEX:79930.6]
+02-12-24:14:13:14 | INFO | main.go:64 | gohustle | main.main | Shutting down gracefully
+02-12-24:14:13:16 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json file_exists=true file_size=780 file_readable=true file_writeable=true
+02-12-24:14:13:16 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:14:13:16 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | min_conns=5 max_lifetime=1h max_idletime=30m host=localhost port=5432 db=hustledb max_conns=20
+02-12-24:14:13:16 | INFO | zerodha.go:262 | zerodha | zerodha.(*KiteConnect).RefreshAccessToken | Valid access token already exists | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:13:16 | INFO | zerodha.go:75 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+02-12-24:14:13:16 | INFO | main.go:40 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:13:17 | INFO | zerodha.go:463 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59156.17 BANKNIFTY:51973.8 FINNIFTY:24020.5 MIDCPNIFTY:12696.85 NIFTY:24237.95 SENSEX:80121.62]
+02-12-24:14:15:55 | INFO | main.go:64 | gohustle | main.main | Shutting down gracefully
+02-12-24:14:15:57 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | config_path=/Users/prakash-3701/psh/gohustle/config/config.json file_exists=true file_size=780 file_readable=true file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json working_dir=/Users/prakash-3701/psh/gohustle
+02-12-24:14:15:57 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:14:15:57 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | host=localhost port=5432 db=hustledb max_conns=20 min_conns=5 max_lifetime=1h max_idletime=30m
+02-12-24:14:15:57 | INFO | zerodha.go:262 | zerodha | zerodha.(*KiteConnect).RefreshAccessToken | Valid access token already exists | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:15:57 | INFO | zerodha.go:75 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+02-12-24:14:15:57 | INFO | main.go:40 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:15:57 | INFO | zerodha.go:463 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59186.69 BANKNIFTY:52017.8 FINNIFTY:24038.35 MIDCPNIFTY:12699.65 NIFTY:24254.95 SENSEX:80169.09]
+02-12-24:14:26:42 | INFO | main.go:64 | gohustle | main.main | Shutting down gracefully
+02-12-24:14:27:38 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | file_readable=true file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json file_exists=true file_size=780
+02-12-24:14:27:38 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:14:27:38 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | host=localhost port=5432 db=hustledb max_conns=20 min_conns=5 max_lifetime=1h max_idletime=30m
+02-12-24:14:27:38 | INFO | zerodha.go:277 | zerodha | zerodha.(*KiteConnect).RefreshAccessToken | Valid access token already exists | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:27:38 | INFO | zerodha.go:90 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+02-12-24:14:27:38 | INFO | main.go:41 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:27:38 | INFO | zerodha.go:478 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59249.7 BANKNIFTY:52061.9 FINNIFTY:24052 MIDCPNIFTY:12706.85 NIFTY:24254.3 SENSEX:80181.54]
+02-12-24:14:48:19 | INFO | main.go:65 | gohustle | main.main | Shutting down gracefully
+02-12-24:14:48:22 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json file_exists=true file_size=780 file_readable=true
+02-12-24:14:48:22 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:14:48:22 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | host=localhost port=5432 db=hustledb max_conns=20 min_conns=5 max_lifetime=1h max_idletime=30m
+02-12-24:14:48:22 | INFO | zerodha.go:138 | zerodha | zerodha.(*KiteConnect).RefreshAccessToken | Valid access token already exists | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:48:22 | INFO | zerodha.go:88 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+02-12-24:14:48:22 | INFO | main.go:41 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:48:23 | INFO | zerodha.go:323 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59352.8 BANKNIFTY:52134.9 FINNIFTY:24078.35 MIDCPNIFTY:12716 NIFTY:24279.05 SENSEX:80280.5]
+02-12-24:14:48:28 | INFO | main.go:65 | gohustle | main.main | Shutting down gracefully

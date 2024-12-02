@@ -20,6 +20,19 @@ import (
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
+type KiteConnector interface {
+	GetToken(ctx context.Context) (string, error)
+	RefreshAccessToken(ctx context.Context) error
+	FetchTokenFromDB(ctx context.Context) (string, error)
+	SetAccessToken(token string)
+
+	// Market data operations
+	GetCurrentSpotPriceOfAllIndices(ctx context.Context) (map[string]float64, error)
+}
+
+// Verify KiteConnect implements KiteConnector at compile time
+var _ KiteConnector = (*KiteConnect)(nil)
+
 type LoginResponse struct {
 	Status string `json:"status"`
 	Data   struct {
@@ -75,143 +88,6 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 	log.Info("Successfully initialized KiteConnect", nil)
 
 	return kite
-}
-
-// getStoredToken retrieves a valid token from the database
-func (k *KiteConnect) getStoredToken(ctx context.Context) (string, error) {
-	query := `
-        SELECT access_token 
-        FROM access_tokens 
-        WHERE token_type = 'kite' 
-        AND is_active = TRUE 
-        AND expires_at > NOW() 
-        ORDER BY created_at DESC 
-        LIMIT 1
-    `
-
-	var token string
-	err := k.db.QueryRow(ctx, query).Scan(&token)
-	if err != nil {
-		return "", fmt.Errorf("no valid token found: %w", err)
-	}
-
-	return token, nil
-}
-
-// refreshAccessToken gets a new token and stores it
-func (k *KiteConnect) refreshAccessToken(ctx context.Context, kc *kiteconnect.Client) (string, error) {
-	log := logger.GetLogger()
-
-	// Get login URL from kite connect client
-	loginURL := kc.GetLoginURL()
-	log.Info("Generated login URL", map[string]interface{}{
-		"url": loginURL,
-	})
-
-	// Create cookie jar for session management
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create cookie jar: %w", err)
-	}
-	client := &http.Client{Jar: jar}
-
-	// Get request token from login URL
-	response, err := client.Get(loginURL)
-	if err != nil {
-		if strings.Contains(err.Error(), "got request token:") {
-			requestToken := extractRequestToken(err.Error())
-			if requestToken == "" {
-				return "", fmt.Errorf("failed to extract request token from response")
-			}
-
-			// Generate session with request token
-			data, err := kc.GenerateSession(requestToken, k.config.APISecret)
-			if err != nil {
-				log.Error("Failed to generate session", map[string]interface{}{
-					"error":         err.Error(),
-					"request_token": requestToken,
-				})
-				return "", fmt.Errorf("session generation failed: %w", err)
-			}
-
-			if data.AccessToken == "" {
-				return "", fmt.Errorf("no access token in session response")
-			}
-
-			// Store the new token
-			if err := k.storeToken(ctx, data.AccessToken); err != nil {
-				return "", fmt.Errorf("token storage failed: %w", err)
-			}
-
-			log.Info("Successfully refreshed access token", map[string]interface{}{
-				"token_length": len(data.AccessToken),
-				"user_id":      data.UserID,
-			})
-
-			return data.AccessToken, nil
-		}
-		return "", fmt.Errorf("failed to get request token: %w", err)
-	}
-	defer response.Body.Close()
-
-	// Try to extract request token from response URL
-	requestToken := extractRequestToken(response.Request.URL.String())
-	if requestToken == "" {
-		return "", fmt.Errorf("failed to extract request token from response URL")
-	}
-
-	// Generate session with request token
-	data, err := kc.GenerateSession(requestToken, k.config.APISecret)
-	if err != nil {
-		log.Error("Failed to generate session", map[string]interface{}{
-			"error":         err.Error(),
-			"request_token": requestToken,
-		})
-		return "", fmt.Errorf("session generation failed: %w", err)
-	}
-
-	if data.AccessToken == "" {
-		return "", fmt.Errorf("no access token in session response")
-	}
-
-	// Store the new token
-	if err := k.storeToken(ctx, data.AccessToken); err != nil {
-		return "", fmt.Errorf("token storage failed: %w", err)
-	}
-
-	log.Info("Successfully refreshed access token", map[string]interface{}{
-		"token_length": len(data.AccessToken),
-		"user_id":      data.UserID,
-	})
-
-	return data.AccessToken, nil
-}
-
-// newKiteConnect is the internal implementation that returns error
-func newKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) (*KiteConnect, error) {
-	log := logger.GetLogger()
-
-	// Initialize cookie jar for session management
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create cookie jar: %w", err)
-	}
-
-	client := &http.Client{
-		Jar: jar,
-	}
-
-	kite := &KiteConnect{
-		client: client,
-		db:     database,
-		config: cfg,
-	}
-
-	log.Info("Successfully initialized KiteConnect", map[string]interface{}{
-		"api_key": cfg.APIKey,
-	})
-
-	return kite, nil
 }
 
 // storeToken stores the access token in the database
@@ -409,22 +285,6 @@ func (k *KiteConnect) RefreshAccessToken(ctx context.Context) error {
 	return fmt.Errorf("no request token found")
 }
 
-// Helper function to generate checksum
-func generateChecksum(requestToken, apiSecret string) string {
-	return fmt.Sprintf("%x", strings.Join([]string{requestToken, apiSecret}, ""))
-}
-
-// Helper function to extract request token from URL
-func extractRequestToken(url string) string {
-	if strings.Contains(url, "request_token=") {
-		parts := strings.Split(url, "request_token=")
-		if len(parts) > 1 {
-			return strings.Split(parts[1], "&")[0]
-		}
-	}
-	return ""
-}
-
 // GetCurrentSpotPriceOfAllIndices fetches current spot prices for all indices
 func (k *KiteConnect) GetCurrentSpotPriceOfAllIndices(ctx context.Context) (map[string]float64, error) {
 	log := logger.GetLogger()
@@ -486,4 +346,9 @@ func (k *KiteConnect) FetchTokenFromDB(ctx context.Context) (string, error) {
 	}
 
 	return token, nil
+}
+
+// SetAccessToken sets the access token for the KiteConnect instance
+func (k *KiteConnect) SetAccessToken(token string) {
+	k.Kite.SetAccessToken(token)
 }

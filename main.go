@@ -24,8 +24,9 @@ func main() {
 	database := db.InitDB(&cfg.Timescale)
 	defer database.Close()
 
-	// Initialize KiteConnect
-	kiteConnect := zerodha.NewKiteConnect(database, &cfg.Kite)
+	// Initialize KiteConnect with interface
+	var kiteConnect zerodha.KiteConnector
+	kiteConnect = zerodha.NewKiteConnect(database, &cfg.Kite)
 
 	// Fetch the latest valid access token
 	token, err := kiteConnect.GetToken(ctx)
@@ -41,8 +42,8 @@ func main() {
 		"access_token": token,
 	})
 
-	// Set the access token for the KiteConnect client
-	kiteConnect.Kite.SetAccessToken(token)
+	// Set the access token using the interface method
+	kiteConnect.SetAccessToken(token)
 
 	// Fetch current spot prices for all indices
 	spotPrices, err := kiteConnect.GetCurrentSpotPriceOfAllIndices(ctx)

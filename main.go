@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"gohustle/config"
 	"gohustle/db"
 	"gohustle/logger"
+	"gohustle/zerodha"
 )
 
 func main() {
@@ -24,39 +25,41 @@ func main() {
 	defer database.Close()
 
 	// Initialize KiteConnect
-	kiteConnect := NewKiteConnect(database, &cfg.Kite)
+	kiteConnect := zerodha.NewKiteConnect(database, &cfg.Kite)
 
-	// Setup graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Create ticker for periodic updates
-	ticker := time.NewTicker(1 * time.Minute)
-	defer ticker.Stop()
-
-	log.Info("Starting market data collection")
-
-	for {
-		select {
-		case <-ticker.C:
-			// Get spot prices
-			prices, err := kiteConnect.GetCurrentSpotPriceOfAllIndices(ctx)
-			if err != nil {
-				log.Error("Failed to get spot prices", map[string]interface{}{
-					"error": err.Error(),
-				})
-				continue
-			}
-
-			log.Info("Fetched spot prices", map[string]interface{}{
-				"prices": prices,
-			})
-
-		case sig := <-sigChan:
-			log.Info("Received shutdown signal", map[string]interface{}{
-				"signal": sig.String(),
-			})
-			return
-		}
+	// Fetch the latest valid access token
+	token, err := kiteConnect.GetToken(ctx)
+	if err != nil {
+		log.Error("Failed to get access token", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
+
+	// Log the access token
+	log.Info("Access Token Retrieved", map[string]interface{}{
+		"access_token": token,
+	})
+
+	// Set the access token for the KiteConnect client
+	kiteConnect.Kite.SetAccessToken(token)
+
+	// Fetch current spot prices for all indices
+	spotPrices, err := kiteConnect.GetCurrentSpotPriceOfAllIndices(ctx)
+	if err != nil {
+		log.Error("Failed to fetch spot prices", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+
+	// Print the spot prices
+	fmt.Println("Current Spot Prices:", spotPrices)
+
+	// Handle graceful shutdown
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
+
+	log.Info("Shutting down gracefully", nil)
 }

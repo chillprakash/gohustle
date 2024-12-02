@@ -3,118 +3,69 @@ package db
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"sync"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"os"
 
 	"gohustle/config"
+	"gohustle/logger"
+
+	"github.com/jackc/pgx/v4/pgxpool"
 )
 
-// TimescaleDB represents the database wrapper
 type TimescaleDB struct {
-	pool   *pgxpool.Pool
-	config config.TimescaleConfig
-	mu     sync.RWMutex
+	pool *pgxpool.Pool
 }
 
-// NewTimescaleDB creates a new TimescaleDB instance
-func NewTimescaleDB(config config.TimescaleConfig) (*TimescaleDB, error) {
-	db := &TimescaleDB{
-		config: config,
+// InitDB initializes and returns a database connection, handles errors internally
+func InitDB(cfg *config.TimescaleConfig) *TimescaleDB {
+	log := logger.GetLogger()
+
+	db, err := newTimescaleDB(cfg)
+	if err != nil {
+		log.Error("Failed to initialize TimescaleDB", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
 
-	if err := db.initialize(); err != nil {
-		return nil, fmt.Errorf("failed to initialize database: %w", err)
-	}
-
-	return db, nil
+	return db
 }
 
-func (db *TimescaleDB) initialize() error {
+// newTimescaleDB is the internal implementation that returns error
+func newTimescaleDB(cfg *config.TimescaleConfig) (*TimescaleDB, error) {
+	log := logger.GetLogger()
+
 	connString := fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s",
-		url.QueryEscape(db.config.User),
-		url.QueryEscape(db.config.Password),
-		db.config.Host,
-		db.config.Port,
-		db.config.Database,
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
+		cfg.Host,
+		cfg.Port,
+		cfg.User,
+		cfg.Password,
+		cfg.DBName,
 	)
 
-	poolConfig, err := pgxpool.ParseConfig(connString)
+	pool, err := pgxpool.Connect(context.Background(), connString)
 	if err != nil {
-		return fmt.Errorf("unable to parse pool config: %w", err)
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	poolConfig.MaxConns = int32(db.config.MaxConnections)
-	poolConfig.MinConns = int32(db.config.MinConnections)
-	poolConfig.MaxConnLifetime = db.config.GetMaxConnLifetime()
-	poolConfig.MaxConnIdleTime = db.config.GetMaxConnIdleTime()
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
-	if err != nil {
-		return fmt.Errorf("unable to create connection pool: %w", err)
-	}
-
+	// Test connection
 	if err := pool.Ping(context.Background()); err != nil {
-		return fmt.Errorf("unable to ping database: %w", err)
+		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	db.pool = pool
-	return nil
+	log.Info("Successfully connected to TimescaleDB", map[string]interface{}{
+		"host": cfg.Host,
+		"port": cfg.Port,
+		"user": cfg.User,
+		"db":   cfg.DBName,
+	})
+
+	return &TimescaleDB{pool: pool}, nil
 }
 
-// GetPool returns the connection pool
-func (db *TimescaleDB) GetPool() *pgxpool.Pool {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	return db.pool
-}
-
-// Close closes the database connection pool
+// Close closes the database connection
 func (db *TimescaleDB) Close() {
 	if db.pool != nil {
 		db.pool.Close()
 	}
-}
-
-// Query executes a query and returns rows
-func (db *TimescaleDB) Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error) {
-	return db.pool.Query(ctx, sql, args...)
-}
-
-// QueryRow executes a query and returns a single row
-func (db *TimescaleDB) QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row {
-	return db.pool.QueryRow(ctx, sql, args...)
-}
-
-// Exec executes a query without returning rows
-func (db *TimescaleDB) Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
-	return db.pool.Exec(ctx, sql, args...)
-}
-
-// Begin starts a transaction
-func (db *TimescaleDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	return db.pool.Begin(ctx)
-}
-
-// Add health check method
-func (db *TimescaleDB) HealthCheck(ctx context.Context) error {
-	return db.pool.Ping(ctx)
-}
-
-// Add pool stats method
-func (db *TimescaleDB) Stats() *pgxpool.Stat {
-	return db.pool.Stat()
-}
-
-// ExecContext executes a query without returning any rows
-func (db *TimescaleDB) ExecContext(ctx context.Context, query string, args ...interface{}) error {
-	_, err := db.pool.Exec(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("failed to execute query: %w", err)
-	}
-	return nil
 }

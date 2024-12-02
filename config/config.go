@@ -21,7 +21,7 @@ type TimescaleConfig struct {
 	Port            int    `json:"port"`
 	User            string `json:"user"`
 	Password        string `json:"password"`
-	Database        string `json:"database"`
+	DBName          string `json:"DBName"`
 	MaxConnections  int    `json:"max_connections"`
 	MinConnections  int    `json:"min_connections"`
 	MaxConnLifetime string `json:"max_conn_lifetime"`
@@ -49,133 +49,68 @@ type KiteConfig struct {
 	TwoFAURL     string `json:"twofa_url"`
 }
 
-// GetConfig returns the configuration from the default location
-func GetConfig() (*Config, error) {
+// GetConfig loads configuration and handles errors internally
+func GetConfig() *Config {
 	log := logger.GetLogger()
 
-	pwd, err := os.Getwd()
+	workDir, err := os.Getwd()
 	if err != nil {
 		log.Error("Failed to get working directory", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return nil, fmt.Errorf("failed to get working directory: %w", err)
+		os.Exit(1)
 	}
 
-	configPath := filepath.Join(pwd, "config", "config.json")
-	absPath, err := filepath.Abs(configPath)
+	configPath := filepath.Join(workDir, "config", "config.json")
+
+	fileInfo, err := os.Stat(configPath)
 	if err != nil {
-		log.Error("Failed to get absolute path", map[string]interface{}{
+		log.Error("Config file not found", map[string]interface{}{
 			"error": err.Error(),
 			"path":  configPath,
 		})
+		os.Exit(1)
 	}
 
-	// Log all path information
 	log.Info("Loading configuration", map[string]interface{}{
-		"working_dir":    pwd,
+		"working_dir":    workDir,
 		"config_path":    configPath,
-		"absolute_path":  absPath,
-		"file_exists":    fileExists(configPath),
-		"file_size":      getFileSize(configPath),
-		"file_readable":  isReadable(configPath),
-		"file_writeable": isWriteable(configPath),
+		"file_exists":    true,
+		"file_size":      fileInfo.Size(),
+		"file_readable":  fileInfo.Mode().Perm()&0400 != 0,
+		"file_writeable": fileInfo.Mode().Perm()&0200 != 0,
+		"absolute_path":  configPath,
 	})
 
-	return loadConfigFile(configPath)
-}
-
-// Helper functions for detailed file information
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func getFileSize(path string) int64 {
-	info, err := os.Stat(path)
-	if err != nil {
-		return -1
-	}
-	return info.Size()
-}
-
-func isReadable(path string) bool {
-	file, err := os.OpenFile(path, os.O_RDONLY, 0)
-	if err != nil {
-		return false
-	}
-	file.Close()
-	return true
-}
-
-func isWriteable(path string) bool {
-	file, err := os.OpenFile(path, os.O_WRONLY, 0)
-	if err != nil {
-		return false
-	}
-	file.Close()
-	return true
-}
-
-func loadConfigFile(filePath string) (*Config, error) {
-	log := logger.GetLogger()
-
-	absPath, err := filepath.Abs(filePath)
-	if err != nil {
-		log.Error("Failed to get absolute path", map[string]interface{}{
-			"error": err.Error(),
-			"path":  filePath,
-		})
-		return nil, fmt.Errorf("error getting absolute path: %w", err)
-	}
-
-	// Check if file exists
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		log.Error("Config file not found", map[string]interface{}{
-			"path": absPath,
-		})
-		return nil, fmt.Errorf("config file not found at %s", absPath)
-	}
-
-	data, err := os.ReadFile(absPath)
+	configFile, err := os.ReadFile(configPath)
 	if err != nil {
 		log.Error("Failed to read config file", map[string]interface{}{
 			"error": err.Error(),
-			"path":  absPath,
 		})
-		return nil, fmt.Errorf("error reading config file: %w", err)
-	}
-
-	if len(data) == 0 {
-		log.Error("Config file is empty", map[string]interface{}{
-			"path": absPath,
-		})
-		return nil, fmt.Errorf("config file is empty")
+		os.Exit(1)
 	}
 
 	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
+	if err := json.Unmarshal(configFile, &config); err != nil {
 		log.Error("Failed to parse config file", map[string]interface{}{
-			"error":   err.Error(),
-			"path":    absPath,
-			"content": string(data),
+			"error": err.Error(),
 		})
-		return nil, fmt.Errorf("error parsing config file: %w", err)
+		os.Exit(1)
 	}
 
-	// Convert duration strings to time.Duration
-	if err := config.Timescale.ToDuration(); err != nil {
-		log.Error("Failed to parse duration values", map[string]interface{}{
-			"error": err.Error(),
-			"path":  absPath,
+	// Simple validation
+	if config.Kite.APIKey == "" {
+		log.Error("Invalid configuration", map[string]interface{}{
+			"error": "kite API key is required",
 		})
-		return nil, fmt.Errorf("error parsing durations: %w", err)
+		os.Exit(1)
 	}
 
 	log.Info("Successfully loaded config", map[string]interface{}{
-		"path": absPath,
+		"path": configPath,
 	})
 
-	return &config, nil
+	return &config
 }
 
 // Add this method to convert the string values to time.Duration after unmarshaling

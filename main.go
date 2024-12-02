@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,50 +17,14 @@ func main() {
 	ctx := context.Background()
 
 	// Load config
-	cfg, err := config.GetConfig()
-	if err != nil {
-		log.Error("Failed to load config", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
+	cfg := config.GetConfig()
 
 	// Initialize TimescaleDB
-	database, err := db.NewTimescaleDB(cfg.Timescale)
-	if err != nil {
-		log.Error("Failed to initialize TimescaleDB", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
+	database := db.InitDB(&cfg.Timescale)
 	defer database.Close()
 
-	// Initialize KiteConnect
-	kiteConnect, err := NewKiteConnect(database, &cfg.Kite)
-	if err != nil {
-		log.Error("Failed to initialize KiteConnect", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
-
-	// Refresh access token
-	_, err = kiteConnect.RefreshAccessToken(ctx)
-	if err != nil {
-		log.Error("Failed to refresh access token", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
-
 	// Initialize KiteData
-	kiteData, err := NewKiteData(database, &cfg.Kite)
-	if err != nil {
-		log.Error("Failed to initialize KiteData", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
+	kiteData := NewKiteData(database, &cfg.Kite)
 
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -89,8 +52,6 @@ func main() {
 				"prices": prices,
 			})
 
-			// Add more periodic tasks here
-
 		case sig := <-sigChan:
 			log.Info("Received shutdown signal", map[string]interface{}{
 				"signal": sig.String(),
@@ -98,29 +59,4 @@ func main() {
 			return
 		}
 	}
-}
-
-// Optional: Add helper function for initialization
-func initializeServices(cfg *config.Config) (*db.TimescaleDB, *KiteConnect, *KiteData, error) {
-	// Initialize database
-	database, err := db.NewTimescaleDB(cfg.Timescale)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to initialize database: %w", err)
-	}
-
-	// Initialize KiteConnect
-	kiteConnect, err := NewKiteConnect(database, &cfg.Kite)
-	if err != nil {
-		database.Close()
-		return nil, nil, nil, fmt.Errorf("failed to initialize KiteConnect: %w", err)
-	}
-
-	// Initialize KiteData
-	kiteData, err := NewKiteData(database, &cfg.Kite)
-	if err != nil {
-		database.Close()
-		return nil, nil, nil, fmt.Errorf("failed to initialize KiteData: %w", err)
-	}
-
-	return database, kiteConnect, kiteData, nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -41,21 +42,123 @@ func (r *LoginResponse) IsSuccess() bool {
 
 // KiteConnect handles broker interactions
 type KiteConnect struct {
-	config     *config.KiteConfig
-	httpClient *http.Client
-	db         *db.TimescaleDB
-	cookies    []*http.Cookie
+	client *http.Client
+	db     *db.TimescaleDB
+	config *config.KiteConfig
 }
 
-// NewKiteConnect creates a new KiteConnect instance
-func NewKiteConnect(config *config.KiteConfig, db *db.TimescaleDB) *KiteConnect {
-	return &KiteConnect{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: time.Second * 30,
-		},
-		db: db,
+// InitKiteConnect initializes KiteConnect with token management
+func InitKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConnect {
+	log := logger.GetLogger()
+	ctx := context.Background()
+
+	// First try to create new instance
+	kite, err := newKiteConnect(database, cfg)
+	if err != nil {
+		log.Error("Failed to initialize KiteConnect", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
 	}
+
+	// Try to get existing token
+	token, err := kite.getStoredToken(ctx)
+	if err != nil {
+		log.Info("No valid token found, refreshing access token", nil)
+
+		// If no valid token, refresh it
+		token, err = kite.refreshAccessToken(ctx)
+		if err != nil {
+			log.Error("Failed to refresh access token", map[string]interface{}{
+				"error": err.Error(),
+			})
+			os.Exit(1)
+		}
+	}
+
+	// Set the token
+	kite.accessToken = token
+	log.Info("Successfully initialized KiteConnect with token", map[string]interface{}{
+		"token_length": len(token),
+	})
+
+	return kite
+}
+
+// getStoredToken retrieves a valid token from the database
+func (k *KiteConnect) getStoredToken(ctx context.Context) (string, error) {
+	query := `
+        SELECT access_token 
+        FROM access_tokens 
+        WHERE token_type = 'kite' 
+        AND is_active = TRUE 
+        AND expires_at > NOW() 
+        ORDER BY created_at DESC 
+        LIMIT 1
+    `
+
+	var token string
+	err := k.db.QueryRow(ctx, query).Scan(&token)
+	if err != nil {
+		return "", fmt.Errorf("no valid token found: %w", err)
+	}
+
+	return token, nil
+}
+
+// refreshAccessToken gets a new token and stores it
+func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
+	log := logger.GetLogger()
+
+	// Get request token through login flow
+	requestToken, err := k.login(ctx)
+	if err != nil {
+		return "", fmt.Errorf("login failed: %w", err)
+	}
+
+	// Generate session with request token
+	token, err := k.generateSession(ctx, requestToken)
+	if err != nil {
+		return "", fmt.Errorf("session generation failed: %w", err)
+	}
+
+	// Store the new token
+	if err := k.storeToken(ctx, token); err != nil {
+		return "", fmt.Errorf("token storage failed: %w", err)
+	}
+
+	log.Info("Successfully refreshed access token", map[string]interface{}{
+		"token_length": len(token),
+	})
+
+	return token, nil
+}
+
+// newKiteConnect is the internal implementation that returns error
+func newKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) (*KiteConnect, error) {
+	log := logger.GetLogger()
+
+	// Initialize cookie jar for session management
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cookie jar: %w", err)
+	}
+
+	client := &http.Client{
+		Jar: jar,
+	}
+
+	kite := &KiteConnect{
+		client: client,
+		db:     database,
+		config: cfg,
+	}
+
+	log.Info("Successfully initialized KiteConnect", map[string]interface{}{
+		"api_key": cfg.APIKey,
+	})
+
+	return kite, nil
 }
 
 // storeToken stores the access token in the database

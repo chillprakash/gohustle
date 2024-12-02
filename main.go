@@ -23,8 +23,8 @@ func main() {
 	database := db.InitDB(&cfg.Timescale)
 	defer database.Close()
 
-	// Initialize KiteData
-	kiteData := NewKiteData(database, &cfg.Kite)
+	// Initialize KiteConnect
+	kiteConnect := NewKiteConnect(database, &cfg.Kite)
 
 	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -40,7 +40,7 @@ func main() {
 		select {
 		case <-ticker.C:
 			// Get spot prices
-			prices, err := kiteData.GetCurrentSpotPriceOfAllIndices(ctx)
+			prices, err := kiteConnect.GetCurrentSpotPriceOfAllIndices(ctx)
 			if err != nil {
 				log.Error("Failed to get spot prices", map[string]interface{}{
 					"error": err.Error(),

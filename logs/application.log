@@ -373,3 +373,64 @@ KITE_API_SECRET=lokvoi4wl1dpyegm1j7g4svf46ckoell
 02-12-24:14:48:22 | INFO | main.go:41 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
 02-12-24:14:48:23 | INFO | zerodha.go:323 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59352.8 BANKNIFTY:52134.9 FINNIFTY:24078.35 MIDCPNIFTY:12716 NIFTY:24279.05 SENSEX:80280.5]
 02-12-24:14:48:28 | INFO | main.go:65 | gohustle | main.main | Shutting down gracefully
+02-12-24:14:57:53 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json file_exists=true file_size=780 file_readable=true file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:14:57:53 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:14:57:53 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | port=5432 db=hustledb max_conns=20 min_conns=5 max_lifetime=1h max_idletime=30m host=localhost
+02-12-24:14:57:53 | INFO | zerodha.go:138 | zerodha | zerodha.(*KiteConnect).RefreshAccessToken | Valid access token already exists | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:57:53 | INFO | zerodha.go:88 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+02-12-24:14:57:53 | INFO | main.go:41 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:14:57:53 | INFO | zerodha.go:323 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59270.18 BANKNIFTY:52085.35 FINNIFTY:24056.2 MIDCPNIFTY:12710.65 NIFTY:24262.1 SENSEX:80196.02]
+02-12-24:15:15:02 | INFO | main.go:65 | gohustle | main.main | Shutting down gracefully
+02-12-24:15:15:18 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | file_exists=true file_size=780 file_readable=true file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:15:15:18 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+02-12-24:15:15:18 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | max_conns=20 min_conns=5 max_lifetime=1h max_idletime=30m host=localhost port=5432 db=hustledb
+02-12-24:15:15:18 | INFO | zerodha.go:157 | zerodha | zerodha.(*KiteConnect).checkExistingToken | Valid access token already exists | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:15:15:18 | INFO | zerodha.go:86 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+02-12-24:15:15:18 | INFO | main.go:41 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+02-12-24:15:15:18 | INFO | zerodha.go:375 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59291.08 BANKNIFTY:52108.25 FINNIFTY:24072.9 MIDCPNIFTY:12730.8 NIFTY:24273.25 SENSEX:80238.36]
+02-12-24:17:34:06 | INFO | main.go:65 | gohustle | main.main | Shutting down gracefully
+03-12-24:10:55:54 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json file_exists=true file_size=780 file_readable=true file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json
+03-12-24:10:55:54 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+03-12-24:10:55:54 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | port=5432 db=hustledb max_conns=20 min_conns=5 max_lifetime=1h max_idletime=30m host=localhost
+03-12-24:10:55:54 | INFO | zerodha.go:162 | zerodha | zerodha.(*KiteConnect).checkExistingToken | Valid access token already exists | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+03-12-24:10:55:54 | INFO | zerodha.go:92 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+03-12-24:10:55:54 | INFO | main.go:41 | gohustle | main.main | Access Token Retrieved | access_token=02pCmhkW6dwDi12c0vp6siePay7903x1
+03-12-24:10:55:54 | ERROR | zerodha.go:362 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Failed to fetch spot prices | error=Incorrect `api_key` or `access_token`. error_type=kiteconnect.Error symbols=[NSE:NIFTY 50 NSE:NIFTY BANK NSE:NIFTY FIN SERVICE NSE:NIFTY MID SELECT BSE:SENSEX BSE:BANKEX]
+03-12-24:10:55:54 | ERROR | main.go:51 | gohustle | main.main | Failed to fetch spot prices | error=failed to fetch spot prices: Incorrect `api_key` or `access_token`.
+03-12-24:10:56:22 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json file_exists=true file_size=780 file_readable=true file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json
+03-12-24:10:56:22 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+03-12-24:10:56:22 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | max_lifetime=1h max_idletime=30m host=localhost port=5432 db=hustledb max_conns=20 min_conns=5
+03-12-24:10:56:22 | ERROR | zerodha.go:155 | zerodha | zerodha.(*KiteConnect).checkExistingToken | Failed to fetch token from DB | error=failed to fetch token from DB: no rows in result set
+03-12-24:10:56:22 | INFO | zerodha.go:208 | zerodha | zerodha.(*KiteConnect).performLogin | Attempting login | user_id=QUM025 url=https://kite.zerodha.com/api/login
+03-12-24:10:56:22 | INFO | zerodha.go:249 | zerodha | zerodha.(*KiteConnect).performTwoFactorAuth | Attempting 2FA | request_id=Qfu2VQQGOs6L11UasFZBwHj5t88IHruhlxX30cjKkRxPpHUDHFprdgY5vifePVMC
+03-12-24:10:56:22 | INFO | zerodha.go:270 | zerodha | zerodha.(*KiteConnect).getRequestToken | Attempting to get request token | url=https://kite.zerodha.com/connect/login?api_key=mpztqt5n7hujwxhy&v=3
+03-12-24:10:56:22 | INFO | zerodha.go:184 | zerodha | zerodha.(*KiteConnect).initializeHTTPClient.func1 | Redirect detected | url=https://kite.zerodha.com/connect/finish?api_key=mpztqt5n7hujwxhy&sess_id=K5eAYrbAaUmCio5EC909lSISPjzuC912
+03-12-24:10:56:22 | INFO | zerodha.go:184 | zerodha | zerodha.(*KiteConnect).initializeHTTPClient.func1 | Redirect detected | url=http://127.0.0.1:3000/zerodha/kite/auth/redirect?action=login&type=login&status=success&request_token=Y1lg3V8O9f2Hl476d0mtNkSnL7nPFZbu
+03-12-24:10:56:22 | INFO | zerodha.go:191 | zerodha | zerodha.(*KiteConnect).initializeHTTPClient.func1 | Found request token in redirect | request_token=Y1lg3V8O9f2Hl476d0mtNkSnL7nPFZbu
+03-12-24:10:56:22 | INFO | zerodha.go:300 | zerodha | zerodha.(*KiteConnect).extractRequestToken | Successfully extracted request token | request_token=Y1lg3V8O9f2Hl476d0mtNkSnL7nPFZbu": got request token: Y1lg3V8O9f2Hl476d0mtNkSnL7nPFZbu token_length=86
+03-12-24:10:56:22 | ERROR | zerodha.go:318 | zerodha | zerodha.(*KiteConnect).generateAndStoreSession | Failed to generate session | error=Token is invalid or has expired. request_token=Y1lg3V8O9f2Hl476d0mtNkSnL7nPFZbu": got request token: Y1lg3V8O9f2Hl476d0mtNkSnL7nPFZbu
+03-12-24:10:56:22 | INFO | zerodha.go:92 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+03-12-24:10:56:22 | ERROR | main.go:34 | gohustle | main.main | Failed to get access token | error=failed to get token: no rows in result set
+03-12-24:11:00:47 | INFO | config.go:75 | config | config.GetConfig | Loading configuration | file_exists=true file_size=780 file_readable=true file_writeable=true absolute_path=/Users/prakash-3701/psh/gohustle/config/config.json working_dir=/Users/prakash-3701/psh/gohustle config_path=/Users/prakash-3701/psh/gohustle/config/config.json
+03-12-24:11:00:47 | INFO | config.go:109 | config | config.GetConfig | Successfully loaded config | path=/Users/prakash-3701/psh/gohustle/config/config.json
+03-12-24:11:00:47 | INFO | timescale.go:83 | db | db.InitDB | Successfully connected to database | max_conns=20 min_conns=5 max_lifetime=1h max_idletime=30m host=localhost port=5432 db=hustledb
+03-12-24:11:00:47 | ERROR | zerodha.go:155 | zerodha | zerodha.(*KiteConnect).checkExistingToken | Failed to fetch token from DB | error=failed to fetch token from DB: no rows in result set
+03-12-24:11:00:47 | INFO | zerodha.go:208 | zerodha | zerodha.(*KiteConnect).performLogin | Attempting login | url=https://kite.zerodha.com/api/login user_id=QUM025
+03-12-24:11:00:47 | INFO | zerodha.go:249 | zerodha | zerodha.(*KiteConnect).performTwoFactorAuth | Attempting 2FA | request_id=CbSYyjdcH26ZDSsI3Eh3D7mfMzu7WWxa5heboC5b9iovghh2pRkYAafShR0pu8Bk
+03-12-24:11:00:47 | INFO | zerodha.go:270 | zerodha | zerodha.(*KiteConnect).getRequestToken | Attempting to get request token | url=https://kite.zerodha.com/connect/login?api_key=mpztqt5n7hujwxhy&v=3
+03-12-24:11:00:47 | INFO | zerodha.go:184 | zerodha | zerodha.(*KiteConnect).initializeHTTPClient.func1 | Redirect detected | url=https://kite.zerodha.com/connect/finish?api_key=mpztqt5n7hujwxhy&sess_id=2fKv4VpcwNC0Zbd7aY0aslhAQdCKJnDg
+03-12-24:11:00:47 | INFO | zerodha.go:184 | zerodha | zerodha.(*KiteConnect).initializeHTTPClient.func1 | Redirect detected | url=http://127.0.0.1:3000/zerodha/kite/auth/redirect?type=login&status=success&request_token=Z288ehPisApk2gIMGkTX41ut03EBhONG&action=login
+03-12-24:11:00:47 | INFO | zerodha.go:191 | zerodha | zerodha.(*KiteConnect).initializeHTTPClient.func1 | Found request token in redirect | request_token=Z288ehPisApk2gIMGkTX41ut03EBhONG
+03-12-24:11:00:47 | INFO | zerodha.go:300 | zerodha | zerodha.(*KiteConnect).extractRequestToken | Successfully extracted request token | request_token=Z288ehPisApk2gIMGkTX41ut03EBhONG token_length=32
+03-12-24:11:00:47 | INFO | zerodha.go:338 | zerodha | zerodha.(*KiteConnect).generateAndStoreSession | Successfully generated and stored access token | token_length=32
+03-12-24:11:00:47 | INFO | zerodha.go:92 | zerodha | zerodha.NewKiteConnect | Successfully initialized KiteConnect
+03-12-24:11:00:47 | INFO | main.go:41 | gohustle | main.main | Access Token Retrieved | access_token=bJkULkwlIdXv92pSKYf3RRZaTrKTncH3
+03-12-24:11:00:48 | INFO | zerodha.go:380 | zerodha | zerodha.(*KiteConnect).GetCurrentSpotPriceOfAllIndices | Successfully fetched spot prices | prices=map[BANKEX:59970.47 BANKNIFTY:52687.25 FINNIFTY:24292.35 MIDCPNIFTY:12772.5 NIFTY:24416.35 SENSEX:80754.11]
+03-12-24:11:00:49 | INFO | zerodha.go:444 | zerodha | zerodha.(*KiteConnect).DownloadInstrumentData | Downloaded raw data | count=82916
+03-12-24:11:00:49 | INFO | zerodha.go:522 | zerodha | zerodha.(*KiteConnect).saveCompleteData | Saved complete data | file=instruments.csv file_size_mb=9.41
+03-12-24:11:00:49 | INFO | zerodha.go:601 | zerodha | zerodha.(*KiteConnect).saveInstrumentFiles | Saved instrument data | file_size_mb=0.08 instrument=BANKNIFTY records=711
+03-12-24:11:00:49 | INFO | zerodha.go:601 | zerodha | zerodha.(*KiteConnect).saveInstrumentFiles | Saved instrument data | instrument=FINNIFTY records=409 file_size_mb=0.05
+03-12-24:11:00:49 | INFO | zerodha.go:601 | zerodha | zerodha.(*KiteConnect).saveInstrumentFiles | Saved instrument data | instrument=MIDCPNIFTY records=627 file_size_mb=0.07
+03-12-24:11:00:49 | INFO | zerodha.go:601 | zerodha | zerodha.(*KiteConnect).saveInstrumentFiles | Saved instrument data | instrument=BANKEX records=607 file_size_mb=0.07
+03-12-24:11:00:49 | INFO | zerodha.go:601 | zerodha | zerodha.(*KiteConnect).saveInstrumentFiles | Saved instrument data | instrument=SENSEX records=2452 file_size_mb=0.29
+03-12-24:11:00:49 | INFO | zerodha.go:601 | zerodha | zerodha.(*KiteConnect).saveInstrumentFiles | Saved instrument data | instrument=NIFTY records=1693 file_size_mb=0.19

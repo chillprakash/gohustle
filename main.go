@@ -57,6 +57,15 @@ func main() {
 	// Print the spot prices
 	fmt.Println("Current Spot Prices:", spotPrices)
 
+	// Download instrument data
+	err = kiteConnect.DownloadInstrumentData(ctx)
+	if err != nil {
+		log.Error("Failed to download instrument data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+
 	// Handle graceful shutdown
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)

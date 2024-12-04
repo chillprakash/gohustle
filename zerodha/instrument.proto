@@ -1,0 +1,23 @@
+syntax = "proto3";
+package zerodha;
+
+option go_package = "./zerodha";
+
+message Instrument {
+    string instrument_token = 1;
+    string exchange_token = 2;
+    string tradingsymbol = 3;
+    string name = 4;
+    string last_price = 5;
+    string expiry = 6;
+    string strike_price = 7;
+    string tick_size = 8;
+    string lot_size = 9;
+    string instrument_type = 10;
+    string segment = 11;
+    string exchange = 12;
+}
+
+message InstrumentList {
+    repeated Instrument instruments = 1;
+}

@@ -47,6 +47,7 @@ type KiteConfig struct {
 	TOTPKey      string `json:"totp_key"`
 	LoginURL     string `json:"login_url"`
 	TwoFAURL     string `json:"twofa_url"`
+	DataPath     string `json:"data_path"`
 }
 
 // GetConfig loads configuration and handles errors internally

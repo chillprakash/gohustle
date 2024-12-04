@@ -66,6 +66,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	expiries, err := kiteConnect.GetInstrumentExpiries(ctx)
+	if err != nil {
+		log.Error("Failed to get instrument expiries", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+
+	log.Info("Retrieved instrument expiries", map[string]interface{}{
+		"instruments": len(expiries),
+	})
+
 	// Handle graceful shutdown
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)

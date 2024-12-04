@@ -5,22 +5,28 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"gohustle/config"
 	"gohustle/db"
+	"gohustle/filestore"
 	"gohustle/logger"
 
 	"net/http/cookiejar"
 
+	"io"
+
 	"github.com/pquerna/otp/totp"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
+
+	"google.golang.org/protobuf/proto"
 )
 
 type KiteConnector interface {
@@ -34,6 +40,12 @@ type KiteConnector interface {
 
 	// New method for downloading instrument data
 	DownloadInstrumentData(ctx context.Context) error
+
+	// New method
+	GetUpcomingExpiries(ctx context.Context) error
+
+	// GetInstrumentExpiries reads the gzipped instrument data and returns expiry dates
+	GetInstrumentExpiries(ctx context.Context) (map[string][]time.Time, error)
 }
 
 // Verify KiteConnect implements KiteConnector at compile time
@@ -61,9 +73,10 @@ func (r *LoginResponse) IsSuccess() bool {
 
 // KiteConnect handles broker interactions
 type KiteConnect struct {
-	Kite   *kiteconnect.Client
-	db     *db.TimescaleDB
-	config *config.KiteConfig
+	Kite      *kiteconnect.Client
+	db        *db.TimescaleDB
+	config    *config.KiteConfig
+	fileStore filestore.FileStore
 }
 
 // NewKiteConnect initializes KiteConnect with token management
@@ -73,9 +86,14 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 
 	// Create a new KiteConnect instance
 	kite := &KiteConnect{
-		config: cfg,
-		db:     database,
+		config:    cfg,
+		db:        database,
+		fileStore: filestore.NewDiskFileStore(),
 	}
+
+	log.Info("Initializing KiteConnect client", map[string]interface{}{
+		"api_key": cfg.APIKey,
+	})
 
 	// Initialize KiteConnect client
 	kite.Kite = kiteconnect.New(cfg.APIKey)
@@ -88,6 +106,21 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 		})
 		os.Exit(1)
 	}
+
+	// Get the latest token and set it
+	token, err := kite.GetToken(ctx)
+	if err != nil {
+		log.Error("Failed to get token", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+
+	// Set the access token
+	kite.Kite.SetAccessToken(token)
+	log.Info("Set access token for Kite client", map[string]interface{}{
+		"token_length": len(token),
+	})
 
 	log.Info("Successfully initialized KiteConnect", nil)
 
@@ -132,6 +165,30 @@ func (k *KiteConnect) GetToken(ctx context.Context) (string, error) {
 	return token, nil
 }
 
+// GenerateAccessToken generates and sets the access token using the request token
+func (k *KiteConnect) GenerateAccessToken(ctx context.Context, requestToken string) (string, error) {
+	log := logger.GetLogger()
+
+	// Generate session to get access token
+	session, err := k.Kite.GenerateSession(requestToken, k.config.APISecret)
+	if err != nil {
+		log.Error("Failed to generate session", map[string]interface{}{
+			"error":      err.Error(),
+			"error_type": fmt.Sprintf("%T", err),
+		})
+		return "", err
+	}
+
+	accessToken := session.AccessToken
+	k.Kite.SetAccessToken(accessToken)
+
+	log.Info("Access token generated successfully", map[string]interface{}{
+		"access_token": accessToken,
+	})
+
+	return accessToken, nil
+}
+
 // RefreshAccessToken refreshes the access token
 func (k *KiteConnect) RefreshAccessToken(ctx context.Context) error {
 	if k.checkExistingToken(ctx) {
@@ -143,7 +200,25 @@ func (k *KiteConnect) RefreshAccessToken(ctx context.Context) error {
 	loginResult := k.performLogin(client)
 	k.performTwoFactorAuth(client, loginResult)
 	requestToken := k.getRequestToken(client)
-	k.generateAndStoreSession(ctx, requestToken)
+
+	// Generate and set the access token
+	accessToken, err := k.GenerateAccessToken(ctx, requestToken)
+	if err != nil {
+		log := logger.GetLogger()
+		log.Error("Failed to refresh access token", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// Save the token directly
+	if err := k.storeToken(ctx, accessToken); err != nil {
+		log := logger.GetLogger()
+		log.Error("Failed to save access token", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
 
 	return nil
 }
@@ -283,63 +358,25 @@ func (k *KiteConnect) getRequestToken(client *http.Client) string {
 }
 
 func (k *KiteConnect) extractRequestToken(errorMsg string) string {
-	var requestToken string
-
-	if strings.Contains(errorMsg, "request_token=") {
-		parts := strings.Split(errorMsg, "request_token=")
-		if len(parts) > 1 {
-			requestToken = strings.Split(parts[1], "&")[0]
-		}
-	} else {
-		requestToken = strings.TrimPrefix(errorMsg, "got request token: ")
-	}
-
-	requestToken = strings.TrimSpace(requestToken)
-
-	log := logger.GetLogger()
-	log.Info("Successfully extracted request token", map[string]interface{}{
-		"request_token": requestToken,
-		"token_length":  len(requestToken),
-	})
-
-	if requestToken == "" {
-		return ""
-	}
-
-	return requestToken
-}
-
-func (k *KiteConnect) generateAndStoreSession(ctx context.Context, requestToken string) {
 	log := logger.GetLogger()
 
-	// Generate session
-	data, err := k.Kite.GenerateSession(requestToken, k.config.APISecret)
-	if err != nil {
-		log.Error("Failed to generate session", map[string]interface{}{
-			"error":         err.Error(),
-			"request_token": requestToken,
+	// Extract token after "request_token=" with optional ending
+	re := regexp.MustCompile(`request_token=([^&"]+)(&.*)?`)
+	matches := re.FindStringSubmatch(errorMsg)
+
+	if len(matches) > 1 {
+		token := matches[1]
+		log.Info("Successfully extracted request token", map[string]interface{}{
+			"request_token": token,
+			"token_length":  len(token),
 		})
-		os.Exit(1)
+		return token
 	}
 
-	if data.AccessToken == "" {
-		log.Error("No access token in session response", nil)
-		os.Exit(1)
-	}
-
-	// Store the access token
-	if err := k.storeToken(ctx, data.AccessToken); err != nil {
-		log.Error("Failed to store access token", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
-
-	log.Info("Successfully generated and stored access token", map[string]interface{}{
-		"token_length": len(data.AccessToken),
+	log.Error("Failed to extract request token", map[string]interface{}{
+		"error_msg": errorMsg,
 	})
-
-	k.Kite.SetAccessToken(data.AccessToken)
+	return ""
 }
 
 // GetCurrentSpotPriceOfAllIndices fetches current spot prices for all indices
@@ -426,6 +463,24 @@ type InstrumentData struct {
 	Exchange        string  `json:"exchange"`
 }
 
+// Add this helper method
+func (k *KiteConnect) getDataPath() string {
+	dataPath := "data"
+	if k.config != nil && k.config.DataPath != "" {
+		dataPath = k.config.DataPath
+	}
+	// Ensure directory exists
+	if err := os.MkdirAll(dataPath, 0755); err != nil {
+		log := logger.GetLogger()
+		log.Error("Failed to create data directory", map[string]interface{}{
+			"error": err.Error(),
+		})
+		os.Exit(1)
+	}
+	return dataPath
+}
+
+// Update DownloadInstrumentData method
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 	log := logger.GetLogger()
 
@@ -433,182 +488,246 @@ func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 	instrumentNames := []string{"NIFTY", "BANKNIFTY", "MIDCPNIFTY", "FINNIFTY", "SENSEX", "BANKEX"}
 
 	// Get all instruments
-	instruments, err := k.Kite.GetInstruments()
+	allInstruments, err := k.Kite.GetInstruments()
 	if err != nil {
 		log.Error("Failed to download instruments", map[string]interface{}{
 			"error": err.Error(),
 		})
-		os.Exit(1)
+		return err // Return error instead of os.Exit(1)
 	}
 
 	log.Info("Downloaded raw data", map[string]interface{}{
-		"count": len(instruments),
+		"total_count": len(allInstruments),
 	})
 
-	// Create data directory if it doesn't exist
-	dataPath := "data"
-	if err := os.MkdirAll(dataPath, 0755); err != nil {
-		log.Error("Failed to create data directory", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
+	// Filter instruments
+	filteredInstruments := make([]kiteconnect.Instrument, 0)
+	for _, inst := range allInstruments {
+		for _, name := range instrumentNames {
+			if inst.Name == name {
+				filteredInstruments = append(filteredInstruments, inst)
+				break
+			}
+		}
 	}
 
-	// Save complete dataset
-	k.saveCompleteData(instruments, dataPath)
+	log.Info("Filtered instruments", map[string]interface{}{
+		"total_count":    len(allInstruments),
+		"filtered_count": len(filteredInstruments),
+		"instruments":    instrumentNames,
+	})
 
-	// Save individual instrument files
-	k.saveInstrumentFiles(instruments, instrumentNames, dataPath)
+	// Get current date for file naming
+	currentDate := time.Now().Format("02-01-2006")
+
+	// Marshal the filtered instruments
+	data, err := proto.Marshal(convertToProtoInstruments(filteredInstruments))
+	if err != nil {
+		log.Error("Failed to marshal instruments", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// Save using filestore
+	if err := k.fileStore.SaveGzippedProto("instruments", currentDate, data); err != nil {
+		log.Error("Failed to save instruments", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
 
 	return nil
 }
 
-func (k *KiteConnect) saveCompleteData(instruments []kiteconnect.Instrument, dataPath string) {
+// Helper function to convert kiteconnect.Instrument to proto message
+func convertToProtoInstruments(instruments []kiteconnect.Instrument) *InstrumentList {
+	protoInstruments := make([]*Instrument, 0, len(instruments))
+
+	for _, inst := range instruments {
+		protoInst := &Instrument{
+			InstrumentToken: fmt.Sprintf("%d", inst.InstrumentToken),
+			ExchangeToken:   fmt.Sprintf("%d", inst.ExchangeToken),
+			Tradingsymbol:   inst.Tradingsymbol,
+			Name:            inst.Name,
+			LastPrice:       fmt.Sprintf("%.2f", inst.LastPrice),
+			Expiry:          inst.Expiry.Time.Format("02-01-2006"),
+			StrikePrice:     fmt.Sprintf("%.2f", inst.StrikePrice),
+			TickSize:        fmt.Sprintf("%.2f", inst.TickSize),
+			LotSize:         fmt.Sprintf("%d", int(inst.LotSize)),
+			InstrumentType:  inst.InstrumentType,
+			Segment:         inst.Segment,
+			Exchange:        inst.Exchange,
+		}
+		protoInstruments = append(protoInstruments, protoInst)
+	}
+
+	return &InstrumentList{
+		Instruments: protoInstruments,
+	}
+}
+
+type ExpiryData struct {
+	Symbol       string
+	StrikesCount int
+}
+
+// Add this struct at the top with other structs
+type ExpiryDetails struct {
+	Date          time.Time
+	StrikesCount  int
+	InstrumentMap map[string][]string // map[instrument_type][]tradingsymbols
+}
+
+// Update GetUpcomingExpiries method
+func (k *KiteConnect) GetUpcomingExpiries(ctx context.Context) error {
 	log := logger.GetLogger()
 
-	// Create complete instruments file
-	filePath := filepath.Join(dataPath, "instruments.csv")
-	file, err := os.Create(filePath)
+	// Get data path using helper method
+	dataPath := k.getDataPath()
+
+	// Get all CSV files in the data directory
+	files, err := filepath.Glob(filepath.Join(dataPath, "*.csv"))
 	if err != nil {
-		log.Error("Failed to create complete data file", map[string]interface{}{
+		log.Error("Failed to read data directory", map[string]interface{}{
 			"error": err.Error(),
 		})
-		os.Exit(1)
+		return err
+	}
+
+	// Process NIFTY and BANKNIFTY files
+	for _, symbol := range []string{"NIFTY", "BANKNIFTY"} {
+		var symbolFile string
+		for _, file := range files {
+			if strings.Contains(file, symbol+"_") {
+				symbolFile = file
+				break
+			}
+		}
+
+		if symbolFile == "" {
+			log.Error("File not found for symbol", map[string]interface{}{
+				"symbol": symbol,
+			})
+			continue
+		}
+
+		err := k.processFile(symbolFile)
+		if err != nil {
+			log.Error("Failed to process file", map[string]interface{}{
+				"error":  err.Error(),
+				"symbol": symbol,
+			})
+			continue
+		}
+	}
+
+	return nil
+}
+
+func (k *KiteConnect) processFile(filePath string) error {
+	log := logger.GetLogger()
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
 	}
 	defer file.Close()
 
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
+	reader := csv.NewReader(file)
 
-	// Write header
-	header := []string{
-		"instrument_token", "exchange_token", "tradingsymbol", "name",
-		"last_price", "expiry", "tick_size", "lot_size",
-		"instrument_type", "segment", "exchange",
+	// Skip header
+	_, err = reader.Read()
+	if err != nil {
+		return fmt.Errorf("failed to read header: %w", err)
 	}
-	if err := writer.Write(header); err != nil {
-		log.Error("Failed to write header", map[string]interface{}{
+
+	// Read and log each expiry date
+	for {
+		record, err := reader.Read()
+		if err != nil {
+			if err == io.EOF {
+				break // End of file
+			}
+			return fmt.Errorf("failed to read record: %w", err)
+		}
+
+		expiryDate := record[5] // Assuming expiry date is in the 6th column
+		log.Info("Found expiry date", map[string]interface{}{
+			"expiry": expiryDate,
+		})
+	}
+
+	return nil
+}
+
+// GetInstrumentExpiries reads the gzipped instrument data and returns expiry dates
+func (k *KiteConnect) GetInstrumentExpiries(ctx context.Context) (map[string][]time.Time, error) {
+	log := logger.GetLogger()
+	currentDate := time.Now().Format("02-01-2006")
+
+	// Read the gzipped data
+	data, err := k.fileStore.ReadGzippedProto("instruments", currentDate)
+	if err != nil {
+		log.Error("Failed to read instrument data", map[string]interface{}{
+			"error": err.Error(),
+			"date":  currentDate,
+		})
+		return nil, err
+	}
+
+	// Unmarshal the protobuf data
+	instrumentList := &InstrumentList{}
+	if err := proto.Unmarshal(data, instrumentList); err != nil {
+		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
 			"error": err.Error(),
 		})
-		os.Exit(1)
+		return nil, err
 	}
 
-	// Write data
-	for _, instrument := range instruments {
-		record := []string{
-			fmt.Sprintf("%d", instrument.InstrumentToken),
-			fmt.Sprintf("%d", instrument.ExchangeToken),
-			instrument.Tradingsymbol,
-			instrument.Name,
-			fmt.Sprintf("%f", instrument.LastPrice),
-			instrument.Expiry.String(),
-			fmt.Sprintf("%f", instrument.TickSize),
-			fmt.Sprintf("%d", instrument.LotSize),
-			instrument.InstrumentType,
-			instrument.Segment,
-			instrument.Exchange,
-		}
-		if err := writer.Write(record); err != nil {
-			log.Error("Failed to write record", map[string]interface{}{
-				"error": err.Error(),
+	// Map to store expiries for each instrument
+	expiryMap := make(map[string][]time.Time)
+
+	// Process each instrument
+	for _, inst := range instrumentList.Instruments {
+		// Parse expiry date
+		expiry, err := time.Parse("02-01-2006", inst.Expiry)
+		if err != nil {
+			log.Error("Failed to parse expiry date", map[string]interface{}{
+				"error":         err.Error(),
+				"instrument":    inst.Name,
+				"tradingsymbol": inst.Tradingsymbol,
+				"expiry":        inst.Expiry,
 			})
-			os.Exit(1)
+			continue
+		}
+
+		// Add expiry to map if it's in the future
+		if expiry.After(time.Now()) {
+			expiryMap[inst.Name] = append(expiryMap[inst.Name], expiry)
 		}
 	}
 
-	fileInfo, err := file.Stat()
-	if err == nil {
-		fileSizeMB := float64(fileInfo.Size()) / (1024 * 1024)
-		log.Info("Saved complete data", map[string]interface{}{
-			"file":         "instruments.csv",
-			"file_size_mb": round(fileSizeMB, 2),
+	// Sort expiries for each instrument
+	for name, expiries := range expiryMap {
+		sort.Slice(expiries, func(i, j int) bool {
+			return expiries[i].Before(expiries[j])
+		})
+
+		log.Info("Found expiries", map[string]interface{}{
+			"instrument": name,
+			"count":      len(expiries),
+			"expiries":   formatExpiries(expiries),
 		})
 	}
+
+	return expiryMap, nil
 }
 
-func (k *KiteConnect) saveInstrumentFiles(instruments []kiteconnect.Instrument, instrumentNames []string, dataPath string) {
-	log := logger.GetLogger()
-	currentDate := time.Now().Format("02-01-06")
-
-	// Group instruments by name
-	instrumentMap := make(map[string][]kiteconnect.Instrument)
-	for _, instrument := range instruments {
-		for _, name := range instrumentNames {
-			if instrument.Name == name {
-				instrumentMap[name] = append(instrumentMap[name], instrument)
-			}
-		}
+// Helper function to format expiry dates for logging
+func formatExpiries(expiries []time.Time) []string {
+	formatted := make([]string, len(expiries))
+	for i, expiry := range expiries {
+		formatted[i] = expiry.Format("02-Jan-2006")
 	}
-
-	// Save each instrument's data
-	for name, items := range instrumentMap {
-		fileName := fmt.Sprintf("%s_%s.csv", name, currentDate)
-		filePath := filepath.Join(dataPath, fileName)
-		file, err := os.Create(filePath)
-		if err != nil {
-			log.Error("Failed to create instrument file", map[string]interface{}{
-				"error": err.Error(),
-				"name":  name,
-			})
-			os.Exit(1)
-		}
-		defer file.Close()
-
-		writer := csv.NewWriter(file)
-		defer writer.Flush()
-
-		// Write header
-		header := []string{
-			"instrument_token", "exchange_token", "tradingsymbol", "name",
-			"last_price", "expiry", "tick_size", "lot_size",
-			"instrument_type", "segment", "exchange",
-		}
-		if err := writer.Write(header); err != nil {
-			log.Error("Failed to write header", map[string]interface{}{
-				"error": err.Error(),
-				"name":  name,
-			})
-			os.Exit(1)
-		}
-
-		// Write data
-		for _, instrument := range items {
-			record := []string{
-				fmt.Sprintf("%d", instrument.InstrumentToken),
-				fmt.Sprintf("%d", instrument.ExchangeToken),
-				instrument.Tradingsymbol,
-				instrument.Name,
-				fmt.Sprintf("%f", instrument.LastPrice),
-				instrument.Expiry.String(),
-				fmt.Sprintf("%f", instrument.TickSize),
-				fmt.Sprintf("%d", instrument.LotSize),
-				instrument.InstrumentType,
-				instrument.Segment,
-				instrument.Exchange,
-			}
-			if err := writer.Write(record); err != nil {
-				log.Error("Failed to write record", map[string]interface{}{
-					"error": err.Error(),
-					"name":  name,
-				})
-				os.Exit(1)
-			}
-		}
-
-		fileInfo, err := file.Stat()
-		if err == nil {
-			fileSizeMB := float64(fileInfo.Size()) / (1024 * 1024)
-			log.Info("Saved instrument data", map[string]interface{}{
-				"instrument":   name,
-				"records":      len(items),
-				"file_size_mb": round(fileSizeMB, 2),
-			})
-		}
-	}
-}
-
-// Helper function to round float64 to n decimal places
-func round(num float64, decimals int) float64 {
-	shift := math.Pow(10, float64(decimals))
-	return math.Round(num*shift) / shift
+	return formatted
 }

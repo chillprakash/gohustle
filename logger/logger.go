@@ -12,20 +12,19 @@ import (
 
 type Logger struct {
 	*log.Logger
-	mu sync.Mutex
+	mu    sync.Mutex
+	debug bool // Flag to enable/disable debug logging
 }
 
 var (
-	instance    *Logger
-	once        sync.Once
-	istLocation *time.Location
+	instance *Logger
+	once     sync.Once
 )
 
 func init() {
-	var err error
-	istLocation, err = time.LoadLocation("Asia/Kolkata")
+	_, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
-		istLocation = time.UTC
+		// Fallback to UTC if IST loading fails
 	}
 }
 
@@ -62,6 +61,7 @@ func setupLogger() *Logger {
 
 	return &Logger{
 		Logger: log.New(file, "", 0),
+		debug:  false, // Default to false, no debug logs
 	}
 }
 
@@ -129,6 +129,36 @@ func (l *Logger) Error(msg string, props ...map[string]interface{}) {
 	}
 
 	l.Println(l.formatMessage("ERROR", msg, properties))
+}
+
+func (l *Logger) Debug(msg string, props ...map[string]interface{}) {
+	if !l.debug {
+		return // Do not log if debug is disabled
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	var properties map[string]interface{}
+	if len(props) > 0 {
+		properties = props[0]
+	}
+
+	l.Println(l.formatMessage("DEBUG", msg, properties))
+}
+
+// EnableDebug enables debug logging
+func (l *Logger) EnableDebug() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.debug = true
+}
+
+// DisableDebug disables debug logging
+func (l *Logger) DisableDebug() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.debug = false
 }
 
 // WithLogger is a struct decorator pattern for Go

@@ -18,6 +18,7 @@ type KiteOperations interface {
 type InstrumentOperations interface {
 	DownloadInstrumentData(ctx context.Context) error
 	SyncInstrumentExpiriesFromFileToDB(ctx context.Context) error
+	GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error)
 }
 
 // KiteOperations combines all operations

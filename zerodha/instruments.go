@@ -12,6 +12,23 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+// OptionTokenPair pairs a trading symbol with its instrument token
+type OptionTokenPair struct {
+	Symbol          string
+	InstrumentToken string
+}
+
+// ExpiryOptions contains calls and puts for a specific expiry
+type ExpiryOptions struct {
+	Calls []OptionTokenPair
+	Puts  []OptionTokenPair
+}
+
+// InstrumentExpiryMap organizes options by instrument and expiry
+type InstrumentExpiryMap struct {
+	Data map[string]map[time.Time]ExpiryOptions
+}
+
 // DownloadInstrumentData downloads and saves instrument data
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 	log := logger.GetLogger()
@@ -261,4 +278,153 @@ func convertToProtoInstruments(instruments []kiteconnect.Instrument) *Instrument
 	return &InstrumentList{
 		Instruments: protoInstruments,
 	}
+}
+
+// GetInstrumentExpirySymbolMap reads instrument data and organizes trading symbols
+func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error) {
+	log := logger.GetLogger()
+	currentDate := time.Now().Format("02-01-2006")
+
+	data, err := k.fileStore.ReadGzippedProto("instruments", currentDate)
+	if err != nil {
+		log.Error("Failed to read instrument data", map[string]interface{}{
+			"error": err.Error(),
+			"date":  currentDate,
+		})
+		return nil, fmt.Errorf("failed to read instrument data: %w", err)
+	}
+
+	instrumentList := &InstrumentList{}
+	if err := proto.Unmarshal(data, instrumentList); err != nil {
+		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to unmarshal instrument data: %w", err)
+	}
+
+	result := &InstrumentExpiryMap{
+		Data: make(map[string]map[time.Time]ExpiryOptions),
+	}
+
+	// Process each instrument
+	for _, inst := range instrumentList.Instruments {
+		// Skip if not an option
+		if inst.InstrumentType != "CE" && inst.InstrumentType != "PE" {
+			continue
+		}
+
+		// Parse expiry date
+		expiry, err := time.Parse("02-01-2006", inst.Expiry)
+		if err != nil {
+			log.Error("Failed to parse expiry date", map[string]interface{}{
+				"error":         err.Error(),
+				"tradingsymbol": inst.Tradingsymbol,
+			})
+			continue
+		}
+
+		// Initialize maps if needed
+		if result.Data[inst.Name] == nil {
+			result.Data[inst.Name] = make(map[time.Time]ExpiryOptions)
+		}
+		if _, exists := result.Data[inst.Name][expiry]; !exists {
+			result.Data[inst.Name][expiry] = ExpiryOptions{
+				Calls: make([]OptionTokenPair, 0),
+				Puts:  make([]OptionTokenPair, 0),
+			}
+		}
+
+		// Create option pair
+		pair := OptionTokenPair{
+			Symbol:          inst.Tradingsymbol,
+			InstrumentToken: inst.InstrumentToken,
+		}
+
+		// Add to appropriate slice based on option type
+		options := result.Data[inst.Name][expiry]
+		if inst.InstrumentType == "CE" {
+			options.Calls = append(options.Calls, pair)
+		} else {
+			options.Puts = append(options.Puts, pair)
+		}
+		result.Data[inst.Name][expiry] = options
+	}
+
+	// Sort the options for each expiry
+	for instrument := range result.Data {
+		for expiry := range result.Data[instrument] {
+			options := result.Data[instrument][expiry]
+
+			// Sort calls
+			sort.Slice(options.Calls, func(i, j int) bool {
+				return options.Calls[i].Symbol < options.Calls[j].Symbol
+			})
+
+			// Sort puts
+			sort.Slice(options.Puts, func(i, j int) bool {
+				return options.Puts[i].Symbol < options.Puts[j].Symbol
+			})
+
+			result.Data[instrument][expiry] = options
+		}
+	}
+
+	log.Debug("Created instrument expiry map", map[string]interface{}{
+		"instruments_count": len(result.Data),
+		"options":           countOptions(result),
+		"sample":            formatSampleData(result),
+	})
+
+	return result, nil
+}
+
+func countOptions(m *InstrumentExpiryMap) map[string]map[string]int {
+	counts := make(map[string]map[string]int)
+	for inst := range m.Data {
+		counts[inst] = make(map[string]int)
+		for _, options := range m.Data[inst] {
+			counts[inst]["calls"] += len(options.Calls)
+			counts[inst]["puts"] += len(options.Puts)
+		}
+	}
+	return counts
+}
+
+// Helper function to format sample data
+func formatSampleData(m *InstrumentExpiryMap) map[string]map[string]interface{} {
+	sample := make(map[string]map[string]interface{})
+
+	for inst, expiryMap := range m.Data {
+		sample[inst] = make(map[string]interface{})
+
+		for expiry, options := range expiryMap {
+			dateKey := expiry.Format("2006-01-02")
+			sample[inst][dateKey] = map[string]interface{}{
+				"calls_count":  len(options.Calls),
+				"puts_count":   len(options.Puts),
+				"sample_calls": formatOptionSample(options.Calls, 3),
+				"sample_puts":  formatOptionSample(options.Puts, 3),
+			}
+		}
+	}
+	return sample
+}
+
+func formatOptionSample(options []OptionTokenPair, limit int) []map[string]string {
+	if len(options) == 0 {
+		return nil
+	}
+
+	if limit > len(options) {
+		limit = len(options)
+	}
+
+	sample := make([]map[string]string, limit)
+	for i := 0; i < limit; i++ {
+		sample[i] = map[string]string{
+			"symbol": options[i].Symbol,
+			"token":  options[i].InstrumentToken,
+		}
+	}
+	return sample
 }

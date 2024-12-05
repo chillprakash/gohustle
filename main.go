@@ -52,35 +52,52 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Find upcoming expiry (normalize dates to start of day)
-	now := time.Now().Truncate(24 * time.Hour)
-	var upcomingExpiry time.Time
-
-	for expiry := range symbolMap.Data["NIFTY"] {
-		// Normalize expiry to start of day
-		normalizedExpiry := expiry.Truncate(24 * time.Hour)
-		if normalizedExpiry.After(now) || normalizedExpiry.Equal(now) {
-			if upcomingExpiry.IsZero() || normalizedExpiry.Before(upcomingExpiry) {
-				upcomingExpiry = expiry
-			}
-		}
+	// Get upcoming expiry tokens for NIFTY and SENSEX
+	tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, []string{"NIFTY", "SENSEX"})
+	if err != nil {
+		log.Error("Failed to get upcoming expiry tokens", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
 	}
 
-	// Log NIFTY options for upcoming expiry
-	if !upcomingExpiry.IsZero() {
-		niftyOptions := symbolMap.Data["NIFTY"][upcomingExpiry]
+	log.Info("Got tokens for upcoming NIFTY and SENSEX expiry", map[string]interface{}{
+		"tokens_count": len(tokens),
+		"tokens":       tokens,
+	})
 
-		log.Info("NIFTY CALLS", map[string]interface{}{
-			"expiry":        upcomingExpiry.Format("2006-01-02"),
-			"symbols_count": len(niftyOptions.Calls),
-			"symbols":       formatOptionTokenPairs(niftyOptions.Calls),
-		})
+	instruments := []string{"NIFTY", "SENSEX"}
+	now := time.Now().Truncate(24 * time.Hour)
 
-		log.Info("NIFTY PUTS", map[string]interface{}{
-			"expiry":        upcomingExpiry.Format("2006-01-02"),
-			"symbols_count": len(niftyOptions.Puts),
-			"symbols":       formatOptionTokenPairs(niftyOptions.Puts),
-		})
+	for _, instrument := range instruments {
+		var upcomingExpiry time.Time
+
+		// Find upcoming expiry for each instrument
+		for expiry := range symbolMap.Data[instrument] {
+			normalizedExpiry := expiry.Truncate(24 * time.Hour)
+			if normalizedExpiry.After(now) || normalizedExpiry.Equal(now) {
+				if upcomingExpiry.IsZero() || normalizedExpiry.Before(upcomingExpiry) {
+					upcomingExpiry = expiry
+				}
+			}
+		}
+
+		// Log options for upcoming expiry
+		if !upcomingExpiry.IsZero() {
+			options := symbolMap.Data[instrument][upcomingExpiry]
+
+			log.Info(fmt.Sprintf("%s CALLS", instrument), map[string]interface{}{
+				"expiry":        upcomingExpiry.Format("2006-01-02"),
+				"symbols_count": len(options.Calls),
+				"symbols":       formatOptionTokenPairs(options.Calls),
+			})
+
+			log.Info(fmt.Sprintf("%s PUTS", instrument), map[string]interface{}{
+				"expiry":        upcomingExpiry.Format("2006-01-02"),
+				"symbols_count": len(options.Puts),
+				"symbols":       formatOptionTokenPairs(options.Puts),
+			})
+		}
 	}
 
 	// Handle graceful shutdown

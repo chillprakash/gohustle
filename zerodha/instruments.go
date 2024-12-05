@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"gohustle/logger"
@@ -28,6 +29,17 @@ type ExpiryOptions struct {
 type InstrumentExpiryMap struct {
 	Data map[string]map[time.Time]ExpiryOptions
 }
+
+type TokenInfo struct {
+	Expiry time.Time
+	Symbol string
+}
+
+var (
+	tokensCache        map[string]string
+	reverseLookupCache map[string]TokenInfo
+	once sync.Once
+)
 
 // DownloadInstrumentData downloads and saves instrument data
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
@@ -138,6 +150,35 @@ func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[s
 	}
 
 	return convertExpiryMapToSortedSlices(expiryMap), nil
+}
+
+// CreateLookupMapWithExpiryVSTokenMap extracts instrument tokens and creates a reverse lookup map
+func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *InstrumentExpiryMap) (map[string]string, map[string]TokenInfo) {
+	once.Do(func() {
+		tokensCache = make(map[string]string)
+		reverseLookupCache = make(map[string]TokenInfo)
+
+		for _, expiryMap := range instrumentMap.Data {
+			for expiry, options := range expiryMap {
+				for _, call := range options.Calls {
+					tokensCache[call.InstrumentToken] = call.Symbol
+					reverseLookupCache[call.InstrumentToken] = TokenInfo{
+						Expiry: expiry,
+						Symbol: call.Symbol,
+					}
+				}
+				for _, put := range options.Puts {
+					tokensCache[put.InstrumentToken] = put.Symbol
+					reverseLookupCache[put.InstrumentToken] = TokenInfo{
+						Expiry: expiry,
+						Symbol: put.Symbol,
+					}
+				}
+			}
+		}
+	})
+
+	return tokensCache, reverseLookupCache
 }
 
 // SaveInstrumentExpiries saves the expiry dates to the database
@@ -427,4 +468,50 @@ func formatOptionSample(options []OptionTokenPair, limit int) []map[string]strin
 		}
 	}
 	return sample
+}
+
+func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error) {
+	// Get the full instrument map
+	symbolMap, err := k.GetInstrumentExpirySymbolMap(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get instrument map: %w", err)
+	}
+
+	// Get token lookup maps (using cached version)
+	_, tokenInfo := k.CreateLookupMapWithExpiryVSTokenMap(symbolMap)
+
+	// Find upcoming expiry
+	now := time.Now().Truncate(24 * time.Hour)
+	upcomingExpiry := make(map[string]time.Time)
+
+	for _, instrument := range instruments {
+		if expiryMap, exists := symbolMap.Data[instrument]; exists {
+			var minExpiry time.Time
+			for expiry := range expiryMap {
+				normalizedExpiry := expiry.Truncate(24 * time.Hour)
+				if normalizedExpiry.After(now) || normalizedExpiry.Equal(now) {
+					if minExpiry.IsZero() || normalizedExpiry.Before(minExpiry) {
+						minExpiry = normalizedExpiry
+					}
+				}
+			}
+			if !minExpiry.IsZero() {
+				upcomingExpiry[instrument] = minExpiry
+			}
+		}
+	}
+
+	// Collect tokens for upcoming expiry
+	tokens := make([]string, 0)
+	for token, info := range tokenInfo {
+		for _, instrument := range instruments {
+			if expiry, exists := upcomingExpiry[instrument]; exists {
+				if info.Expiry.Equal(expiry) {
+					tokens = append(tokens, token)
+				}
+			}
+		}
+	}
+
+	return tokens, nil
 }

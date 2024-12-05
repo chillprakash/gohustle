@@ -19,10 +19,12 @@ type InstrumentOperations interface {
 	DownloadInstrumentData(ctx context.Context) error
 	SyncInstrumentExpiriesFromFileToDB(ctx context.Context) error
 	GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error)
+	CreateLookupMapWithExpiryVSTokenMap(instrumentMap *InstrumentExpiryMap) (map[string]string, map[string]TokenInfo)
+	GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error)
 }
 
 // KiteOperations combines all operations
-type KiteConnector interface {
+type KiteConnector interface {	
 	TokenOperations
 	InstrumentOperations
 	KiteOperations

@@ -27,36 +27,8 @@ func main() {
 	var kiteConnect zerodha.KiteConnector
 	kiteConnect = zerodha.NewKiteConnect(database, &cfg.Kite)
 
-	// Fetch the latest valid access token
-	token, err := kiteConnect.GetToken(ctx)
-	if err != nil {
-		log.Error("Failed to get access token", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
-
-	// Log the access token
-	log.Info("Access Token Retrieved", map[string]interface{}{
-		"access_token": token,
-	})
-
-	// Set the access token using the interface method
-	kiteConnect.SetAccessToken(token)
-
-	// Fetch current spot prices for all indices
-	// spotPrices, err := kiteConnect.GetCurrentSpotPriceOfAllIndices(ctx)
-	// if err != nil {
-	// 	log.Error("Failed to fetch spot prices", map[string]interface{}{
-	// 		"error": err.Error(),
-	// 	})
-	// 	os.Exit(1)
-	// }
-
-	// // Print the spot prices
-	// fmt.Println("Current Spot Prices:", spotPrices)
-
 	// Download instrument data
+	var err error
 	err = kiteConnect.DownloadInstrumentData(ctx)
 	if err != nil {
 		log.Error("Failed to download instrument data", map[string]interface{}{
@@ -65,19 +37,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	expiries, err := kiteConnect.GetInstrumentExpiries(ctx)
-	if err != nil {
-		log.Error("Failed to get instrument expiries", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
-
-	log.Info("Retrieved instrument expiries", map[string]interface{}{
-		"instruments": len(expiries),
-	})
-
-	err = kiteConnect.SaveInstrumentExpiriesToDB(ctx, expiries)
+	err = kiteConnect.SyncInstrumentExpiriesFromFileToDB(ctx)
 	if err != nil {
 		// handle error
 	}

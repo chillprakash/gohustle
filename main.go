@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -65,6 +66,38 @@ func main() {
 		"tokens_count": len(tokens),
 		"tokens":       tokens,
 	})
+
+	// Get token lookup maps
+	_, tokenInfo := kiteConnect.CreateLookupMapWithExpiryVSTokenMap(symbolMap)
+
+	// Get 10 random tokens from the available tokens
+	if len(tokens) > 10 {
+		// Create a random number generator with current time as seed
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		
+		// Shuffle the tokens slice
+		r.Shuffle(len(tokens), func(i, j int) {
+			tokens[i], tokens[j] = tokens[j], tokens[i]
+		})
+		
+		// Take first 10 tokens
+		tokens = tokens[:10]
+	}
+
+	// Perform reverse lookup for the selected tokens
+	log.Info("Reverse lookup for random tokens", map[string]interface{}{
+		"sample_size": len(tokens),
+	})
+
+	for _, token := range tokens {
+		if info, exists := tokenInfo[token]; exists {
+			log.Info("Token info", map[string]interface{}{
+				"token":  token,
+				"symbol": info.Symbol,
+				"expiry": info.Expiry.Format("2006-01-02"),
+			})
+		}
+	}
 
 	instruments := []string{"NIFTY", "SENSEX"}
 	now := time.Now().Truncate(24 * time.Hour)

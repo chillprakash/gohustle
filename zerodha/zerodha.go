@@ -46,6 +46,7 @@ type KiteConnector interface {
 
 	// GetInstrumentExpiries reads the gzipped instrument data and returns expiry dates
 	GetInstrumentExpiries(ctx context.Context) (map[string][]time.Time, error)
+	SaveInstrumentExpiriesToDB(ctx context.Context, expiries map[string][]time.Time) error
 }
 
 // Verify KiteConnect implements KiteConnector at compile time
@@ -684,8 +685,8 @@ func (k *KiteConnect) GetInstrumentExpiries(ctx context.Context) (map[string][]t
 		return nil, err
 	}
 
-	// Map to store expiries for each instrument
-	expiryMap := make(map[string][]time.Time)
+	// Map to store unique expiries for each instrument
+	expiryMap := make(map[string]map[time.Time]bool) // Using map for uniqueness
 
 	// Process each instrument
 	for _, inst := range instrumentList.Instruments {
@@ -702,25 +703,35 @@ func (k *KiteConnect) GetInstrumentExpiries(ctx context.Context) (map[string][]t
 		}
 
 		// Add expiry to map if it's in the future
-		if expiry.After(time.Now()) {
-			expiryMap[inst.Name] = append(expiryMap[inst.Name], expiry)
+		if expiryMap[inst.Name] == nil {
+			expiryMap[inst.Name] = make(map[time.Time]bool)
 		}
+		expiryMap[inst.Name][expiry] = true
 	}
 
-	// Sort expiries for each instrument
-	for name, expiries := range expiryMap {
+	// Convert map of sets to sorted slices
+	result := make(map[string][]time.Time)
+	for name, uniqueExpiries := range expiryMap {
+		expiries := make([]time.Time, 0, len(uniqueExpiries))
+		for expiry := range uniqueExpiries {
+			expiries = append(expiries, expiry)
+		}
+
+		// Sort expiries
 		sort.Slice(expiries, func(i, j int) bool {
 			return expiries[i].Before(expiries[j])
 		})
 
-		log.Info("Found expiries", map[string]interface{}{
+		result[name] = expiries
+
+		log.Info("Found unique expiries", map[string]interface{}{
 			"instrument": name,
 			"count":      len(expiries),
 			"expiries":   formatExpiries(expiries),
 		})
 	}
 
-	return expiryMap, nil
+	return result, nil
 }
 
 // Helper function to format expiry dates for logging
@@ -730,4 +741,62 @@ func formatExpiries(expiries []time.Time) []string {
 		formatted[i] = expiry.Format("02-Jan-2006")
 	}
 	return formatted
+}
+
+// InstrumentExpiry represents a row in the instrument_expiries table
+type InstrumentExpiry struct {
+	ID             int64     `db:"id"`
+	InstrumentName string    `db:"instrument_name"`
+	ExpiryDate     time.Time `db:"expiry_date"`
+	CreatedAt      time.Time `db:"created_at"`
+	UpdatedAt      time.Time `db:"updated_at"`
+	IsActive       bool      `db:"is_active"`
+}
+
+// SaveInstrumentExpiries saves the expiry dates to the database
+func (k *KiteConnect) SaveInstrumentExpiriesToDB(ctx context.Context, expiries map[string][]time.Time) error {
+	log := logger.GetLogger()
+
+	// First, mark all existing records as inactive
+	deactivateQuery := `
+		UPDATE instrument_expiries 
+		SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP 
+		WHERE is_active = TRUE
+	`
+	if _, err := k.db.Exec(ctx, deactivateQuery); err != nil {
+		log.Error("Failed to deactivate existing expiries", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// Insert new records
+	insertQuery := `
+		INSERT INTO instrument_expiries (instrument_name, expiry_date)
+		VALUES ($1, $2)
+		ON CONFLICT (instrument_name, expiry_date)
+		DO UPDATE SET 
+			is_active = TRUE,
+			updated_at = CURRENT_TIMESTAMP
+	`
+
+	for instrument, dates := range expiries {
+		for _, date := range dates {
+			if _, err := k.db.Exec(ctx, insertQuery, instrument, date); err != nil {
+				log.Error("Failed to insert expiry", map[string]interface{}{
+					"error":      err.Error(),
+					"instrument": instrument,
+					"expiry":     date,
+				})
+				return err
+			}
+		}
+
+		log.Info("Saved expiries for instrument", map[string]interface{}{
+			"instrument": instrument,
+			"count":      len(dates),
+		})
+	}
+
+	return nil
 }

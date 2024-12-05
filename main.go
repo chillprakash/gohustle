@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -46,16 +45,16 @@ func main() {
 	kiteConnect.SetAccessToken(token)
 
 	// Fetch current spot prices for all indices
-	spotPrices, err := kiteConnect.GetCurrentSpotPriceOfAllIndices(ctx)
-	if err != nil {
-		log.Error("Failed to fetch spot prices", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
+	// spotPrices, err := kiteConnect.GetCurrentSpotPriceOfAllIndices(ctx)
+	// if err != nil {
+	// 	log.Error("Failed to fetch spot prices", map[string]interface{}{
+	// 		"error": err.Error(),
+	// 	})
+	// 	os.Exit(1)
+	// }
 
-	// Print the spot prices
-	fmt.Println("Current Spot Prices:", spotPrices)
+	// // Print the spot prices
+	// fmt.Println("Current Spot Prices:", spotPrices)
 
 	// Download instrument data
 	err = kiteConnect.DownloadInstrumentData(ctx)
@@ -77,6 +76,11 @@ func main() {
 	log.Info("Retrieved instrument expiries", map[string]interface{}{
 		"instruments": len(expiries),
 	})
+
+	err = kiteConnect.SaveInstrumentExpiriesToDB(ctx, expiries)
+	if err != nil {
+		// handle error
+	}
 
 	// Handle graceful shutdown
 	c := make(chan os.Signal, 1)

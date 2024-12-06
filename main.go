@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
@@ -18,6 +16,10 @@ import (
 func main() {
 	log := logger.GetLogger()
 	ctx := context.Background()
+
+	// Create context with cancellation for graceful shutdown
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	// Load config
 	cfg := config.GetConfig()
@@ -45,13 +47,13 @@ func main() {
 	}
 
 	// Get instrument expiry symbol map
-	symbolMap, err := kiteConnect.GetInstrumentExpirySymbolMap(ctx)
-	if err != nil {
-		log.Error("Failed to get instrument expiry symbol map", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
+	// symbolMap, err := kiteConnect.GetInstrumentExpirySymbolMap(ctx)
+	// if err != nil {
+	// 	log.Error("Failed to get instrument expiry symbol map", map[string]interface{}{
+	// 		"error": err.Error(),
+	// 	})
+	// 	os.Exit(1)
+	// }
 
 	// Get upcoming expiry tokens for NIFTY and SENSEX
 	tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, []string{"NIFTY", "SENSEX"})
@@ -67,84 +69,47 @@ func main() {
 		"tokens":       tokens,
 	})
 
-	// Get token lookup maps
-	_, tokenInfo := kiteConnect.CreateLookupMapWithExpiryVSTokenMap(symbolMap)
-
-	// Get 10 random tokens from the available tokens
-	if len(tokens) > 10 {
-		// Create a random number generator with current time as seed
-		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		
-		// Shuffle the tokens slice
-		r.Shuffle(len(tokens), func(i, j int) {
-			tokens[i], tokens[j] = tokens[j], tokens[i]
+	// Connect ticker
+	if err := kiteConnect.ConnectTicker(); err != nil {
+		log.Error("Failed to connect ticker", map[string]interface{}{
+			"error": err.Error(),
 		})
-		
-		// Take first 10 tokens
-		tokens = tokens[:10]
+		return
 	}
 
-	// Perform reverse lookup for the selected tokens
-	log.Info("Reverse lookup for random tokens", map[string]interface{}{
-		"sample_size": len(tokens),
+	// Ensure ticker is closed on exit
+	defer func() {
+		log.Info("Closing ticker connections", nil)
+		if err := kiteConnect.CloseTicker(); err != nil {
+			log.Error("Error closing ticker", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}()
+
+	// Subscribe to all tokens
+	if err := kiteConnect.Subscribe(tokens); err != nil {
+		log.Error("Failed to subscribe to tokens", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Set up signal handling for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	// Wait for interrupt signal
+	sig := <-sigChan
+	log.Info("Received shutdown signal", map[string]interface{}{
+		"signal": sig.String(),
 	})
 
-	for _, token := range tokens {
-		if info, exists := tokenInfo[token]; exists {
-			log.Info("Token info", map[string]interface{}{
-				"token":  token,
-				"symbol": info.Symbol,
-				"expiry": info.Expiry.Format("2006-01-02"),
-			})
-		}
-	}
+	// Cancel context to initiate shutdown
+	cancel()
 
-	instruments := []string{"NIFTY", "SENSEX"}
-	now := time.Now().Truncate(24 * time.Hour)
+	// Give some time for cleanup
+	time.Sleep(time.Second)
 
-	for _, instrument := range instruments {
-		var upcomingExpiry time.Time
-
-		// Find upcoming expiry for each instrument
-		for expiry := range symbolMap.Data[instrument] {
-			normalizedExpiry := expiry.Truncate(24 * time.Hour)
-			if normalizedExpiry.After(now) || normalizedExpiry.Equal(now) {
-				if upcomingExpiry.IsZero() || normalizedExpiry.Before(upcomingExpiry) {
-					upcomingExpiry = expiry
-				}
-			}
-		}
-
-		// Log options for upcoming expiry
-		if !upcomingExpiry.IsZero() {
-			options := symbolMap.Data[instrument][upcomingExpiry]
-
-			log.Info(fmt.Sprintf("%s CALLS", instrument), map[string]interface{}{
-				"expiry":        upcomingExpiry.Format("2006-01-02"),
-				"symbols_count": len(options.Calls),
-				"symbols":       formatOptionTokenPairs(options.Calls),
-			})
-
-			log.Info(fmt.Sprintf("%s PUTS", instrument), map[string]interface{}{
-				"expiry":        upcomingExpiry.Format("2006-01-02"),
-				"symbols_count": len(options.Puts),
-				"symbols":       formatOptionTokenPairs(options.Puts),
-			})
-		}
-	}
-
-	// Handle graceful shutdown
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-
-	log.Info("Shutting down gracefully", nil)
-}
-
-func formatOptionTokenPairs(pairs []zerodha.OptionTokenPair) []string {
-	formatted := make([]string, len(pairs))
-	for i, pair := range pairs {
-		formatted[i] = fmt.Sprintf("%s(%s)", pair.Symbol, pair.InstrumentToken)
-	}
-	return formatted
+	log.Info("Shutdown complete", nil)
 }

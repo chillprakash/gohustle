@@ -38,7 +38,7 @@ type TokenInfo struct {
 var (
 	tokensCache        map[string]string
 	reverseLookupCache map[string]TokenInfo
-	once sync.Once
+	once               sync.Once
 )
 
 // DownloadInstrumentData downloads and saves instrument data
@@ -83,7 +83,7 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToDB(ctx context.Context) er
 		log.Error("Failed to read expiries from file", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return fmt.Errorf("failed to read expiries: %w", err)
+		return err
 	}
 
 	// Save expiries to DB
@@ -91,7 +91,7 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToDB(ctx context.Context) er
 		log.Error("Failed to save expiries to DB", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return fmt.Errorf("failed to save expiries: %w", err)
+		return err
 	}
 
 	log.Info("Successfully synced expiries from file to DB", map[string]interface{}{
@@ -332,7 +332,7 @@ func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*Instru
 			"error": err.Error(),
 			"date":  currentDate,
 		})
-		return nil, fmt.Errorf("failed to read instrument data: %w", err)
+		return nil, err
 	}
 
 	instrumentList := &InstrumentList{}
@@ -340,7 +340,7 @@ func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*Instru
 		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return nil, fmt.Errorf("failed to unmarshal instrument data: %w", err)
+		return nil, err
 	}
 
 	result := &InstrumentExpiryMap{
@@ -471,10 +471,15 @@ func formatOptionSample(options []OptionTokenPair, limit int) []map[string]strin
 }
 
 func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error) {
+	log := logger.GetLogger()
+
 	// Get the full instrument map
 	symbolMap, err := k.GetInstrumentExpirySymbolMap(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get instrument map: %w", err)
+		log.Error("Failed to get instrument map", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, err
 	}
 
 	// Get token lookup maps (using cached version)
@@ -512,6 +517,11 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments [
 			}
 		}
 	}
+
+	log.Info("Retrieved upcoming expiry tokens", map[string]interface{}{
+		"instruments":  instruments,
+		"tokens_count": len(tokens),
+	})
 
 	return tokens, nil
 }

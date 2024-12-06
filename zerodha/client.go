@@ -9,14 +9,22 @@ import (
 	"os"
 
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
+	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
 )
 
 type KiteConnect struct {
-	Kite      *kiteconnect.Client
-	db        *db.TimescaleDB
-	config    *config.KiteConfig
-	fileStore filestore.FileStore
+	Kite           *kiteconnect.Client
+	Tickers        []*kiteticker.Ticker
+	db             *db.TimescaleDB
+	config         *config.KiteConfig
+	fileStore      filestore.FileStore
+	tickWorkerPool chan struct{}
 }
+
+const (
+	MaxConnections         = 3
+	MaxTokensPerConnection = 3000
+)
 
 func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConnect {
 	log := logger.GetLogger()
@@ -26,6 +34,7 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 		config:    cfg,
 		db:        database,
 		fileStore: filestore.NewDiskFileStore(),
+		Tickers:   make([]*kiteticker.Ticker, MaxConnections),
 	}
 
 	log.Info("Initializing KiteConnect client", map[string]interface{}{
@@ -43,11 +52,25 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 	}
 
 	kite.Kite.SetAccessToken(token)
-	log.Info("Set access token for Kite client", map[string]interface{}{
-		"token_length": len(token),
+
+	// Initialize worker pool
+	workers := cfg.TickWorkers
+	if workers <= 0 {
+		workers = 500 // default if not set
+	}
+	kite.tickWorkerPool = make(chan struct{}, workers)
+	log.Info("Initialized tick worker pool", map[string]interface{}{
+		"workers": workers,
 	})
 
-	log.Info("Successfully initialized KiteConnect", nil)
+	// Initialize tickers
+	for i := 0; i < MaxConnections; i++ {
+		kite.Tickers[i] = kiteticker.New(cfg.APIKey, token)
+	}
+
+	log.Info("Successfully initialized KiteConnect", map[string]interface{}{
+		"token_length": len(token),
+	})
 
 	return kite
 }

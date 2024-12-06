@@ -24,6 +24,7 @@
         "totp_key": "WGUKEQ5RS5TNUWHWCE65HZD6VGZACVF2",
         "login_url": "https://kite.zerodha.com/api/login",
         "twofa_url": "https://kite.zerodha.com/api/twofa",
-        "data_path": "data"
+        "data_path": "data",
+        "tick_workers": 500
     }
 } 

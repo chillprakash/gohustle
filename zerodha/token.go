@@ -3,6 +3,7 @@ package zerodha
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -33,13 +34,18 @@ func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
 	log.Info("No valid token found, refreshing access token", nil)
 	token, err = k.refreshAccessToken(ctx)
 	if err != nil {
-		return "", fmt.Errorf("failed to refresh token: %w", err)
+		log.Error("Failed to refresh token", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return "", errors.New("failed to refresh token")
 	}
 
 	return token, nil
 }
 
 func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
+	log := logger.GetLogger()
+
 	client := k.initializeHTTPClient()
 	loginResult := k.performLogin(client)
 	k.performTwoFactorAuth(client, loginResult)
@@ -48,20 +54,18 @@ func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
 	// Generate and set the access token
 	accessToken, err := k.generateAccessToken(ctx, requestToken)
 	if err != nil {
-		log := logger.GetLogger()
-		log.Error("Failed to refresh access token", map[string]interface{}{
+		log.Error("Failed to generate access token", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return "", fmt.Errorf("failed to generate access token: %w", err)
+		return "", errors.New("failed to generate access token")
 	}
 
 	// Save the token directly
 	if err := k.storeToken(ctx, accessToken); err != nil {
-		log := logger.GetLogger()
 		log.Error("Failed to save access token", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return "", fmt.Errorf("failed to save access token: %w", err)
+		return "", errors.New("failed to save access token")
 	}
 
 	return accessToken, nil
@@ -152,6 +156,8 @@ func (k *KiteConnect) getRequestToken(client *http.Client) string {
 
 // GetToken retrieves the latest valid access token
 func (k *KiteConnect) getToken(ctx context.Context) (string, error) {
+	log := logger.GetLogger()
+
 	query := `
         SELECT access_token 
         FROM access_tokens 
@@ -165,7 +171,10 @@ func (k *KiteConnect) getToken(ctx context.Context) (string, error) {
 	var token string
 	err := k.db.QueryRow(ctx, query).Scan(&token)
 	if err != nil {
-		return "", fmt.Errorf("failed to get token: %w", err)
+		log.Error("Failed to get token from database", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return "", errors.New("failed to get token from database")
 	}
 
 	return token, nil
@@ -173,6 +182,8 @@ func (k *KiteConnect) getToken(ctx context.Context) (string, error) {
 
 // storeToken stores the access token in the database
 func (k *KiteConnect) storeToken(ctx context.Context, token string) error {
+	log := logger.GetLogger()
+
 	query := `
         WITH updated AS (
             UPDATE access_tokens 
@@ -185,7 +196,17 @@ func (k *KiteConnect) storeToken(ctx context.Context, token string) error {
     `
 
 	_, err := k.db.Exec(ctx, query, token)
-	return err
+	if err != nil {
+		log.Error("Failed to store token in database", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return errors.New("failed to store token in database")
+	}
+
+	log.Info("Successfully stored token", map[string]interface{}{
+		"token_length": len(token),
+	})
+	return nil
 }
 
 // GenerateAccessToken generates and sets the access token using the request token
@@ -198,14 +219,14 @@ func (k *KiteConnect) generateAccessToken(ctx context.Context, requestToken stri
 			"error":      err.Error(),
 			"error_type": fmt.Sprintf("%T", err),
 		})
-		return "", err
+		return "", errors.New("failed to generate session")
 	}
 
 	accessToken := session.AccessToken
 	k.Kite.SetAccessToken(accessToken)
 
 	log.Info("Access token generated successfully", map[string]interface{}{
-		"access_token": accessToken,
+		"token_length": len(accessToken),
 	})
 
 	return accessToken, nil

@@ -3,14 +3,14 @@ package zerodha
 import (
 	"context"
 	"encoding/csv"
-	"fmt"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"gohustle/logger"
-
-	"io"
 )
 
 // Verify KiteConnect implements KiteConnector at compile time
@@ -40,10 +40,10 @@ func (k *KiteConnect) GetCurrentSpotPriceOfAllIndices(ctx context.Context) (map[
 	if err != nil {
 		log.Error("Failed to fetch spot prices", map[string]interface{}{
 			"error":      err.Error(),
-			"error_type": fmt.Sprintf("%T", err),
+			"error_type": reflect.TypeOf(err).String(),
 			"symbols":    exchangeTradingSymbols,
 		})
-		return nil, fmt.Errorf("failed to fetch spot prices: %w", err)
+		return nil, errors.New("failed to fetch spot prices")
 	}
 
 	// Map exchange symbols to index names with their spot prices
@@ -86,15 +86,16 @@ type InstrumentData struct {
 
 // Add this helper method
 func (k *KiteConnect) getDataPath() string {
+	log := logger.GetLogger()
 	dataPath := "data"
 	if k.config != nil && k.config.DataPath != "" {
 		dataPath = k.config.DataPath
 	}
 	// Ensure directory exists
 	if err := os.MkdirAll(dataPath, 0755); err != nil {
-		log := logger.GetLogger()
 		log.Error("Failed to create data directory", map[string]interface{}{
 			"error": err.Error(),
+			"path":  dataPath,
 		})
 		os.Exit(1)
 	}
@@ -113,8 +114,9 @@ func (k *KiteConnect) GetUpcomingExpiries(ctx context.Context) error {
 	if err != nil {
 		log.Error("Failed to read data directory", map[string]interface{}{
 			"error": err.Error(),
+			"path":  dataPath,
 		})
-		return err
+		return errors.New("failed to read data directory")
 	}
 
 	// Process NIFTY and BANKNIFTY files
@@ -139,6 +141,7 @@ func (k *KiteConnect) GetUpcomingExpiries(ctx context.Context) error {
 			log.Error("Failed to process file", map[string]interface{}{
 				"error":  err.Error(),
 				"symbol": symbol,
+				"file":   symbolFile,
 			})
 			continue
 		}
@@ -151,7 +154,11 @@ func (k *KiteConnect) processFile(filePath string) error {
 	log := logger.GetLogger()
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
+		log.Error("Failed to open file", map[string]interface{}{
+			"error": err.Error(),
+			"path":  filePath,
+		})
+		return errors.New("failed to open file")
 	}
 	defer file.Close()
 
@@ -160,7 +167,11 @@ func (k *KiteConnect) processFile(filePath string) error {
 	// Skip header
 	_, err = reader.Read()
 	if err != nil {
-		return fmt.Errorf("failed to read header: %w", err)
+		log.Error("Failed to read header", map[string]interface{}{
+			"error": err.Error(),
+			"path":  filePath,
+		})
+		return errors.New("failed to read header")
 	}
 
 	// Read and log each expiry date
@@ -170,12 +181,17 @@ func (k *KiteConnect) processFile(filePath string) error {
 			if err == io.EOF {
 				break // End of file
 			}
-			return fmt.Errorf("failed to read record: %w", err)
+			log.Error("Failed to read record", map[string]interface{}{
+				"error": err.Error(),
+				"path":  filePath,
+			})
+			return errors.New("failed to read record")
 		}
 
 		expiryDate := record[5] // Assuming expiry date is in the 6th column
 		log.Info("Found expiry date", map[string]interface{}{
 			"expiry": expiryDate,
+			"file":   filePath,
 		})
 	}
 

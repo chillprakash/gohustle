@@ -23,11 +23,20 @@ type InstrumentOperations interface {
 	GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error)
 }
 
+// TickerOperations handles WebSocket ticker operations
+type TickerOperations interface {
+    // ConnectTicker(accessToken string) error
+    // Subscribe(tokens []string) error
+    // OnTick(handler func(tick kitemodels.Tick))
+    // Close() error
+}
+
 // KiteOperations combines all operations
 type KiteConnector interface {	
 	TokenOperations
 	InstrumentOperations
 	KiteOperations
+	TickerOperations
 }
 
 // Ensure KiteConnect implements all interfaces
@@ -35,4 +44,5 @@ var (
 	_ TokenOperations      = (*KiteConnect)(nil)
 	_ InstrumentOperations = (*KiteConnect)(nil)
 	_ KiteOperations       = (*KiteConnect)(nil)
+	_ TickerOperations     = (*KiteConnect)(nil)
 )

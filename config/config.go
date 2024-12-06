@@ -48,6 +48,7 @@ type KiteConfig struct {
 	LoginURL     string `json:"login_url"`
 	TwoFAURL     string `json:"twofa_url"`
 	DataPath     string `json:"data_path"`
+	TickWorkers  int    `json:"tick_workers"`
 }
 
 // GetConfig loads configuration and handles errors internally

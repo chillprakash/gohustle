@@ -2,6 +2,7 @@ package zerodha
 
 import (
 	"context"
+	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/db"
 	"gohustle/filestore"
@@ -16,9 +17,11 @@ type KiteConnect struct {
 	Kite           *kiteconnect.Client
 	Tickers        []*kiteticker.Ticker
 	db             *db.TimescaleDB
-	config         *config.KiteConfig
+	config         *config.Config
 	fileStore      filestore.FileStore
 	tickWorkerPool chan struct{}
+	redisCache     *cache.RedisCache
+	tickProcessor  *TickProcessor
 }
 
 const (
@@ -26,22 +29,27 @@ const (
 	MaxTokensPerConnection = 3000
 )
 
-func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConnect {
+func NewKiteConnect(database *db.TimescaleDB, cfg *config.Config) *KiteConnect {
 	log := logger.GetLogger()
 	ctx := context.Background()
 
+	// Initialize Redis cache
+	redisCache := cache.NewRedisCache(&cfg.Redis)
+
 	kite := &KiteConnect{
-		config:    cfg,
-		db:        database,
-		fileStore: filestore.NewDiskFileStore(),
-		Tickers:   make([]*kiteticker.Ticker, MaxConnections),
+		config:        cfg,
+		db:            database,
+		fileStore:     filestore.NewDiskFileStore(),
+		Tickers:       make([]*kiteticker.Ticker, MaxConnections),
+		redisCache:    redisCache,
+		tickProcessor: NewTickProcessor(database.GetPool()), // Initialize TickProcessor
 	}
 
 	log.Info("Initializing KiteConnect client", map[string]interface{}{
-		"api_key": cfg.APIKey,
+		"api_key": cfg.Kite.APIKey,
 	})
 
-	kite.Kite = kiteconnect.New(cfg.APIKey)
+	kite.Kite = kiteconnect.New(cfg.Kite.APIKey)
 
 	token, err := kite.GetValidToken(ctx)
 	if err != nil {
@@ -54,7 +62,7 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 	kite.Kite.SetAccessToken(token)
 
 	// Initialize worker pool
-	workers := cfg.TickWorkers
+	workers := cfg.Kite.TickWorkers
 	if workers <= 0 {
 		workers = 500 // default if not set
 	}
@@ -65,7 +73,7 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 
 	// Initialize tickers
 	for i := 0; i < MaxConnections; i++ {
-		kite.Tickers[i] = kiteticker.New(cfg.APIKey, token)
+		kite.Tickers[i] = kiteticker.New(cfg.Kite.APIKey, token)
 	}
 
 	log.Info("Successfully initialized KiteConnect", map[string]interface{}{
@@ -73,4 +81,20 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.KiteConfig) *KiteConne
 	})
 
 	return kite
+}
+
+// Add cleanup method
+func (k *KiteConnect) Close() {
+	if k.redisCache != nil {
+		k.redisCache.Close()
+	}
+
+	// Add TickProcessor cleanup
+	ctx := context.Background()
+	k.tickProcessor.FlushTimeScale(ctx) // Final flush of DB batch
+	k.tickProcessor.FlushProtobuf(ctx)  // Final flush of file batch
+
+	// Close channels
+	close(k.tickProcessor.timescaleChan)
+	close(k.tickProcessor.protobufChan)
 }

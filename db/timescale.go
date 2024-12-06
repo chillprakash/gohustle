@@ -101,6 +101,10 @@ func (db *TimescaleDB) GetConfig() *config.TimescaleConfig {
 	return db.config
 }
 
+func (t *TimescaleDB) GetPool() *pgxpool.Pool {
+	return t.pool
+}
+
 // Close closes the database connection
 func (db *TimescaleDB) Close() {
 	if db.pool != nil {

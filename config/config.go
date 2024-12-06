@@ -33,10 +33,19 @@ type TimescaleConfig struct {
 }
 
 type RedisConfig struct {
-	Host           string `json:"host"`
-	Port           int    `json:"port"`
-	DB             int    `json:"db"`
-	MaxConnections int    `json:"max_connections"`
+	Host            string `json:"host"`
+	Port            string `json:"port"`
+	Password        string `json:"password"`
+	MaxConnections  int    `json:"max_connections"`
+	MinConnections  int    `json:"min_connections"`
+	ConnectTimeout  string `json:"connect_timeout"`
+	MaxConnLifetime string `json:"max_conn_lifetime"`
+	MaxConnIdleTime string `json:"max_conn_idle_time"`
+
+	// Private fields to store parsed durations
+	connectTimeoutDuration  time.Duration
+	maxConnLifetimeDuration time.Duration
+	maxConnIdleTimeDuration time.Duration
 }
 
 type KiteConfig struct {
@@ -138,4 +147,38 @@ func (t *TimescaleConfig) GetMaxConnLifetime() time.Duration {
 
 func (t *TimescaleConfig) GetMaxConnIdleTime() time.Duration {
 	return t.maxConnIdleTimeDuration
+}
+
+// Add method to parse duration strings
+func (r *RedisConfig) ParseDurations() error {
+	var err error
+	r.connectTimeoutDuration, err = time.ParseDuration(r.ConnectTimeout)
+	if err != nil {
+		return fmt.Errorf("invalid connect_timeout duration: %w", err)
+	}
+
+	r.maxConnLifetimeDuration, err = time.ParseDuration(r.MaxConnLifetime)
+	if err != nil {
+		return fmt.Errorf("invalid max_conn_lifetime duration: %w", err)
+	}
+
+	r.maxConnIdleTimeDuration, err = time.ParseDuration(r.MaxConnIdleTime)
+	if err != nil {
+		return fmt.Errorf("invalid max_conn_idle_time duration: %w", err)
+	}
+
+	return nil
+}
+
+// Add getter methods
+func (r *RedisConfig) GetConnectTimeout() time.Duration {
+	return r.connectTimeoutDuration
+}
+
+func (r *RedisConfig) GetMaxConnLifetime() time.Duration {
+	return r.maxConnLifetimeDuration
+}
+
+func (r *RedisConfig) GetMaxConnIdleTime() time.Duration {
+	return r.maxConnIdleTimeDuration
 }

@@ -29,7 +29,7 @@ func main() {
 	defer database.Close()
 
 	// Initialize KiteConnect with interface
-	kiteConnect := zerodha.NewKiteConnect(database, &cfg.Kite)
+	kiteConnect := zerodha.NewKiteConnect(database, cfg)
 
 	// Download instrument data
 	var err error

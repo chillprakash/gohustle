@@ -74,15 +74,15 @@ func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
 func (k *KiteConnect) performLogin(client *http.Client) *LoginResponse {
 	log := logger.GetLogger()
 	loginData := url.Values{}
-	loginData.Set("user_id", k.config.UserID)
-	loginData.Set("password", k.config.UserPassword)
+	loginData.Set("user_id", k.config.Kite.UserID)
+	loginData.Set("password", k.config.Kite.UserPassword)
 
 	log.Info("Attempting login", map[string]interface{}{
-		"user_id": k.config.UserID,
-		"url":     k.config.LoginURL,
+		"user_id": k.config.Kite.UserID,
+		"url":     k.config.Kite.LoginURL,
 	})
 
-	loginResp, err := client.PostForm(k.config.LoginURL, loginData)
+	loginResp, err := client.PostForm(k.config.Kite.LoginURL, loginData)
 	if err != nil {
 		log.Error("Login request failed", map[string]interface{}{
 			"error": err.Error(),
@@ -104,7 +104,7 @@ func (k *KiteConnect) performLogin(client *http.Client) *LoginResponse {
 
 func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *LoginResponse) {
 	log := logger.GetLogger()
-	totpCode, err := totp.GenerateCode(k.config.TOTPKey, time.Now())
+	totpCode, err := totp.GenerateCode(k.config.Kite.TOTPKey, time.Now())
 	if err != nil {
 		log.Error("Failed to generate TOTP", map[string]interface{}{
 			"error": err.Error(),
@@ -113,7 +113,7 @@ func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *Log
 	}
 
 	twoFAData := url.Values{}
-	twoFAData.Set("user_id", k.config.UserID)
+	twoFAData.Set("user_id", k.config.Kite.UserID)
 	twoFAData.Set("request_id", loginResult.Data.RequestID)
 	twoFAData.Set("twofa_value", totpCode)
 	twoFAData.Set("twofa_type", "totp")
@@ -122,7 +122,7 @@ func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *Log
 		"request_id": loginResult.Data.RequestID,
 	})
 
-	twoFAResp, err := client.PostForm(k.config.TwoFAURL, twoFAData)
+	twoFAResp, err := client.PostForm(k.config.Kite.TwoFAURL, twoFAData)
 	if err != nil {
 		log.Error("2FA request failed", map[string]interface{}{
 			"error": err.Error(),
@@ -136,7 +136,7 @@ func (k *KiteConnect) getRequestToken(client *http.Client) string {
 	log := logger.GetLogger()
 	kiteLoginURL := fmt.Sprintf(
 		"https://kite.zerodha.com/connect/login?api_key=%s&v=3",
-		k.config.APIKey,
+		k.config.Kite.APIKey,
 	)
 
 	log.Info("Attempting to get request token", map[string]interface{}{
@@ -213,7 +213,7 @@ func (k *KiteConnect) storeToken(ctx context.Context, token string) error {
 func (k *KiteConnect) generateAccessToken(ctx context.Context, requestToken string) (string, error) {
 	log := logger.GetLogger()
 
-	session, err := k.Kite.GenerateSession(requestToken, k.config.APISecret)
+	session, err := k.Kite.GenerateSession(requestToken, k.config.Kite.APISecret)
 	if err != nil {
 		log.Error("Failed to generate session", map[string]interface{}{
 			"error":      err.Error(),

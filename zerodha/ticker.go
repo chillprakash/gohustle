@@ -1,6 +1,7 @@
 package zerodha
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"time"
@@ -147,27 +148,13 @@ func (k *KiteConnect) handleTick(tick kitemodels.Tick) {
 func (k *KiteConnect) processTickData(tick kitemodels.Tick) {
 	log := logger.GetLogger()
 
-	log.Info("Processing tick", map[string]interface{}{
-		"mode":             tick.Mode,
-		"instrument_token": tick.InstrumentToken,
-		"is_tradable":      tick.IsTradable,
-		"is_index":         tick.IsIndex,
-		"timestamp":        tick.Timestamp,
-		"last_trade_time":  tick.LastTradeTime,
-		"last_price":       tick.LastPrice,
-		"last_traded_qty":  tick.LastTradedQuantity,
-		"total_buy_qty":    tick.TotalBuyQuantity,
-		"total_sell_qty":   tick.TotalSellQuantity,
-		"volume_traded":    tick.VolumeTraded,
-		"total_buy":        tick.TotalBuy,
-		"total_sell":       tick.TotalSell,
-		"avg_trade_price":  tick.AverageTradePrice,
-		"oi":               tick.OI,
-		"oi_day_high":      tick.OIDayHigh,
-		"oi_day_low":       tick.OIDayLow,
-		"net_change":       tick.NetChange,
-		"depth":            tick.Depth,
-	})
+	// Publish to Redis stream
+	if err := k.PublishTickData(context.Background(), tick.InstrumentToken, &tick); err != nil {
+		log.Error("Failed to publish tick data", map[string]interface{}{
+			"error": err.Error(),
+			"token": tick.InstrumentToken,
+		})
+	}
 }
 
 func (k *KiteConnect) onError(err error) {

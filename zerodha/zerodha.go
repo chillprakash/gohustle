@@ -88,8 +88,8 @@ type InstrumentData struct {
 func (k *KiteConnect) getDataPath() string {
 	log := logger.GetLogger()
 	dataPath := "data"
-	if k.config != nil && k.config.DataPath != "" {
-		dataPath = k.config.DataPath
+	if k.config != nil && k.config.Kite.DataPath != "" {
+		dataPath = k.config.Kite.DataPath
 	}
 	// Ensure directory exists
 	if err := os.MkdirAll(dataPath, 0755); err != nil {

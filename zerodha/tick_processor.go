@@ -11,15 +11,17 @@ import (
 	"bufio"
 	"encoding/binary"
 
-	"github.com/golang/protobuf/proto"
+	proto "gohustle/proto"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	googleproto "google.golang.org/protobuf/proto"
 )
 
 type TickProcessor struct {
 	// Channels for buffering
-	timescaleChan chan *TickData
-	protobufChan  chan *TickData
+	timescaleChan chan *proto.TickData
+	protobufChan  chan *proto.TickData
 
 	// Batch configurations
 	batchConfig struct {
@@ -33,8 +35,8 @@ type TickProcessor struct {
 	}
 
 	// Batch collectors
-	dbBatch   []*TickData
-	fileBatch []*TickData
+	dbBatch   []*proto.TickData
+	fileBatch []*proto.TickData
 
 	pool *pgxpool.Pool
 }
@@ -42,8 +44,8 @@ type TickProcessor struct {
 func NewTickProcessor(pool *pgxpool.Pool) *TickProcessor {
 	return &TickProcessor{
 		pool:          pool,
-		timescaleChan: make(chan *TickData, 10000),
-		protobufChan:  make(chan *TickData, 10000),
+		timescaleChan: make(chan *proto.TickData, 10000),
+		protobufChan:  make(chan *proto.TickData, 10000),
 		batchConfig: struct {
 			DBBatchSize       int
 			DBFlushInterval   time.Duration
@@ -56,6 +58,11 @@ func NewTickProcessor(pool *pgxpool.Pool) *TickProcessor {
 			FileFlushInterval: 5 * time.Second, // or every 5 seconds
 		},
 	}
+}
+
+// Add this method to KiteConnect
+func (k *KiteConnect) ProcessTickTask(handler func(context.Context, uint32, *proto.TickData) error) {
+	k.asynqQueue.ProcessTickTask(handler)
 }
 
 // TimeScale batch processor
@@ -76,13 +83,13 @@ func (p *KiteConnect) processTimeScaleBatch(ctx context.Context) {
 			p.tickProcessor.dbBatch = append(p.tickProcessor.dbBatch, tick)
 			if len(p.tickProcessor.dbBatch) >= p.tickProcessor.batchConfig.DBBatchSize {
 				p.tickProcessor.saveBatchToTimeScale(p.tickProcessor.dbBatch)
-				p.tickProcessor.dbBatch = make([]*TickData, 0, p.tickProcessor.batchConfig.DBBatchSize)
+				p.tickProcessor.dbBatch = make([]*proto.TickData, 0, p.tickProcessor.batchConfig.DBBatchSize)
 			}
 
 		case <-ticker.C:
 			if len(p.tickProcessor.dbBatch) > 0 {
 				p.tickProcessor.saveBatchToTimeScale(p.tickProcessor.dbBatch)
-				p.tickProcessor.dbBatch = make([]*TickData, 0, p.tickProcessor.batchConfig.DBBatchSize)
+				p.tickProcessor.dbBatch = make([]*proto.TickData, 0, p.tickProcessor.batchConfig.DBBatchSize)
 			}
 		}
 	}
@@ -106,19 +113,19 @@ func (p *KiteConnect) processProtobufFile(ctx context.Context) {
 			p.tickProcessor.fileBatch = append(p.tickProcessor.fileBatch, tick)
 			if len(p.tickProcessor.fileBatch) >= p.tickProcessor.batchConfig.FileBatchSize {
 				p.tickProcessor.appendBatchToProtobufFile(p.tickProcessor.fileBatch)
-				p.tickProcessor.fileBatch = make([]*TickData, 0, p.tickProcessor.batchConfig.FileBatchSize)
+				p.tickProcessor.fileBatch = make([]*proto.TickData, 0, p.tickProcessor.batchConfig.FileBatchSize)
 			}
 
 		case <-ticker.C:
 			if len(p.tickProcessor.fileBatch) > 0 {
 				p.tickProcessor.appendBatchToProtobufFile(p.tickProcessor.fileBatch)
-				p.tickProcessor.fileBatch = make([]*TickData, 0, p.tickProcessor.batchConfig.FileBatchSize)
+				p.tickProcessor.fileBatch = make([]*proto.TickData, 0, p.tickProcessor.batchConfig.FileBatchSize)
 			}
 		}
 	}
 }
 
-func (p *TickProcessor) saveBatchToTimeScale(batch []*TickData) error {
+func (p *TickProcessor) saveBatchToTimeScale(batch []*proto.TickData) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -167,7 +174,7 @@ func (p *TickProcessor) saveBatchToTimeScale(batch []*TickData) error {
 	return err
 }
 
-func (p *TickProcessor) appendBatchToProtobufFile(batch []*TickData) error {
+func (p *TickProcessor) appendBatchToProtobufFile(batch []*proto.TickData) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -193,7 +200,7 @@ func (p *TickProcessor) appendBatchToProtobufFile(batch []*TickData) error {
 
 	// Write each message with length prefix
 	for _, tick := range batch {
-		data, err := proto.Marshal(tick)
+		data, err := googleproto.Marshal(tick)
 		if err != nil {
 			continue
 		}

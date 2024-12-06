@@ -25,21 +25,9 @@ type InstrumentOperations interface {
 	GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error)
 }
 
-// TickerOperations handles WebSocket ticker operations
-type TickerOperations interface {
-	// ConnectTicker(accessToken string) error
-	// Subscribe(tokens []string) error
-	// OnTick(handler func(tick kitemodels.Tick))
-	// Close() error
-	StartProcessing(ctx context.Context) error
-}
-
-// ZerodhaRedisInterface defines Zerodha-specific Redis operations
-type ZerodhaRedisInterface interface {
-	// Tick Stream operations
-	PublishTickData(ctx context.Context, instrumentToken uint32, tick *models.Tick) error
-	ConsumeTickData(ctx context.Context, instrumentToken uint32, handler func([]byte)) error
-	ConsumeMultipleTickData(ctx context.Context, tokens []uint32, handler func(uint32, []byte)) error
+type AsynqQueueOperations interface {
+	EnqueueTickData(ctx context.Context, tick *models.Tick) error
+	DequeueTickData(ctx context.Context) (*models.Tick, error)
 }
 
 // KiteOperations combines all operations
@@ -47,15 +35,11 @@ type KiteConnector interface {
 	TokenOperations
 	InstrumentOperations
 	KiteOperations
-	TickerOperations
-	ZerodhaRedisInterface
 }
 
 // Ensure KiteConnect implements all interfaces
 var (
-	_ TokenOperations       = (*KiteConnect)(nil)
-	_ InstrumentOperations  = (*KiteConnect)(nil)
-	_ KiteOperations        = (*KiteConnect)(nil)
-	_ TickerOperations      = (*KiteConnect)(nil)
-	_ ZerodhaRedisInterface = (*KiteConnect)(nil)
+	_ TokenOperations      = (*KiteConnect)(nil)
+	_ InstrumentOperations = (*KiteConnect)(nil)
+	_ KiteOperations       = (*KiteConnect)(nil)
 )

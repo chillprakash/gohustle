@@ -14,6 +14,7 @@ type Config struct {
 	Timescale TimescaleConfig `json:"timescale"`
 	Redis     RedisConfig     `json:"redis"`
 	Kite      KiteConfig      `json:"kite"`
+	Asynq     AsynqConfig     `json:"asynq"`
 }
 
 type TimescaleConfig struct {
@@ -58,6 +59,16 @@ type KiteConfig struct {
 	TwoFAURL     string `json:"twofa_url"`
 	DataPath     string `json:"data_path"`
 	TickWorkers  int    `json:"tick_workers"`
+}
+
+type AsynqConfig struct {
+	Host        string         `json:"host"`
+	Port        string         `json:"port"`
+	Password    string         `json:"password"`
+	DB          int            `json:"db"`
+	Concurrency int            `json:"concurrency"`
+	RetryLimit  int            `json:"retry_limit"`
+	Queues      map[string]int `json:"queues"`
 }
 
 // GetConfig loads configuration and handles errors internally

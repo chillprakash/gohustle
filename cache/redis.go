@@ -5,6 +5,7 @@ import (
 	"errors"
 	"gohustle/config"
 	"gohustle/logger"
+	"strings"
 	"sync"
 
 	"github.com/redis/go-redis/v9"
@@ -28,10 +29,14 @@ type RedisInterface interface {
 
 	// Stream operations
 	XAdd(ctx context.Context, stream string, values interface{}) error
-	XRead(ctx context.Context, stream string, lastID string, count int64) ([]redis.XStream, error)
+	XRead(ctx context.Context, args *redis.XReadArgs) ([]redis.XStream, error)
 	XGroupCreate(ctx context.Context, stream, group, start string) error
 	XReadGroup(ctx context.Context, group, consumer string, streams ...string) ([]redis.XStream, error)
 	XAck(ctx context.Context, stream, group string, ids ...string) error
+	Exists(ctx context.Context, key string) (int64, error)
+	SIsMember(ctx context.Context, key string, member interface{}) *redis.BoolCmd
+	SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd
+	SMembers(ctx context.Context, key string) *redis.StringSliceCmd
 }
 
 // Verify RedisCache implements RedisInterface at compile time
@@ -178,25 +183,64 @@ func (rc *RedisCache) XAdd(ctx context.Context, stream string, values interface{
 		Values: values,
 	}).Err()
 }
-
-func (rc *RedisCache) XRead(ctx context.Context, stream string, lastID string, count int64) ([]redis.XStream, error) {
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		return nil, errors.New("redis client not initialized")
-	}
-	return client.XRead(ctx, &redis.XReadArgs{
-		Streams: []string{stream, lastID},
-		Count:   count,
-		Block:   0,
-	}).Result()
-}
-
 func (rc *RedisCache) XGroupCreate(ctx context.Context, stream, group, start string) error {
+	log := logger.GetLogger()
+
+	log.Info("Attempting to create consumer group", map[string]interface{}{
+		"stream": stream,
+		"group":  group,
+		"start":  start,
+	})
+
 	client := rc.GetDefaultRedisDB0()
 	if client == nil {
+		log.Error("Redis client not initialized", map[string]interface{}{
+			"stream": stream,
+			"group":  group,
+		})
 		return errors.New("redis client not initialized")
 	}
-	return client.XGroupCreate(ctx, stream, group, start).Err()
+
+	log.Debug("Got Redis client, creating group", map[string]interface{}{
+		"stream": stream,
+		"group":  group,
+	})
+
+	// Add debug for actual Redis command
+	log.Debug("Executing XGroupCreate command", map[string]interface{}{
+		"stream":        stream,
+		"group":         group,
+		"start":         start,
+		"client_status": client.PoolStats(),
+	})
+
+	result := client.XGroupCreate(ctx, stream, group, start)
+	if result.Err() != nil {
+		if strings.Contains(result.Err().Error(), "BUSYGROUP") {
+			log.Info("Consumer group already exists", map[string]interface{}{
+				"stream": stream,
+				"group":  group,
+				"start":  start,
+			})
+			return nil // Not an error case
+		}
+		log.Error("XGroupCreate command failed", map[string]interface{}{
+			"error":      result.Err().Error(),
+			"stream":     stream,
+			"group":      group,
+			"start":      start,
+			"raw_result": result.String(),
+		})
+		return result.Err()
+	}
+
+	log.Info("Successfully created new consumer group", map[string]interface{}{
+		"stream": stream,
+		"group":  group,
+		"start":  start,
+		"result": result.String(),
+	})
+	return nil
 }
 
 func (rc *RedisCache) XReadGroup(ctx context.Context, group, consumer string, streams ...string) ([]redis.XStream, error) {
@@ -219,4 +263,81 @@ func (rc *RedisCache) XAck(ctx context.Context, stream, group string, ids ...str
 		return errors.New("redis client not initialized")
 	}
 	return client.XAck(ctx, stream, group, ids...).Err()
+}
+
+func (rc *RedisCache) Exists(ctx context.Context, key string) (int64, error) {
+	client := rc.GetDefaultRedisDB0()
+	if client == nil {
+		return 0, errors.New("redis client not initialized")
+	}
+	return client.Exists(ctx, key).Result()
+}
+
+// SIsMember checks if a member exists in a set
+func (rc *RedisCache) SIsMember(ctx context.Context, key string, member interface{}) *redis.BoolCmd {
+	log := logger.GetLogger()
+
+	client := rc.GetDefaultRedisDB0()
+	if client == nil {
+		log.Error("Redis client not initialized", map[string]interface{}{
+			"key":    key,
+			"member": member,
+		})
+		return redis.NewBoolCmd(ctx)
+	}
+
+	log.Debug("Checking set membership", map[string]interface{}{
+		"key":    key,
+		"member": member,
+	})
+
+	return client.SIsMember(ctx, key, member)
+}
+
+// SAdd adds members to a set
+func (rc *RedisCache) SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd {
+	log := logger.GetLogger()
+
+	client := rc.GetDefaultRedisDB0()
+	if client == nil {
+		log.Error("Redis client not initialized", map[string]interface{}{
+			"key":     key,
+			"members": members,
+		})
+		return redis.NewIntCmd(ctx)
+	}
+
+	log.Debug("Adding to set", map[string]interface{}{
+		"key":     key,
+		"members": members,
+	})
+
+	return client.SAdd(ctx, key, members...)
+}
+
+// Optional: Add method to get all members
+func (rc *RedisCache) SMembers(ctx context.Context, key string) *redis.StringSliceCmd {
+	log := logger.GetLogger()
+
+	client := rc.GetDefaultRedisDB0()
+	if client == nil {
+		log.Error("Redis client not initialized", map[string]interface{}{
+			"key": key,
+		})
+		return redis.NewStringSliceCmd(ctx)
+	}
+
+	log.Debug("Getting set members", map[string]interface{}{
+		"key": key,
+	})
+
+	return client.SMembers(ctx, key)
+}
+
+func (rc *RedisCache) XRead(ctx context.Context, args *redis.XReadArgs) ([]redis.XStream, error) {
+	client := rc.GetDefaultRedisDB0()
+	if client == nil {
+		return nil, errors.New("redis client not initialized")
+	}
+	return client.XRead(ctx, args).Result()
 }

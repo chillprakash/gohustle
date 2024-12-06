@@ -7,7 +7,12 @@ import (
 	"time"
 
 	"gohustle/logger"
+	"gohustle/proto"
 
+	asynq "github.com/hibiken/asynq"
+	googleproto "google.golang.org/protobuf/proto"
+
+	"github.com/zerodha/gokiteconnect/v4/models"
 	kitemodels "github.com/zerodha/gokiteconnect/v4/models"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
 )
@@ -127,20 +132,44 @@ func (k *KiteConnect) CloseTicker() error {
 
 // Internal handlers
 func (k *KiteConnect) handleTick(tick kitemodels.Tick) {
+	log := logger.GetLogger()
+
+	log.Debug("Received tick", map[string]interface{}{
+		"token":     tick.InstrumentToken,
+		"price":     tick.LastPrice,
+		"quantity":  tick.LastTradedQuantity,
+		"timestamp": tick.Timestamp,
+	})
+
 	select {
 	case k.tickWorkerPool <- struct{}{}: // Acquire worker
 		go func() {
 			defer func() {
 				<-k.tickWorkerPool // Release worker
+				log.Debug("Released worker", map[string]interface{}{
+					"token":          tick.InstrumentToken,
+					"workers_in_use": len(k.tickWorkerPool),
+					"total_workers":  cap(k.tickWorkerPool),
+				})
 			}()
+
+			startTime := time.Now()
 			k.processTickData(tick)
+
+			log.Debug("Processed tick", map[string]interface{}{
+				"token":           tick.InstrumentToken,
+				"processing_time": time.Since(startTime).Milliseconds(),
+				"workers_in_use":  len(k.tickWorkerPool),
+			})
 		}()
 	default:
 		// Worker pool is full, log warning
-		log := logger.GetLogger()
 		log.Error("Tick worker pool is full, dropping tick", map[string]interface{}{
 			"instrument_token": tick.InstrumentToken,
-			"workers":          cap(k.tickWorkerPool),
+			"workers_in_use":   len(k.tickWorkerPool),
+			"total_workers":    cap(k.tickWorkerPool),
+			"last_price":       tick.LastPrice,
+			"timestamp":        tick.Timestamp,
 		})
 	}
 }
@@ -148,13 +177,57 @@ func (k *KiteConnect) handleTick(tick kitemodels.Tick) {
 func (k *KiteConnect) processTickData(tick kitemodels.Tick) {
 	log := logger.GetLogger()
 
-	// Publish to Redis stream
-	if err := k.PublishTickData(context.Background(), tick.InstrumentToken, &tick); err != nil {
-		log.Error("Failed to publish tick data", map[string]interface{}{
+	// Convert to protobuf
+	protoTick := &proto.TickData{
+		InstrumentToken:    tick.InstrumentToken,
+		IsTradable:         tick.IsTradable,
+		IsIndex:            tick.IsIndex,
+		Mode:               tick.Mode,
+		Timestamp:          tick.Timestamp.Unix(),
+		LastTradeTime:      tick.LastTradeTime.Unix(),
+		LastPrice:          tick.LastPrice,
+		LastTradedQuantity: tick.LastTradedQuantity,
+		TotalBuyQuantity:   tick.TotalBuyQuantity,
+		TotalSellQuantity:  tick.TotalSellQuantity,
+		VolumeTraded:       tick.VolumeTraded,
+		TotalBuy:           tick.TotalBuy,
+		TotalSell:          tick.TotalSell,
+		AverageTradePrice:  tick.AverageTradePrice,
+		Oi:                 tick.OI,
+		OiDayHigh:          tick.OIDayHigh,
+		OiDayLow:           tick.OIDayLow,
+		NetChange:          tick.NetChange,
+		Ohlc: &proto.TickData_OHLC{
+			Open:  tick.OHLC.Open,
+			High:  tick.OHLC.High,
+			Low:   tick.OHLC.Low,
+			Close: tick.OHLC.Close,
+		},
+	}
+
+	// Serialize protobuf
+	payload, err := googleproto.Marshal(protoTick)
+	if err != nil {
+		log.Error("Failed to marshal proto tick", map[string]interface{}{
 			"error": err.Error(),
 			"token": tick.InstrumentToken,
 		})
+		return
 	}
+
+	task := asynq.NewTask("process_tick", payload, asynq.Queue("ticks"))
+	if err := k.asynqQueue.Enqueue(context.Background(), task); err != nil {
+		log.Error("Failed to enqueue tick", map[string]interface{}{
+			"error": err.Error(),
+			"token": tick.InstrumentToken,
+		})
+		return
+	}
+
+	log.Info("Enqueued proto tick", map[string]interface{}{
+		"token": tick.InstrumentToken,
+		"price": tick.LastPrice,
+	})
 }
 
 func (k *KiteConnect) onError(err error) {
@@ -194,4 +267,17 @@ func (k *KiteConnect) onNoReconnect(attempt int) {
 	log.Error("Ticker max reconnect attempts reached", map[string]interface{}{
 		"attempts": attempt,
 	})
+}
+
+// Helper function to convert depth items
+func convertDepth(items []models.DepthItem) []*proto.TickData_DepthItem {
+	result := make([]*proto.TickData_DepthItem, len(items))
+	for i, item := range items {
+		result[i] = &proto.TickData_DepthItem{
+			Price:    item.Price,
+			Quantity: uint32(item.Quantity),
+			Orders:   uint32(item.Orders),
+		}
+	}
+	return result
 }

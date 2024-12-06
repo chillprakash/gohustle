@@ -2,11 +2,11 @@ package zerodha
 
 import (
 	"context"
-	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/db"
 	"gohustle/filestore"
 	"gohustle/logger"
+	"gohustle/queue"
 	"os"
 
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
@@ -20,8 +20,8 @@ type KiteConnect struct {
 	config         *config.Config
 	fileStore      filestore.FileStore
 	tickWorkerPool chan struct{}
-	redisCache     *cache.RedisCache
 	tickProcessor  *TickProcessor
+	asynqQueue     *queue.AsynqQueue
 }
 
 const (
@@ -29,21 +29,31 @@ const (
 	MaxTokensPerConnection = 3000
 )
 
-func NewKiteConnect(database *db.TimescaleDB, cfg *config.Config) *KiteConnect {
+func NewKiteConnect(database *db.TimescaleDB, cfg *config.Config, asynqQueue *queue.AsynqQueue) *KiteConnect {
 	log := logger.GetLogger()
 	ctx := context.Background()
 
-	// Initialize Redis cache
-	redisCache := cache.NewRedisCache(&cfg.Redis)
-
 	kite := &KiteConnect{
-		config:        cfg,
+		config: cfg,
+
 		db:            database,
 		fileStore:     filestore.NewDiskFileStore(),
 		Tickers:       make([]*kiteticker.Ticker, MaxConnections),
-		redisCache:    redisCache,
 		tickProcessor: NewTickProcessor(database.GetPool()), // Initialize TickProcessor
+		asynqQueue:    asynqQueue,
 	}
+
+	// Start Asynq server in a goroutine
+	go func() {
+		if err := asynqQueue.Start(); err != nil {
+			log.Error("Failed to start Asynq server", map[string]interface{}{
+				"error": err.Error(),
+			})
+			os.Exit(1)
+		}
+	}()
+
+	log.Info("Started Asynq server", nil)
 
 	log.Info("Initializing KiteConnect client", map[string]interface{}{
 		"api_key": cfg.Kite.APIKey,
@@ -85,9 +95,6 @@ func NewKiteConnect(database *db.TimescaleDB, cfg *config.Config) *KiteConnect {
 
 // Add cleanup method
 func (k *KiteConnect) Close() {
-	if k.redisCache != nil {
-		k.redisCache.Close()
-	}
 
 	// Add TickProcessor cleanup
 	ctx := context.Background()

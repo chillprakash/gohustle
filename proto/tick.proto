@@ -52,3 +52,14 @@ message TickData {
     }
     Depth depth = 20;
 }
+
+message BatchMetadata {
+    int64 timestamp = 1;      // When this batch was created
+    int32 batch_size = 2;     // Number of ticks in batch
+    int32 retry_count = 3;    // Number of retry attempts for this batch
+}
+
+message TickBatch {
+    repeated TickData ticks = 1;      // Array of tick data
+    BatchMetadata metadata = 2;       // Metadata about this batch
+}

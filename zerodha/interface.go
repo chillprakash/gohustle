@@ -2,6 +2,7 @@ package zerodha
 
 import (
 	"context"
+	proto "gohustle/proto"
 
 	"github.com/zerodha/gokiteconnect/v4/models"
 )
@@ -23,6 +24,7 @@ type InstrumentOperations interface {
 	GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error)
 	CreateLookupMapWithExpiryVSTokenMap(instrumentMap *InstrumentExpiryMap) (map[string]string, map[string]TokenInfo)
 	GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error)
+	GetInstrumentInfo(token string) (TokenInfo, bool)
 }
 
 type AsynqQueueOperations interface {
@@ -35,6 +37,10 @@ type KiteConnector interface {
 	TokenOperations
 	InstrumentOperations
 	KiteOperations
+}
+
+type TickWriterOperations interface {
+	WriteTickData(ctx context.Context, tick *proto.TickData) error
 }
 
 // Ensure KiteConnect implements all interfaces

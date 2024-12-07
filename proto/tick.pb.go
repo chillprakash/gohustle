@@ -221,6 +221,120 @@ func (x *TickData) GetDepth() *TickData_Depth {
 	return nil
 }
 
+type BatchMetadata struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Timestamp  int64 `protobuf:"varint,1,opt,name=timestamp,proto3" json:"timestamp,omitempty"`                     // When this batch was created
+	BatchSize  int32 `protobuf:"varint,2,opt,name=batch_size,json=batchSize,proto3" json:"batch_size,omitempty"`    // Number of ticks in batch
+	RetryCount int32 `protobuf:"varint,3,opt,name=retry_count,json=retryCount,proto3" json:"retry_count,omitempty"` // Number of retry attempts for this batch
+}
+
+func (x *BatchMetadata) Reset() {
+	*x = BatchMetadata{}
+	mi := &file_proto_tick_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BatchMetadata) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BatchMetadata) ProtoMessage() {}
+
+func (x *BatchMetadata) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_tick_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BatchMetadata.ProtoReflect.Descriptor instead.
+func (*BatchMetadata) Descriptor() ([]byte, []int) {
+	return file_proto_tick_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *BatchMetadata) GetTimestamp() int64 {
+	if x != nil {
+		return x.Timestamp
+	}
+	return 0
+}
+
+func (x *BatchMetadata) GetBatchSize() int32 {
+	if x != nil {
+		return x.BatchSize
+	}
+	return 0
+}
+
+func (x *BatchMetadata) GetRetryCount() int32 {
+	if x != nil {
+		return x.RetryCount
+	}
+	return 0
+}
+
+type TickBatch struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	Ticks    []*TickData    `protobuf:"bytes,1,rep,name=ticks,proto3" json:"ticks,omitempty"`       // Array of tick data
+	Metadata *BatchMetadata `protobuf:"bytes,2,opt,name=metadata,proto3" json:"metadata,omitempty"` // Metadata about this batch
+}
+
+func (x *TickBatch) Reset() {
+	*x = TickBatch{}
+	mi := &file_proto_tick_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TickBatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TickBatch) ProtoMessage() {}
+
+func (x *TickBatch) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_tick_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TickBatch.ProtoReflect.Descriptor instead.
+func (*TickBatch) Descriptor() ([]byte, []int) {
+	return file_proto_tick_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *TickBatch) GetTicks() []*TickData {
+	if x != nil {
+		return x.Ticks
+	}
+	return nil
+}
+
+func (x *TickBatch) GetMetadata() *BatchMetadata {
+	if x != nil {
+		return x.Metadata
+	}
+	return nil
+}
+
 // OHLC data
 type TickData_OHLC struct {
 	state         protoimpl.MessageState
@@ -235,7 +349,7 @@ type TickData_OHLC struct {
 
 func (x *TickData_OHLC) Reset() {
 	*x = TickData_OHLC{}
-	mi := &file_proto_tick_proto_msgTypes[1]
+	mi := &file_proto_tick_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -247,7 +361,7 @@ func (x *TickData_OHLC) String() string {
 func (*TickData_OHLC) ProtoMessage() {}
 
 func (x *TickData_OHLC) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tick_proto_msgTypes[1]
+	mi := &file_proto_tick_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -304,7 +418,7 @@ type TickData_DepthItem struct {
 
 func (x *TickData_DepthItem) Reset() {
 	*x = TickData_DepthItem{}
-	mi := &file_proto_tick_proto_msgTypes[2]
+	mi := &file_proto_tick_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -316,7 +430,7 @@ func (x *TickData_DepthItem) String() string {
 func (*TickData_DepthItem) ProtoMessage() {}
 
 func (x *TickData_DepthItem) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tick_proto_msgTypes[2]
+	mi := &file_proto_tick_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -364,7 +478,7 @@ type TickData_Depth struct {
 
 func (x *TickData_Depth) Reset() {
 	*x = TickData_Depth{}
-	mi := &file_proto_tick_proto_msgTypes[3]
+	mi := &file_proto_tick_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -376,7 +490,7 @@ func (x *TickData_Depth) String() string {
 func (*TickData_Depth) ProtoMessage() {}
 
 func (x *TickData_Depth) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_tick_proto_msgTypes[3]
+	mi := &file_proto_tick_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -472,8 +586,21 @@ var file_proto_tick_proto_rawDesc = []byte{
 	0x03, 0x62, 0x75, 0x79, 0x12, 0x2a, 0x0a, 0x04, 0x73, 0x65, 0x6c, 0x6c, 0x18, 0x02, 0x20, 0x03,
 	0x28, 0x0b, 0x32, 0x16, 0x2e, 0x70, 0x62, 0x2e, 0x54, 0x69, 0x63, 0x6b, 0x44, 0x61, 0x74, 0x61,
 	0x2e, 0x44, 0x65, 0x70, 0x74, 0x68, 0x49, 0x74, 0x65, 0x6d, 0x52, 0x04, 0x73, 0x65, 0x6c, 0x6c,
-	0x42, 0x09, 0x5a, 0x07, 0x2e, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x06, 0x70, 0x72, 0x6f,
-	0x74, 0x6f, 0x33,
+	0x22, 0x6d, 0x0a, 0x0d, 0x42, 0x61, 0x74, 0x63, 0x68, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74,
+	0x61, 0x12, 0x1c, 0x0a, 0x09, 0x74, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x18, 0x01,
+	0x20, 0x01, 0x28, 0x03, 0x52, 0x09, 0x74, 0x69, 0x6d, 0x65, 0x73, 0x74, 0x61, 0x6d, 0x70, 0x12,
+	0x1d, 0x0a, 0x0a, 0x62, 0x61, 0x74, 0x63, 0x68, 0x5f, 0x73, 0x69, 0x7a, 0x65, 0x18, 0x02, 0x20,
+	0x01, 0x28, 0x05, 0x52, 0x09, 0x62, 0x61, 0x74, 0x63, 0x68, 0x53, 0x69, 0x7a, 0x65, 0x12, 0x1f,
+	0x0a, 0x0b, 0x72, 0x65, 0x74, 0x72, 0x79, 0x5f, 0x63, 0x6f, 0x75, 0x6e, 0x74, 0x18, 0x03, 0x20,
+	0x01, 0x28, 0x05, 0x52, 0x0a, 0x72, 0x65, 0x74, 0x72, 0x79, 0x43, 0x6f, 0x75, 0x6e, 0x74, 0x22,
+	0x5e, 0x0a, 0x09, 0x54, 0x69, 0x63, 0x6b, 0x42, 0x61, 0x74, 0x63, 0x68, 0x12, 0x22, 0x0a, 0x05,
+	0x74, 0x69, 0x63, 0x6b, 0x73, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x0c, 0x2e, 0x70, 0x62,
+	0x2e, 0x54, 0x69, 0x63, 0x6b, 0x44, 0x61, 0x74, 0x61, 0x52, 0x05, 0x74, 0x69, 0x63, 0x6b, 0x73,
+	0x12, 0x2d, 0x0a, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x18, 0x02, 0x20, 0x01,
+	0x28, 0x0b, 0x32, 0x11, 0x2e, 0x70, 0x62, 0x2e, 0x42, 0x61, 0x74, 0x63, 0x68, 0x4d, 0x65, 0x74,
+	0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x08, 0x6d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x42,
+	0x09, 0x5a, 0x07, 0x2e, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74,
+	0x6f, 0x33,
 }
 
 var (
@@ -488,23 +615,27 @@ func file_proto_tick_proto_rawDescGZIP() []byte {
 	return file_proto_tick_proto_rawDescData
 }
 
-var file_proto_tick_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_tick_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_tick_proto_goTypes = []any{
 	(*TickData)(nil),           // 0: pb.TickData
-	(*TickData_OHLC)(nil),      // 1: pb.TickData.OHLC
-	(*TickData_DepthItem)(nil), // 2: pb.TickData.DepthItem
-	(*TickData_Depth)(nil),     // 3: pb.TickData.Depth
+	(*BatchMetadata)(nil),      // 1: pb.BatchMetadata
+	(*TickBatch)(nil),          // 2: pb.TickBatch
+	(*TickData_OHLC)(nil),      // 3: pb.TickData.OHLC
+	(*TickData_DepthItem)(nil), // 4: pb.TickData.DepthItem
+	(*TickData_Depth)(nil),     // 5: pb.TickData.Depth
 }
 var file_proto_tick_proto_depIdxs = []int32{
-	1, // 0: pb.TickData.ohlc:type_name -> pb.TickData.OHLC
-	3, // 1: pb.TickData.depth:type_name -> pb.TickData.Depth
-	2, // 2: pb.TickData.Depth.buy:type_name -> pb.TickData.DepthItem
-	2, // 3: pb.TickData.Depth.sell:type_name -> pb.TickData.DepthItem
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	3, // 0: pb.TickData.ohlc:type_name -> pb.TickData.OHLC
+	5, // 1: pb.TickData.depth:type_name -> pb.TickData.Depth
+	0, // 2: pb.TickBatch.ticks:type_name -> pb.TickData
+	1, // 3: pb.TickBatch.metadata:type_name -> pb.BatchMetadata
+	4, // 4: pb.TickData.Depth.buy:type_name -> pb.TickData.DepthItem
+	4, // 5: pb.TickData.Depth.sell:type_name -> pb.TickData.DepthItem
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_proto_tick_proto_init() }
@@ -518,7 +649,7 @@ func file_proto_tick_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_proto_tick_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

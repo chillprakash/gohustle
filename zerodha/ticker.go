@@ -12,7 +12,6 @@ import (
 	asynq "github.com/hibiken/asynq"
 	googleproto "google.golang.org/protobuf/proto"
 
-	"github.com/zerodha/gokiteconnect/v4/models"
 	kitemodels "github.com/zerodha/gokiteconnect/v4/models"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
 )
@@ -203,6 +202,10 @@ func (k *KiteConnect) processTickData(tick kitemodels.Tick) {
 			Low:   tick.OHLC.Low,
 			Close: tick.OHLC.Close,
 		},
+		Depth: &proto.TickData_Depth{
+			Buy:  convertDepthItems(tick.Depth.Buy[:]),
+			Sell: convertDepthItems(tick.Depth.Sell[:]),
+		},
 	}
 
 	// Serialize protobuf
@@ -270,7 +273,7 @@ func (k *KiteConnect) onNoReconnect(attempt int) {
 }
 
 // Helper function to convert depth items
-func convertDepth(items []models.DepthItem) []*proto.TickData_DepthItem {
+func convertDepthItems(items []kitemodels.DepthItem) []*proto.TickData_DepthItem {
 	result := make([]*proto.TickData_DepthItem, len(items))
 	for i, item := range items {
 		result[i] = &proto.TickData_DepthItem{

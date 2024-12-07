@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,13 +34,23 @@ type InstrumentExpiryMap struct {
 type TokenInfo struct {
 	Expiry time.Time
 	Symbol string
+	Index  string
 }
 
 var (
 	tokensCache        map[string]string
 	reverseLookupCache map[string]TokenInfo
 	once               sync.Once
+	instrumentMutex    sync.RWMutex // Package-level mutex
 )
+
+func (k *KiteConnect) GetInstrumentInfo(token string) (TokenInfo, bool) {
+	instrumentMutex.RLock()
+	defer instrumentMutex.RUnlock()
+
+	info, exists := reverseLookupCache[token]
+	return info, exists
+}
 
 // DownloadInstrumentData downloads and saves instrument data
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
@@ -165,6 +176,7 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *Instrum
 					reverseLookupCache[call.InstrumentToken] = TokenInfo{
 						Expiry: expiry,
 						Symbol: call.Symbol,
+						Index:  extractIndex(call.Symbol),
 					}
 				}
 				for _, put := range options.Puts {
@@ -172,6 +184,7 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *Instrum
 					reverseLookupCache[put.InstrumentToken] = TokenInfo{
 						Expiry: expiry,
 						Symbol: put.Symbol,
+						Index:  extractIndex(put.Symbol),
 					}
 				}
 			}
@@ -524,4 +537,16 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments [
 	})
 
 	return tokens, nil
+}
+
+func extractIndex(symbol string) string {
+	// Common indices
+	indices := []string{"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
+
+	for _, index := range indices {
+		if strings.HasPrefix(symbol, index) {
+			return index
+		}
+	}
+	return "UNKNOWN"
 }

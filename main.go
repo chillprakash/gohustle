@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"math/rand"
 	"os"
 	"os/signal"
 	"strconv"
@@ -39,6 +38,13 @@ func main() {
 	kiteConnect := zerodha.NewKiteConnect(database, cfg, asynqQueue)
 	defer kiteConnect.Close()
 
+	// Download instrument data
+	if err := kiteConnect.DownloadInstrumentData(context.Background()); err != nil {
+		log.Fatal("Failed to download instrument data", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	// Get upcoming expiry tokens
 	tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, []string{"NIFTY", "SENSEX"})
 	if err != nil {
@@ -49,13 +55,13 @@ func main() {
 	}
 
 	// Randomly select 10 tokens
-	rand.Seed(time.Now().UnixNano())
-	rand.Shuffle(len(tokens), func(i, j int) {
-		tokens[i], tokens[j] = tokens[j], tokens[i]
-	})
-	if len(tokens) > 10 {
-		tokens = tokens[:10]
-	}
+	// rand.Seed(time.Now().UnixNano())
+	// rand.Shuffle(len(tokens), func(i, j int) {
+	// 	tokens[i], tokens[j] = tokens[j], tokens[i]
+	// })
+	// if len(tokens) > 10 {
+	// 	tokens = tokens[:10]
+	// }
 
 	// Convert string tokens to uint32
 	tokenInts := make([]uint32, len(tokens))
@@ -98,7 +104,7 @@ func main() {
 	}
 
 	// Start consumer in a goroutine
-	go consumer.StartTickConsumer(cfg, asynqQueue, kiteConnect)
+	go consumer.StartTickConsumer(cfg, kiteConnect)
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)

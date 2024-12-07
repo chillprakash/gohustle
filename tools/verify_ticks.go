@@ -63,45 +63,60 @@ func main() {
 				batch.Metadata.RetryCount)
 		}
 
-		// Print first 5 ticks as sample
+		// Print all ticks with complete details
 		for i, tick := range batch.Ticks {
 			if i >= 5 {
 				break
 			}
 			fmt.Printf("\nTick %d:\n", i+1)
-			fmt.Printf("  Token: %d\n", tick.InstrumentToken)
+			fmt.Printf("Basic Info:\n")
+			fmt.Printf("  InstrumentToken: %d\n", tick.InstrumentToken)
+			fmt.Printf("  IsTradable: %v\n", tick.IsTradable)
+			fmt.Printf("  IsIndex: %v\n", tick.IsIndex)
+			fmt.Printf("  Mode: %s\n", tick.Mode)
+
+			fmt.Printf("\nTimestamps:\n")
 			fmt.Printf("  Timestamp: %v\n", time.Unix(tick.Timestamp, 0))
+			fmt.Printf("  LastTradeTime: %v\n", time.Unix(tick.LastTradeTime, 0))
+
+			fmt.Printf("\nPrice and Quantity:\n")
 			fmt.Printf("  LastPrice: %.2f\n", tick.LastPrice)
-			fmt.Printf("  Volume: %d\n", tick.VolumeTraded)
-			fmt.Printf("  OI: %d\n", tick.Oi)
-			fmt.Printf("  Change: %.2f%%\n", tick.NetChange)
-			fmt.Printf("  LastQuantity: %d\n", tick.LastTradedQuantity)
-			fmt.Printf("  AveragePrice: %.2f\n", tick.AverageTradePrice)
+			fmt.Printf("  LastTradedQuantity: %d\n", tick.LastTradedQuantity)
 			fmt.Printf("  TotalBuyQuantity: %d\n", tick.TotalBuyQuantity)
 			fmt.Printf("  TotalSellQuantity: %d\n", tick.TotalSellQuantity)
+			fmt.Printf("  VolumeTraded: %d\n", tick.VolumeTraded)
+			fmt.Printf("  TotalBuy: %d\n", tick.TotalBuy)
+			fmt.Printf("  TotalSell: %d\n", tick.TotalSell)
+			fmt.Printf("  AverageTradePrice: %.2f\n", tick.AverageTradePrice)
+
+			fmt.Printf("\nOI Information:\n")
+			fmt.Printf("  OI: %d\n", tick.Oi)
+			fmt.Printf("  OI Day High: %d\n", tick.OiDayHigh)
+			fmt.Printf("  OI Day Low: %d\n", tick.OiDayLow)
+			fmt.Printf("  Net Change: %.2f%%\n", tick.NetChange)
 
 			if tick.Ohlc != nil {
-				fmt.Printf("  OHLC:\n")
-				fmt.Printf("    Open: %.2f\n", tick.Ohlc.Open)
-				fmt.Printf("    High: %.2f\n", tick.Ohlc.High)
-				fmt.Printf("    Low: %.2f\n", tick.Ohlc.Low)
-				fmt.Printf("    Close: %.2f\n", tick.Ohlc.Close)
+				fmt.Printf("\nOHLC Data:\n")
+				fmt.Printf("  Open: %.2f\n", tick.Ohlc.Open)
+				fmt.Printf("  High: %.2f\n", tick.Ohlc.High)
+				fmt.Printf("  Low: %.2f\n", tick.Ohlc.Low)
+				fmt.Printf("  Close: %.2f\n", tick.Ohlc.Close)
 			}
 
 			if tick.Depth != nil {
-				fmt.Printf("  Depth:\n")
-				fmt.Printf("    Buy:\n")
-				for _, buy := range tick.Depth.Buy {
-					fmt.Printf("      Price: %.2f, Quantity: %d, Orders: %d\n",
-						buy.Price, buy.Quantity, buy.Orders)
+				fmt.Printf("\nMarket Depth:\n")
+				fmt.Printf("  Buy Orders:\n")
+				for j, buy := range tick.Depth.Buy {
+					fmt.Printf("    %d. Price: %.2f, Quantity: %d, Orders: %d\n",
+						j+1, buy.Price, buy.Quantity, buy.Orders)
 				}
-				fmt.Printf("    Sell:\n")
-				for _, sell := range tick.Depth.Sell {
-					fmt.Printf("      Price: %.2f, Quantity: %d, Orders: %d\n",
-						sell.Price, sell.Quantity, sell.Orders)
+				fmt.Printf("  Sell Orders:\n")
+				for j, sell := range tick.Depth.Sell {
+					fmt.Printf("    %d. Price: %.2f, Quantity: %d, Orders: %d\n",
+						j+1, sell.Price, sell.Quantity, sell.Orders)
 				}
 			}
-			fmt.Println()
+			fmt.Println("----------------------------------------")
 		}
 	}
 }

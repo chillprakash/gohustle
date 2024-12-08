@@ -15,6 +15,7 @@ type Config struct {
 	Redis     RedisConfig     `json:"redis"`
 	Kite      KiteConfig      `json:"kite"`
 	Asynq     AsynqConfig     `json:"asynq"`
+	Telegram  TelegramConfig  `json:"telegram"`
 }
 
 type TimescaleConfig struct {
@@ -69,6 +70,11 @@ type AsynqConfig struct {
 	Concurrency int            `json:"concurrency"`
 	RetryLimit  int            `json:"retry_limit"`
 	Queues      map[string]int `json:"queues"`
+}
+
+type TelegramConfig struct {
+	BotToken string `json:"bot_token"`
+	ChatID   string `json:"chat_id"`
 }
 
 // GetConfig loads configuration and handles errors internally

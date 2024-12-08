@@ -42,5 +42,9 @@
             "default": 1,
             "ticks": 10
         }
+    },
+    "telegram": {
+        "bot_token": "7911939409:AAFWHVIJNp_5DIhq4O6rTT8jDxpVPmiesgg",
+        "chat_id": "7463070554"
     }
 } 

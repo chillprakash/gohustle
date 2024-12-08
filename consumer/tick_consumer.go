@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,15 +40,15 @@ func StartTickConsumer(cfg *config.Config, kite *zerodha.KiteConnect) {
 		index := tokenInfo.Index // Get the index name
 
 		// Generate filename using expiry and current date
-		currentDate := time.Unix(tick.Timestamp, 0)
-		filename := generateFileName(index, tokenInfo.Expiry, currentDate)
+		currentDate := time.Now().Format("02-01-2006")
+		filename := generateFileName(index, tokenInfo.Expiry, currentDate, tokenInfo.IsIndex)
 
 		log.Info("Processing tick", map[string]interface{}{
 			"token":        token,
 			"symbol":       tokenInfo.Symbol,
 			"index":        tokenInfo.Index,
 			"expiry":       tokenInfo.Expiry.Format("2006-01-02"),
-			"current_date": currentDate.Format("2006-01-02"),
+			"current_date": currentDate,
 			"filename":     filename,
 			"last_price":   tick.LastPrice,
 			"volume":       tick.VolumeTraded,
@@ -71,9 +72,19 @@ func StartTickConsumer(cfg *config.Config, kite *zerodha.KiteConnect) {
 	<-sigChan
 }
 
-func generateFileName(index string, expiryDate, currentDate time.Time) string {
+func generateFileName(index string, expiry time.Time, currentDate string, isIndex bool) string {
+	formattedDate := strings.ReplaceAll(currentDate, "-", "")
+
+	if isIndex {
+		// For indices, use only index name and current date
+		return fmt.Sprintf("%s_%s.pb",
+			index,
+			formattedDate)
+	}
+
+	// For options, use index, expiry and current date
 	return fmt.Sprintf("%s_%s_%s.pb",
 		index,
-		expiryDate.Format("20060102"),
-		currentDate.Format("20060102"))
+		expiry.Format("20060102"),
+		formattedDate)
 }

@@ -25,6 +25,7 @@ type InstrumentOperations interface {
 	CreateLookupMapWithExpiryVSTokenMap(instrumentMap *InstrumentExpiryMap) (map[string]string, map[string]TokenInfo)
 	GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error)
 	GetInstrumentInfo(token string) (TokenInfo, bool)
+	GetIndexTokens() map[string]string
 }
 
 type AsynqQueueOperations interface {

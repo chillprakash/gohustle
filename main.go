@@ -54,14 +54,16 @@ func main() {
 		return
 	}
 
-	// Randomly select 10 tokens
-	// rand.Seed(time.Now().UnixNano())
-	// rand.Shuffle(len(tokens), func(i, j int) {
-	// 	tokens[i], tokens[j] = tokens[j], tokens[i]
-	// })
-	// if len(tokens) > 10 {
-	// 	tokens = tokens[:10]
-	// }
+	// Add index tokens
+	indexTokens := kiteConnect.GetIndexTokens()
+	for _, token := range indexTokens {
+		tokens = append(tokens, token)
+	}
+
+	log.Info("Combined tokens", map[string]interface{}{
+		"total_tokens": len(tokens),
+		"index_tokens": len(indexTokens),
+	})
 
 	// Convert string tokens to uint32
 	tokenInts := make([]uint32, len(tokens))

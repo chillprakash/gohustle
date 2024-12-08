@@ -105,3 +105,7 @@ func (k *KiteConnect) Close() {
 	close(k.tickProcessor.timescaleChan)
 	close(k.tickProcessor.protobufChan)
 }
+
+func (k *KiteConnect) GetFileStore() filestore.FileStore {
+	return k.fileStore
+}

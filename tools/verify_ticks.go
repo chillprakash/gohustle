@@ -15,7 +15,7 @@ const DefaultDataPath = "data/ticks"
 
 func main() {
 	// Read all .pb files from data directory
-	pattern := filepath.Join(DefaultDataPath, "*.pb")
+	pattern := filepath.Join(DefaultDataPath, "NIFTY_08122024.pb")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		fmt.Printf("Error reading directory: %v\n", err)

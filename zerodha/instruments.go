@@ -32,9 +32,10 @@ type InstrumentExpiryMap struct {
 }
 
 type TokenInfo struct {
-	Expiry time.Time
-	Symbol string
-	Index  string
+	Expiry  time.Time
+	Symbol  string
+	Index   string
+	IsIndex bool
 }
 
 var (
@@ -68,10 +69,6 @@ func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 		return err
 	}
 
-	log.Info("Downloaded raw data", map[string]interface{}{
-		"total_count": len(allInstruments),
-	})
-
 	// Filter instruments
 	filteredInstruments := filterInstruments(allInstruments, instrumentNames)
 
@@ -81,7 +78,7 @@ func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 		"instruments":    instrumentNames,
 	})
 
-	// Save filtered instruments
+	// Save filtered data
 	return k.saveInstrumentsToFile(ctx, filteredInstruments)
 }
 
@@ -169,24 +166,39 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *Instrum
 		tokensCache = make(map[string]string)
 		reverseLookupCache = make(map[string]TokenInfo)
 
+		// Add options (IsIndex = false)
 		for _, expiryMap := range instrumentMap.Data {
 			for expiry, options := range expiryMap {
 				for _, call := range options.Calls {
 					tokensCache[call.InstrumentToken] = call.Symbol
 					reverseLookupCache[call.InstrumentToken] = TokenInfo{
-						Expiry: expiry,
-						Symbol: call.Symbol,
-						Index:  extractIndex(call.Symbol),
+						Expiry:  expiry,
+						Symbol:  call.Symbol,
+						Index:   extractIndex(call.Symbol),
+						IsIndex: false,
 					}
 				}
 				for _, put := range options.Puts {
 					tokensCache[put.InstrumentToken] = put.Symbol
 					reverseLookupCache[put.InstrumentToken] = TokenInfo{
-						Expiry: expiry,
-						Symbol: put.Symbol,
-						Index:  extractIndex(put.Symbol),
+						Expiry:  expiry,
+						Symbol:  put.Symbol,
+						Index:   extractIndex(put.Symbol),
+						IsIndex: false,
 					}
 				}
+			}
+		}
+
+		// Add indices (IsIndex = true)
+		indexTokens := k.GetIndexTokens()
+		for name, token := range indexTokens {
+			tokensCache[token] = name
+			reverseLookupCache[token] = TokenInfo{
+				Expiry:  time.Time{}, // zero time for indices
+				Symbol:  name,
+				Index:   name,
+				IsIndex: true,
 			}
 		}
 	})
@@ -549,4 +561,16 @@ func extractIndex(symbol string) string {
 		}
 	}
 	return "UNKNOWN"
+}
+
+// GetIndexTokens returns a map of index names to their instrument tokens
+func (k *KiteConnect) GetIndexTokens() map[string]string {
+	return map[string]string{
+		"NIFTY":           "256265",
+		"SENSEX":          "265",
+		"BANKEX":          "274441",
+		"NIFTYBANK":       "260105",
+		"NIFTYFINSERVICE": "257801",
+		"NIFTYMIDSELECT":  "288009",
+	}
 }

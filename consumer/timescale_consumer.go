@@ -111,13 +111,6 @@ func StartTimescaleConsumer(cfg *config.Config, kite *zerodha.KiteConnect, times
 		var tableName string
 		if tokenInfo.IsIndex {
 			tableName = generateTableName(tokenInfo.Index, nil)
-			log.Info("Processing index tick", map[string]interface{}{
-				"token":      tokenStr,
-				"index":      tokenInfo.Index,
-				"table":      tableName,
-				"last_price": tick.LastPrice,
-				"timestamp":  time.Unix(tick.Timestamp, 0),
-			})
 		} else {
 			tableName = generateTableName(tokenInfo.Index, &tokenInfo.Expiry)
 		}
@@ -125,26 +118,24 @@ func StartTimescaleConsumer(cfg *config.Config, kite *zerodha.KiteConnect, times
 		// Store tick in TimescaleDB
 		if err := timescaleDB.StoreTick(tableName, tick); err != nil {
 			log.Error("Failed to store tick", map[string]interface{}{
-				"error":      err.Error(),
-				"token":      tokenStr,
-				"index":      tokenInfo.Index,
-				"expiry":     tokenInfo.Expiry.Format("20060102"),
-				"timestamp":  time.Unix(tick.Timestamp, 0),
-				"table":      tableName,
-				"is_index":   tokenInfo.IsIndex,
-				"last_price": tick.LastPrice,
+				"error":     err.Error(),
+				"token":     tokenStr,
+				"index":     tokenInfo.Index,
+				"expiry":    tokenInfo.Expiry.Format("20060102"),
+				"timestamp": time.Unix(tick.Timestamp, 0),
+				"table":     tableName,
+				"is_index":  tokenInfo.IsIndex,
 			})
 			return err
 		}
 
-		log.Debug("Stored tick successfully", map[string]interface{}{
-			"token":      tokenStr,
-			"index":      tokenInfo.Index,
-			"expiry":     tokenInfo.Expiry.Format("20060102"),
-			"timestamp":  time.Unix(tick.Timestamp, 0),
-			"table":      tableName,
-			"is_index":   tokenInfo.IsIndex,
-			"last_price": tick.LastPrice,
+		log.Info("Stored tick successfully", map[string]interface{}{
+			"token":     tokenStr,
+			"index":     tokenInfo.Index,
+			"expiry":    tokenInfo.Expiry.Format("20060102"),
+			"timestamp": time.Unix(tick.Timestamp, 0),
+			"table":     tableName,
+			"is_index":  tokenInfo.IsIndex,
 		})
 
 		return nil

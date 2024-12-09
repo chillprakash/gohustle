@@ -5,8 +5,8 @@
         "user": "postgres",
         "password": "postgres",
         "DBName": "hustledb",
-        "max_connections": 1000,
-        "min_connections": 100,
+        "max_connections": 500,
+        "min_connections": 50,
         "max_conn_lifetime": "1h",
         "max_conn_idle_time": "30m"
     },
@@ -14,8 +14,8 @@
         "host": "localhost",
         "port": "6379",
         "password": "",
-        "max_connections": 1000,
-        "min_connections": 100,
+        "max_connections": 600,
+        "min_connections": 50,
         "connect_timeout": "5s",
         "max_conn_lifetime": "30m",
         "max_conn_idle_time": "5m"
@@ -29,7 +29,7 @@
         "login_url": "https://kite.zerodha.com/api/login",
         "twofa_url": "https://kite.zerodha.com/api/twofa",
         "data_path": "data",
-        "tick_workers": 1500
+        "tick_workers": 700
     },
     "asynq": {
         "host": "localhost",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"gohustle/config"
@@ -14,8 +15,9 @@ import (
 )
 
 type TimescaleDB struct {
-	pool   *pgxpool.Pool
-	config *config.TimescaleConfig
+	pool           *pgxpool.Pool
+	config         *config.TimescaleConfig
+	batchProcessor *BatchProcessor
 }
 
 // InitDB initializes the database connection
@@ -204,94 +206,182 @@ func (db *TimescaleDB) CreateTickTables(indexName string, expiryDate time.Time) 
 	return nil
 }
 
-// StoreTick stores tick data in the specified table
-func (db *TimescaleDB) StoreTick(tableName string, tick *proto.TickData) error {
+const (
+	batchSize     = 10000 // Doubled batch size
+	maxRetries    = 3
+	workerCount   = 50                    // More workers
+	channelSize   = 50000                 // Larger buffer
+	flushTimeout  = 50 * time.Millisecond // Faster flushes
+	maxConcurrent = 100                   // Max concurrent transactions
+	maxQueueSize  = 1000000               // 1M ticks queue capacity
+)
+
+type BatchProcessor struct {
+	db          *TimescaleDB
+	batchChan   chan *BatchItem
+	workerCount int
+	semaphore   chan struct{} // Control concurrent transactions
+	metrics     *BatchMetrics
+}
+
+type BatchMetrics struct {
+	processedTicks atomic.Uint64
+	droppedTicks   atomic.Uint64
+	batchLatency   atomic.Int64
+	queueSize      atomic.Int64
+}
+
+type BatchItem struct {
+	tableName string
+	tick      *proto.TickData
+}
+
+func NewBatchProcessor(db *TimescaleDB, workerCount int) *BatchProcessor {
+	bp := &BatchProcessor{
+		db:          db,
+		batchChan:   make(chan *BatchItem, channelSize),
+		workerCount: workerCount,
+		semaphore:   make(chan struct{}, maxConcurrent),
+		metrics:     &BatchMetrics{},
+	}
+
+	// Start workers
+	bp.startWorkers()
+
+	// Start metrics reporter
+	go bp.reportMetrics()
+
+	return bp
+}
+
+func (bp *BatchProcessor) reportMetrics() {
+	ticker := time.NewTicker(5 * time.Second)
 	log := logger.GetLogger()
-	tx, err := db.pool.Begin(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
+
+	for range ticker.C {
+		log.Info("Batch processor metrics", map[string]interface{}{
+			"processed_ticks": bp.metrics.processedTicks.Load(),
+			"dropped_ticks":   bp.metrics.droppedTicks.Load(),
+			"avg_latency_ms":  time.Duration(bp.metrics.batchLatency.Load()).Milliseconds(),
+			"queue_size":      bp.metrics.queueSize.Load(),
+		})
 	}
-	defer tx.Rollback(context.Background())
+}
 
-	// Insert main tick data
-	_, err = tx.Exec(context.Background(), fmt.Sprintf(`
-        INSERT INTO %s (
-            instrument_token, timestamp, is_tradable, is_index, mode,
-            last_price, last_trade_time, last_traded_quantity,
-            total_buy_quantity, total_sell_quantity, volume_traded,
-            total_buy, total_sell, average_trade_price,
-            oi, oi_day_high, oi_day_low, net_change,
-            open_price, high_price, low_price, close_price
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-        ON CONFLICT (instrument_token, timestamp) 
-        DO UPDATE SET
-            last_price = EXCLUDED.last_price,
-            oi = EXCLUDED.oi`, tableName),
-		tick.InstrumentToken, time.Unix(tick.Timestamp, 0), tick.IsTradable, tick.IsIndex, tick.Mode,
-		tick.LastPrice, time.Unix(tick.LastTradeTime, 0), tick.LastTradedQuantity,
-		tick.TotalBuyQuantity, tick.TotalSellQuantity, tick.VolumeTraded,
-		tick.TotalBuy, tick.TotalSell, tick.AverageTradePrice,
-		tick.Oi, tick.OiDayHigh, tick.OiDayLow, tick.NetChange,
-		tick.Ohlc.Open, tick.Ohlc.High, tick.Ohlc.Low, tick.Ohlc.Close)
+func (bp *BatchProcessor) startWorkers() {
+	for i := 0; i < bp.workerCount; i++ {
+		go bp.worker()
+	}
+}
 
-	if err != nil {
-		return fmt.Errorf("failed to insert tick data: %w", err)
+func (bp *BatchProcessor) worker() {
+	batch := make([]*BatchItem, 0, batchSize)
+	ticker := time.NewTicker(flushTimeout)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case item := <-bp.batchChan:
+			batch = append(batch, item)
+			if len(batch) >= batchSize {
+				bp.processBatch(batch)
+				batch = batch[:0]
+			}
+		case <-ticker.C:
+			if len(batch) > 0 {
+				bp.processBatch(batch)
+				batch = batch[:0]
+			}
+		}
+	}
+}
+
+func (bp *BatchProcessor) processBatch(batch []*BatchItem) {
+	if len(batch) == 0 {
+		return
 	}
 
-	// Insert depth data if available
-	if tick.Depth != nil {
-		depthTableName := fmt.Sprintf("%s_depth", tableName)
+	// Group by table name for efficient processing
+	tableGroups := make(map[string][]*proto.TickData)
+	for _, item := range batch {
+		tableGroups[item.tableName] = append(tableGroups[item.tableName], item.tick)
+	}
 
-		// First delete existing depth data for this tick
-		_, err = tx.Exec(context.Background(), fmt.Sprintf(`
-            DELETE FROM %s 
-            WHERE instrument_token = $1 AND timestamp = $2`,
-			depthTableName),
-			tick.InstrumentToken, time.Unix(tick.Timestamp, 0))
+	// Process each table group
+	for tableName, ticks := range tableGroups {
+		bp.processBatchForTable(tableName, ticks)
+	}
+}
+
+func (bp *BatchProcessor) processBatchForTable(tableName string, ticks []*proto.TickData) {
+	ctx := context.Background()
+	tx, err := bp.db.pool.Begin(ctx)
+	if err != nil {
+		logger.GetLogger().Error("Failed to begin transaction", map[string]interface{}{"error": err})
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	for _, tick := range ticks {
+		_, err = tx.Exec(ctx, fmt.Sprintf(`
+			INSERT INTO %s (
+				instrument_token, timestamp, is_tradable, is_index, mode,
+				last_price, last_trade_time, last_traded_quantity,
+				total_buy_quantity, total_sell_quantity, volume_traded,
+				total_buy, total_sell, average_trade_price,
+				oi, oi_day_high, oi_day_low, net_change,
+				open_price, high_price, low_price, close_price
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+			ON CONFLICT (instrument_token, timestamp) DO UPDATE SET
+				last_price = EXCLUDED.last_price,
+				oi = EXCLUDED.oi`, tableName),
+			tick.InstrumentToken,
+			time.Unix(tick.Timestamp, 0),
+			tick.IsTradable,
+			tick.IsIndex,
+			tick.Mode,
+			tick.LastPrice,
+			time.Unix(tick.LastTradeTime, 0),
+			tick.LastTradedQuantity,
+			tick.TotalBuyQuantity,
+			tick.TotalSellQuantity,
+			tick.VolumeTraded,
+			tick.TotalBuy,
+			tick.TotalSell,
+			tick.AverageTradePrice,
+			tick.Oi,
+			tick.OiDayHigh,
+			tick.OiDayLow,
+			tick.NetChange,
+			tick.Ohlc.Open,
+			tick.Ohlc.High,
+			tick.Ohlc.Low,
+			tick.Ohlc.Close,
+		)
+
 		if err != nil {
-			return fmt.Errorf("failed to delete old depth data: %w", err)
-		}
-
-		// Insert buy depth
-		for i, buy := range tick.Depth.Buy {
-			_, err = tx.Exec(context.Background(), fmt.Sprintf(`
-                INSERT INTO %s (
-                    instrument_token, timestamp, side, level,
-                    price, quantity, orders
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				depthTableName),
-				tick.InstrumentToken, time.Unix(tick.Timestamp, 0),
-				"buy", i+1, buy.Price, buy.Quantity, buy.Orders)
-			if err != nil {
-				return fmt.Errorf("failed to insert buy depth data: %w", err)
-			}
-		}
-
-		// Insert sell depth
-		for i, sell := range tick.Depth.Sell {
-			_, err = tx.Exec(context.Background(), fmt.Sprintf(`
-                INSERT INTO %s (
-                    instrument_token, timestamp, side, level,
-                    price, quantity, orders
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				depthTableName),
-				tick.InstrumentToken, time.Unix(tick.Timestamp, 0),
-				"sell", i+1, sell.Price, sell.Quantity, sell.Orders)
-			if err != nil {
-				return fmt.Errorf("failed to insert sell depth data: %w", err)
-			}
+			logger.GetLogger().Error("Failed to insert or update data", map[string]interface{}{"error": err})
+			return
 		}
 	}
 
-	if err := tx.Commit(context.Background()); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
+	if err := tx.Commit(ctx); err != nil {
+		logger.GetLogger().Error("Failed to commit transaction", map[string]interface{}{"error": err})
+		return
+	}
+}
+
+// StoreTick now uses the batch processor
+func (db *TimescaleDB) StoreTick(tableName string, tick *proto.TickData) error {
+	if db.batchProcessor == nil {
+		db.batchProcessor = NewBatchProcessor(db, workerCount)
 	}
 
-	log.Debug("Successfully stored tick data", map[string]interface{}{
-		"table":      tableName,
-		"instrument": tick.InstrumentToken,
-		"timestamp":  time.Unix(tick.Timestamp, 0),
-	})
-
-	return nil
+	// Send to batch channel
+	select {
+	case db.batchProcessor.batchChan <- &BatchItem{tableName: tableName, tick: tick}:
+		return nil
+	default:
+		return fmt.Errorf("batch channel full, dropping tick")
+	}
 }

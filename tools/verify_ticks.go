@@ -15,7 +15,7 @@ const DefaultDataPath = "data/ticks"
 
 func main() {
 	// Read all .pb files from data directory
-	pattern := filepath.Join(DefaultDataPath, "NIFTY_08122024.pb")
+	pattern := filepath.Join(DefaultDataPath, "NIFTY_20241212_09122024.pb")
 	files, err := filepath.Glob(pattern)
 	if err != nil {
 		fmt.Printf("Error reading directory: %v\n", err)
@@ -24,13 +24,6 @@ func main() {
 
 	if len(files) == 0 {
 		fmt.Printf("No .pb files found in %s\n", DefaultDataPath)
-		// List all files in the directory for debugging
-		if entries, err := os.ReadDir(DefaultDataPath); err == nil {
-			fmt.Println("\nContents of data directory:")
-			for _, entry := range entries {
-				fmt.Printf("- %s\n", entry.Name())
-			}
-		}
 		return
 	}
 
@@ -52,6 +45,47 @@ func main() {
 		if err := googleproto.Unmarshal(data, batch); err != nil {
 			fmt.Printf("Error unmarshaling file %s: %v\n", file, err)
 			continue
+		}
+
+		fmt.Printf("Number of ticks: %d\n", len(batch.Ticks))
+
+		// Add timestamp analysis
+		timestamps := make(map[time.Time]bool)
+		var lastEventTime time.Time
+		var firstEventTime time.Time
+
+		for _, tick := range batch.Ticks {
+			ts := time.Unix(tick.Timestamp, 0)
+			fmt.Printf("Tick timestamp: %v\n", ts)
+			timestamps[ts] = true
+
+			if firstEventTime.IsZero() {
+				firstEventTime = ts
+			}
+			if ts.After(lastEventTime) {
+				lastEventTime = ts
+			}
+		}
+
+		fmt.Printf("\nTimestamp Analysis:\n")
+		fmt.Printf("First Event: %v\n", firstEventTime)
+		fmt.Printf("Last Event: %v\n", lastEventTime)
+		fmt.Printf("Duration: %v\n", lastEventTime.Sub(firstEventTime))
+
+		// Check for missing seconds
+		missingCount := 0
+		for t := firstEventTime; !t.After(lastEventTime); t = t.Add(time.Second) {
+			if !timestamps[t] {
+				missingCount++
+				if missingCount <= 5 { // Show only first 5 missing timestamps
+					fmt.Printf("Missing data at: %v\n", t)
+				}
+			}
+		}
+		if missingCount > 0 {
+			fmt.Printf("Total missing seconds: %d\n", missingCount)
+		} else {
+			fmt.Printf("No missing seconds in the data\n")
 		}
 
 		fmt.Printf("Successfully unmarshaled batch\n")

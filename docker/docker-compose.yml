@@ -1,0 +1,26 @@
+services:
+  redis:
+    image: arm64v8/redis:6.0-alpine3.19
+    ports:
+      - "6379:6379"
+    volumes:
+      - 'redisData:/bitnami/redis/data'
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14  # Use TimescaleDB image with PostgreSQL 14
+    restart: always
+    ports:
+      - "5432:5432"  # Default PostgreSQL port
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: hustledb
+    volumes:
+      - timescaleData:/var/lib/postgresql/data  # Data directory
+    network_mode: bridge
+
+volumes:
+  redisData:
+    driver: local
+  timescaleData:
+    driver: local

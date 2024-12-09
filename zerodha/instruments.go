@@ -43,6 +43,7 @@ var (
 	reverseLookupCache map[string]TokenInfo
 	once               sync.Once
 	instrumentMutex    sync.RWMutex // Package-level mutex
+
 )
 
 func (k *KiteConnect) GetInstrumentInfo(token string) (TokenInfo, bool) {
@@ -566,11 +567,69 @@ func extractIndex(symbol string) string {
 // GetIndexTokens returns a map of index names to their instrument tokens
 func (k *KiteConnect) GetIndexTokens() map[string]string {
 	return map[string]string{
-		"NIFTY":           "256265",
-		"SENSEX":          "265",
-		"BANKEX":          "274441",
-		"NIFTYBANK":       "260105",
-		"NIFTYFINSERVICE": "257801",
-		"NIFTYMIDSELECT":  "288009",
+		"NIFTY":      "256265",
+		"SENSEX":     "265",
+		"BANKEX":     "274441",
+		"BANKNIFTY":  "260105",
+		"FINNIFTY":   "257801",
+		"MIDCPNIFTY": "288009",
 	}
+}
+
+func (k *KiteConnect) GetIndexVsExpiryMap(ctx context.Context) (map[string][]time.Time, error) {
+	log := logger.GetLogger()
+
+	// Read expiries from file
+	expiries, err := k.readInstrumentExpiriesFromFile(ctx)
+	if err != nil {
+		log.Error("Failed to read expiries from file", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, err
+	}
+
+	// Filter only for indices we're interested in
+	indices := []string{"NIFTY", "SENSEX"}
+	filteredMap := make(map[string][]time.Time)
+
+	for index, dates := range expiries {
+		// Only include if it's one of our target indices
+		for _, targetIndex := range indices {
+			if index == targetIndex {
+				// Filter only future expiries
+				now := time.Now().Truncate(24 * time.Hour)
+				futureExpiries := make([]time.Time, 0)
+
+				for _, date := range dates {
+					if date.Equal(now) || date.After(now) {
+						futureExpiries = append(futureExpiries, date)
+					}
+				}
+
+				if len(futureExpiries) > 0 {
+					filteredMap[index] = futureExpiries
+				}
+				break
+			}
+		}
+	}
+
+	log.Info("Retrieved index expiry mapping", map[string]interface{}{
+		"indices_count": len(filteredMap),
+		"mapping":       formatExpiryMap(filteredMap),
+	})
+
+	return filteredMap, nil
+}
+
+// Helper function to format expiry map for logging
+func formatExpiryMap(m map[string][]time.Time) map[string][]string {
+	formatted := make(map[string][]string)
+	for index, dates := range m {
+		formatted[index] = make([]string, len(dates))
+		for i, date := range dates {
+			formatted[index][i] = date.Format("2006-01-02")
+		}
+	}
+	return formatted
 }

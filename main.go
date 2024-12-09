@@ -45,29 +45,38 @@ func main() {
 		})
 	}
 
-	// Get upcoming expiry tokens
-	tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, []string{"NIFTY", "SENSEX"})
+	// Get upcoming expiry tokens for configured indices
+	tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, cfg.Indices.DerivedIndices)
 	if err != nil {
 		log.Error("Failed to get upcoming expiry tokens", map[string]interface{}{
-			"error": err.Error(),
+			"error":   err.Error(),
+			"indices": cfg.Indices.DerivedIndices,
 		})
 		return
 	}
 
-	// Add index tokens
+	// Add index tokens for spot indices
 	indexTokens := kiteConnect.GetIndexTokens()
+	// Convert index tokens map to slice
+	var indexTokenSlice []string
 	for _, token := range indexTokens {
-		tokens = append(tokens, token)
+		indexTokenSlice = append(indexTokenSlice, token)
 	}
 
-	log.Info("Combined tokens", map[string]interface{}{
-		"total_tokens": len(tokens),
-		"index_tokens": len(indexTokens),
+	// Combine both token lists for subscription
+	allTokens := append(tokens, indexTokenSlice...)
+
+	log.Info("Retrieved tokens for subscription", map[string]interface{}{
+		"spot_indices":    cfg.Indices.SpotIndices,
+		"derived_indices": cfg.Indices.DerivedIndices,
+		"expiry_tokens":   tokens,
+		"index_tokens":    indexTokenSlice,
+		"total_tokens":    len(allTokens),
 	})
 
-	// Convert string tokens to uint32
-	tokenInts := make([]uint32, len(tokens))
-	for i, token := range tokens {
+	// Convert string tokens to uint32 for Subscribe
+	tokenInts := make([]uint32, len(allTokens))
+	for i, token := range allTokens {
 		t, err := strconv.ParseUint(token, 10, 32)
 		if err != nil {
 			log.Error("Failed to parse token", map[string]interface{}{
@@ -77,12 +86,6 @@ func main() {
 			return
 		}
 		tokenInts[i] = uint32(t)
-	}
-
-	// Convert uint32 tokens back to strings for Subscribe
-	tokenStrs := make([]string, len(tokenInts))
-	for i, t := range tokenInts {
-		tokenStrs[i] = strconv.FormatUint(uint64(t), 10)
 	}
 
 	// Connect ticker first and ensure it's ready
@@ -96,17 +99,18 @@ func main() {
 	// Add a small delay to ensure connection is established
 	time.Sleep(time.Second)
 
-	// Then subscribe
-	if err := kiteConnect.Subscribe(tokenStrs); err != nil {
+	// Then subscribe to all tokens
+	if err := kiteConnect.Subscribe(allTokens); err != nil {
 		log.Error("Failed to subscribe to tokens", map[string]interface{}{
 			"error": err.Error(),
 		})
-		kiteConnect.CloseTicker() // Close before returning on error
+		kiteConnect.CloseTicker()
 		return
 	}
 
 	// Start consumer in a goroutine
 	go consumer.StartTickConsumer(cfg, kiteConnect)
+	go consumer.StartTimescaleConsumer(cfg, kiteConnect, database)
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)

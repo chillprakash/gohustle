@@ -5,8 +5,8 @@
         "user": "postgres",
         "password": "postgres",
         "DBName": "hustledb",
-        "max_connections": 20,
-        "min_connections": 5,
+        "max_connections": 1000,
+        "min_connections": 100,
         "max_conn_lifetime": "1h",
         "max_conn_idle_time": "30m"
     },
@@ -14,8 +14,8 @@
         "host": "localhost",
         "port": "6379",
         "password": "",
-        "max_connections": 100,
-        "min_connections": 10,
+        "max_connections": 1000,
+        "min_connections": 100,
         "connect_timeout": "5s",
         "max_conn_lifetime": "30m",
         "max_conn_idle_time": "5m"
@@ -29,22 +29,37 @@
         "login_url": "https://kite.zerodha.com/api/login",
         "twofa_url": "https://kite.zerodha.com/api/twofa",
         "data_path": "data",
-        "tick_workers": 500
+        "tick_workers": 1500
     },
     "asynq": {
         "host": "localhost",
         "port": "6379",
         "password": "",
         "db": 0,
-        "concurrency": 10,
+        "concurrency": 5000,
         "retry_limit": 3,
+        "max_connections": 1000,
         "queues": {
-            "default": 1,
-            "ticks": 10
+            "ticks_file": 100,
+            "ticks_timescale": 100
         }
     },
     "telegram": {
         "bot_token": "7911939409:AAFWHVIJNp_5DIhq4O6rTT8jDxpVPmiesgg",
         "chat_id": "7463070554"
+    },
+    "indices": {
+        "derived_indices": [
+            "NIFTY",
+            "SENSEX"
+        ],
+        "spot_indices": [
+            "NIFTY",
+            "SENSEX",
+            "BANKEX",
+            "BANKNIFTY",
+            "MIDCPNIFTY",
+            "FINNIFTY"
+        ]
     }
 } 

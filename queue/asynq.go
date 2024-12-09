@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"fmt"
-	"os"
 	"time"
 
 	"gohustle/config"
@@ -26,36 +25,39 @@ type AsynqQueue struct {
 func InitAsynqQueue(cfg *config.AsynqConfig) *AsynqQueue {
 	log := logger.GetLogger()
 
+	log.Info("Initializing Asynq Queue", map[string]interface{}{
+		"host": cfg.Host,
+		"port": cfg.Port,
+		"db":   cfg.DB,
+	})
+
 	redisOpt := asynq.RedisClientOpt{
 		Addr:     fmt.Sprintf("%s:%s", cfg.Host, cfg.Port),
 		Password: cfg.Password,
 		DB:       cfg.DB,
+		PoolSize: cfg.MaxConnections,
 	}
 
 	client := asynq.NewClient(redisOpt)
-
-	if err := client.Ping(); err != nil {
-		log.Error("Failed to connect to Redis", map[string]interface{}{
-			"error": err.Error(),
-		})
-		os.Exit(1)
-	}
-
 	server := asynq.NewServer(
 		redisOpt,
 		asynq.Config{
-			Concurrency:    cfg.Concurrency,
-			Queues:         cfg.Queues,
-			StrictPriority: true,
+			Concurrency: cfg.Concurrency,
+			Queues: map[string]int{
+				"ticks_file":      cfg.Queues["ticks_file"],
+				"ticks_timescale": cfg.Queues["ticks_timescale"],
+			},
 			RetryDelayFunc: defaultRetryFunc,
+			IsFailure: func(err error) bool {
+				return err != nil
+			},
+			ShutdownTimeout: 5 * time.Second,
+			Logger:          NewAsynqLogger(),
 		},
 	)
 
-	log.Info("Successfully connected to Asynq", map[string]interface{}{
-		"host":        cfg.Host,
-		"port":        cfg.Port,
+	log.Info("Asynq Queue initialized", map[string]interface{}{
 		"concurrency": cfg.Concurrency,
-		"queues":      cfg.Queues,
 	})
 
 	return &AsynqQueue{
@@ -88,12 +90,46 @@ func (a *AsynqQueue) Enqueue(ctx context.Context, task *asynq.Task, opts ...asyn
 	return err
 }
 
-func (a *AsynqQueue) HandleFunc(taskType string, handler func(context.Context, *asynq.Task) error) {
-	a.mux.HandleFunc(taskType, handler)
+func (a *AsynqQueue) HandleFunc(pattern string, handler func(context.Context, *asynq.Task) error) {
+	log := logger.GetLogger()
+	log.Info("Registering handler", map[string]interface{}{
+		"pattern": pattern,
+	})
+
+	// Wrap the handler to add logging
+	wrappedHandler := func(ctx context.Context, t *asynq.Task) error {
+		log.Debug("Processing task", map[string]interface{}{
+			"type": t.Type(),
+			"id":   t.ResultWriter().TaskID(),
+		})
+
+		err := handler(ctx, t)
+		if err != nil {
+			log.Error("Task processing failed", map[string]interface{}{
+				"type":  t.Type(),
+				"id":    t.ResultWriter().TaskID(),
+				"error": err.Error(),
+			})
+		}
+		return err
+	}
+
+	a.mux.HandleFunc(pattern, wrappedHandler)
 }
 
 func (a *AsynqQueue) Start() error {
-	return a.server.Run(a.mux)
+	log := logger.GetLogger()
+	log.Info("Starting Asynq server", map[string]interface{}{
+		"queues": a.config.Queues,
+	})
+
+	if err := a.server.Run(a.mux); err != nil { // Changed from Start to Run
+		log.Error("Failed to start Asynq server", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+	return nil
 }
 
 // ProcessTickTask registers a handler for tick processing
@@ -111,5 +147,47 @@ func (a *AsynqQueue) ProcessTickTask(handler func(context.Context, uint32, *prot
 		}
 
 		return handler(ctx, tick.InstrumentToken, tick)
+	})
+}
+
+type AsynqLogger struct {
+	logger *logger.Logger
+}
+
+func NewAsynqLogger() *AsynqLogger {
+	return &AsynqLogger{
+		logger: logger.GetLogger(),
+	}
+}
+
+func (l *AsynqLogger) Debug(args ...interface{}) {
+	l.logger.Debug(fmt.Sprint(args...), map[string]interface{}{
+		"source": "asynq",
+	})
+}
+
+func (l *AsynqLogger) Info(args ...interface{}) {
+	l.logger.Info(fmt.Sprint(args...), map[string]interface{}{
+		"source": "asynq",
+	})
+}
+
+func (l *AsynqLogger) Warn(args ...interface{}) {
+	l.logger.Info(fmt.Sprint(args...), map[string]interface{}{
+		"source": "asynq",
+		"level":  "WARN",
+	})
+}
+
+func (l *AsynqLogger) Error(args ...interface{}) {
+	l.logger.Error(fmt.Sprint(args...), map[string]interface{}{
+		"source": "asynq",
+	})
+}
+
+func (l *AsynqLogger) Fatal(args ...interface{}) {
+	l.logger.Error(fmt.Sprint(args...), map[string]interface{}{
+		"source": "asynq",
+		"level":  "FATAL",
 	})
 }

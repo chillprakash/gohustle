@@ -16,6 +16,7 @@ type Config struct {
 	Kite      KiteConfig      `json:"kite"`
 	Asynq     AsynqConfig     `json:"asynq"`
 	Telegram  TelegramConfig  `json:"telegram"`
+	Indices   IndicesConfig   `json:"indices"`
 }
 
 type TimescaleConfig struct {
@@ -63,18 +64,24 @@ type KiteConfig struct {
 }
 
 type AsynqConfig struct {
-	Host        string         `json:"host"`
-	Port        string         `json:"port"`
-	Password    string         `json:"password"`
-	DB          int            `json:"db"`
-	Concurrency int            `json:"concurrency"`
-	RetryLimit  int            `json:"retry_limit"`
-	Queues      map[string]int `json:"queues"`
+	Host           string         `json:"host"`
+	Port           string         `json:"port"`
+	Password       string         `json:"password"`
+	DB             int            `json:"db"`
+	Concurrency    int            `json:"concurrency"`
+	RetryLimit     int            `json:"retry_limit"`
+	MaxConnections int            `json:"max_connections"`
+	Queues         map[string]int `json:"queues"`
 }
 
 type TelegramConfig struct {
 	BotToken string `json:"bot_token"`
 	ChatID   string `json:"chat_id"`
+}
+
+type IndicesConfig struct {
+	DerivedIndices []string `json:"derived_indices"`
+	SpotIndices    []string `json:"spot_indices"`
 }
 
 // GetConfig loads configuration and handles errors internally

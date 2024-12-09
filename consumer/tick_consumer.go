@@ -13,57 +13,42 @@ import (
 	"gohustle/logger"
 	proto "gohustle/proto"
 	"gohustle/zerodha"
+
+	"github.com/hibiken/asynq"
+	googleproto "google.golang.org/protobuf/proto"
 )
 
 func StartTickConsumer(cfg *config.Config, kite *zerodha.KiteConnect) {
 	log := logger.GetLogger()
+	log.Info("Starting File Tick Consumer", nil)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Create tick writer with context and base directory
-	baseDir := "data/ticks" // You might want to get this from config
+	baseDir := "data/ticks"
 	tickWriter := zerodha.NewTickWriter(ctx, 1000, baseDir)
 	defer tickWriter.Shutdown()
 
-	// Register consumer with ctx
-	kite.ProcessTickTask(func(ctx context.Context, token uint32, tick *proto.TickData) error {
+	// Register handler for file processing queue
+	kite.GetAsynqQueue().HandleFunc("process_tick_file", func(ctx context.Context, t *asynq.Task) error {
+		tick := &proto.TickData{}
+		if err := googleproto.Unmarshal(t.Payload(), tick); err != nil {
+			return fmt.Errorf("failed to unmarshal tick: %w", err)
+		}
+
 		// Get the token info from cache
-		tokenStr := fmt.Sprintf("%d", token)
+		tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
 		tokenInfo, exists := kite.GetInstrumentInfo(tokenStr)
 		if !exists {
-			log.Error("Token not found in lookup cache", map[string]interface{}{
-				"token": tokenStr,
-			})
 			return fmt.Errorf("token not found in lookup: %s", tokenStr)
 		}
 
-		index := tokenInfo.Index // Get the index name
-
-		// Generate filename using expiry and current date
+		// Generate filename
 		currentDate := time.Now().Format("02-01-2006")
-		filename := generateFileName(index, tokenInfo.Expiry, currentDate, tokenInfo.IsIndex)
+		filename := generateFileName(tokenInfo.Index, tokenInfo.Expiry, currentDate, tokenInfo.IsIndex)
 
-		log.Info("Processing tick", map[string]interface{}{
-			"token":        token,
-			"symbol":       tokenInfo.Symbol,
-			"index":        tokenInfo.Index,
-			"expiry":       tokenInfo.Expiry.Format("2006-01-02"),
-			"current_date": currentDate,
-			"filename":     filename,
-			"last_price":   tick.LastPrice,
-			"volume":       tick.VolumeTraded,
-			"oi":           tick.Oi,
-			// ... other tick data ...
-		})
-
-		if err := tickWriter.Write(tick, filename); err != nil {
-			log.Error("Failed to write tick", map[string]interface{}{
-				"error": err.Error(),
-				"token": token,
-			})
-			return err
-		} // TODO: Implement file writing logic here
-		return nil
+		return tickWriter.Write(tick, filename)
 	})
 
 	// Handle graceful shutdown

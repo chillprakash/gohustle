@@ -145,7 +145,7 @@ func (k *KiteConnect) handleTick(tick kitemodels.Tick) {
 		go func() {
 			defer func() {
 				<-k.tickWorkerPool // Release worker
-				log.Debug("Released worker", map[string]interface{}{
+				log.Info("Released worker", map[string]interface{}{
 					"token":          tick.InstrumentToken,
 					"workers_in_use": len(k.tickWorkerPool),
 					"total_workers":  cap(k.tickWorkerPool),
@@ -218,8 +218,16 @@ func (k *KiteConnect) processTickData(tick kitemodels.Tick) {
 		return
 	}
 
-	task := asynq.NewTask("process_tick", payload, asynq.Queue("ticks"))
-	if err := k.asynqQueue.Enqueue(context.Background(), task); err != nil {
+	fileTask := asynq.NewTask("process_tick_file", payload,
+		asynq.Queue("ticks_file"),
+		asynq.MaxRetry(3),
+	)
+	timescaleTask := asynq.NewTask("process_tick_timescale", payload,
+		asynq.Queue("ticks_timescale"),
+		asynq.MaxRetry(3),
+	)
+
+	if err := k.asynqQueue.Enqueue(context.Background(), fileTask); err != nil {
 		log.Error("Failed to enqueue tick", map[string]interface{}{
 			"error": err.Error(),
 			"token": tick.InstrumentToken,
@@ -227,7 +235,15 @@ func (k *KiteConnect) processTickData(tick kitemodels.Tick) {
 		return
 	}
 
-	log.Info("Enqueued proto tick", map[string]interface{}{
+	if err := k.asynqQueue.Enqueue(context.Background(), timescaleTask); err != nil {
+		log.Error("Failed to enqueue tick", map[string]interface{}{
+			"error": err.Error(),
+			"token": tick.InstrumentToken,
+		})
+		return
+	}
+
+	log.Debug("Enqueued proto tick", map[string]interface{}{
 		"token": tick.InstrumentToken,
 		"price": tick.LastPrice,
 	})

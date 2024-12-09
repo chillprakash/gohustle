@@ -60,11 +60,6 @@ func NewTickProcessor(pool *pgxpool.Pool) *TickProcessor {
 	}
 }
 
-// Add this method to KiteConnect
-func (k *KiteConnect) ProcessTickTask(handler func(context.Context, uint32, *proto.TickData) error) {
-	k.asynqQueue.ProcessTickTask(handler)
-}
-
 // TimeScale batch processor
 func (p *KiteConnect) processTimeScaleBatch(ctx context.Context) {
 	ticker := time.NewTicker(p.tickProcessor.batchConfig.DBFlushInterval)
@@ -258,4 +253,35 @@ func (p *TickProcessor) FlushProtobuf(ctx context.Context) {
 	if len(p.fileBatch) > 0 {
 		p.appendBatchToProtobufFile(p.fileBatch)
 	}
+}
+
+// Close cleans up resources used by the TickProcessor
+func (t *TickProcessor) Close() {
+	// Flush any remaining batches
+	if len(t.dbBatch) > 0 {
+		t.saveBatchToTimeScale(t.dbBatch)
+	}
+	if len(t.fileBatch) > 0 {
+		t.appendBatchToProtobufFile(t.fileBatch)
+	}
+
+	// Close channels
+	close(t.timescaleChan)
+	close(t.protobufChan)
+}
+
+func (t *TickProcessor) ProcessTick(tick *proto.TickData) {
+	log := logger.GetLogger()
+	log.Info("Processing tick", map[string]interface{}{
+		"token":     tick.InstrumentToken,
+		"timestamp": time.Unix(tick.Timestamp, 0),
+		"lastPrice": tick.LastPrice,
+		"volume":    tick.VolumeTraded,
+		"oi":        tick.Oi,
+	})
+
+	// Add to TimeScale batch
+	t.timescaleChan <- tick
+	// Add to Protobuf batch
+	t.protobufChan <- tick
 }

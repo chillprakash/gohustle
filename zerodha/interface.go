@@ -3,9 +3,14 @@ package zerodha
 import (
 	"context"
 	proto "gohustle/proto"
+	"time"
 
 	"github.com/zerodha/gokiteconnect/v4/models"
 )
+
+type ExpiryOperations interface {
+	GetIndexVsExpiryMap(ctx context.Context) (map[string][]time.Time, error)
+}
 
 // TokenOperations handles token management
 type TokenOperations interface {

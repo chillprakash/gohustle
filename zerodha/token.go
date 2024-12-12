@@ -13,9 +13,25 @@ import (
 	"strings"
 	"time"
 
+	"gohustle/cache"
+	"gohustle/config"
 	"gohustle/logger"
 
 	"github.com/pquerna/otp/totp"
+)
+
+// RedisTokenData represents token information stored in Redis
+type RedisTokenData struct {
+	AccessToken string `json:"access_token"`
+	CreatedAt   int64  `json:"created_at"` // Unix milliseconds
+	ExpiresAt   int64  `json:"expires_at"` // Unix milliseconds
+	IsValid     bool   `json:"is_valid"`
+}
+
+// Constants for token management
+const (
+	TokenKeyPrefix = "kite:token:" // Prefix for token keys
+	TokenSetKey    = "kite:tokens" // Set to track all tokens
 )
 
 var _ TokenOperations = (*KiteConnect)(nil)
@@ -23,9 +39,16 @@ var _ TokenOperations = (*KiteConnect)(nil)
 func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
 	log := logger.GetLogger()
 
-	token, err := k.getToken(ctx)
-	if err == nil && token != "" {
-		log.Info("Found valid token in database", map[string]interface{}{
+	// Get Redis cache instance
+	redisCache, err := cache.NewRedisCache()
+	if err != nil {
+		return "", fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+
+	// Try to get token from Redis
+	token := redisCache.GetValidToken(ctx)
+	if token != "" {
+		log.Info("Found valid token in Redis", map[string]interface{}{
 			"token_length": len(token),
 		})
 		return token, nil
@@ -37,7 +60,7 @@ func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
 		log.Error("Failed to refresh token", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return "", errors.New("failed to refresh token")
+		return "", fmt.Errorf("failed to refresh token: %w", err)
 	}
 
 	return token, nil
@@ -45,6 +68,12 @@ func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
 
 func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
 	log := logger.GetLogger()
+
+	// Get Redis cache instance
+	redisCache, err := cache.NewRedisCache()
+	if err != nil {
+		return "", fmt.Errorf("failed to get Redis cache: %w", err)
+	}
 
 	client := k.initializeHTTPClient()
 	loginResult := k.performLogin(client)
@@ -60,12 +89,12 @@ func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
 		return "", errors.New("failed to generate access token")
 	}
 
-	// Save the token directly
-	if err := k.storeToken(ctx, accessToken); err != nil {
-		log.Error("Failed to save access token", map[string]interface{}{
+	// Store new token in Redis
+	if err := redisCache.StoreAccessToken(ctx, accessToken); err != nil {
+		log.Error("Failed to store token in Redis", map[string]interface{}{
 			"error": err.Error(),
 		})
-		return "", errors.New("failed to save access token")
+		// Don't return error here, token is still valid
 	}
 
 	return accessToken, nil
@@ -73,16 +102,18 @@ func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
 
 func (k *KiteConnect) performLogin(client *http.Client) *LoginResponse {
 	log := logger.GetLogger()
+	cfg := config.GetConfig()
+
 	loginData := url.Values{}
-	loginData.Set("user_id", k.config.Kite.UserID)
-	loginData.Set("password", k.config.Kite.UserPassword)
+	loginData.Set("user_id", cfg.Kite.UserID)
+	loginData.Set("password", cfg.Kite.UserPassword)
 
 	log.Info("Attempting login", map[string]interface{}{
-		"user_id": k.config.Kite.UserID,
-		"url":     k.config.Kite.LoginURL,
+		"user_id": cfg.Kite.UserID,
+		"url":     cfg.Kite.LoginURL,
 	})
 
-	loginResp, err := client.PostForm(k.config.Kite.LoginURL, loginData)
+	loginResp, err := client.PostForm(cfg.Kite.LoginURL, loginData)
 	if err != nil {
 		log.Error("Login request failed", map[string]interface{}{
 			"error": err.Error(),
@@ -104,7 +135,9 @@ func (k *KiteConnect) performLogin(client *http.Client) *LoginResponse {
 
 func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *LoginResponse) {
 	log := logger.GetLogger()
-	totpCode, err := totp.GenerateCode(k.config.Kite.TOTPKey, time.Now())
+	cfg := config.GetConfig()
+
+	totpCode, err := totp.GenerateCode(cfg.Kite.TOTPKey, time.Now())
 	if err != nil {
 		log.Error("Failed to generate TOTP", map[string]interface{}{
 			"error": err.Error(),
@@ -113,7 +146,7 @@ func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *Log
 	}
 
 	twoFAData := url.Values{}
-	twoFAData.Set("user_id", k.config.Kite.UserID)
+	twoFAData.Set("user_id", cfg.Kite.UserID)
 	twoFAData.Set("request_id", loginResult.Data.RequestID)
 	twoFAData.Set("twofa_value", totpCode)
 	twoFAData.Set("twofa_type", "totp")
@@ -122,7 +155,7 @@ func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *Log
 		"request_id": loginResult.Data.RequestID,
 	})
 
-	twoFAResp, err := client.PostForm(k.config.Kite.TwoFAURL, twoFAData)
+	twoFAResp, err := client.PostForm(cfg.Kite.TwoFAURL, twoFAData)
 	if err != nil {
 		log.Error("2FA request failed", map[string]interface{}{
 			"error": err.Error(),
@@ -134,9 +167,11 @@ func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *Log
 
 func (k *KiteConnect) getRequestToken(client *http.Client) string {
 	log := logger.GetLogger()
+	cfg := config.GetConfig()
+
 	kiteLoginURL := fmt.Sprintf(
 		"https://kite.zerodha.com/connect/login?api_key=%s&v=3",
-		k.config.Kite.APIKey,
+		cfg.Kite.APIKey,
 	)
 
 	log.Info("Attempting to get request token", map[string]interface{}{
@@ -154,66 +189,12 @@ func (k *KiteConnect) getRequestToken(client *http.Client) string {
 	return ""
 }
 
-// GetToken retrieves the latest valid access token
-func (k *KiteConnect) getToken(ctx context.Context) (string, error) {
-	log := logger.GetLogger()
-
-	query := `
-        SELECT access_token 
-        FROM access_tokens 
-        WHERE token_type = 'kite' 
-        AND is_active = TRUE 
-        AND expires_at > NOW() 
-        ORDER BY created_at DESC 
-        LIMIT 1
-    `
-
-	var token string
-	err := k.db.QueryRow(ctx, query).Scan(&token)
-	if err != nil {
-		log.Error("Failed to get token from database", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return "", errors.New("failed to get token from database")
-	}
-
-	return token, nil
-}
-
-// storeToken stores the access token in the database
-func (k *KiteConnect) storeToken(ctx context.Context, token string) error {
-	log := logger.GetLogger()
-
-	query := `
-        WITH updated AS (
-            UPDATE access_tokens 
-            SET is_active = FALSE 
-            WHERE token_type = 'kite' AND is_active = TRUE
-            RETURNING 1
-        )
-        INSERT INTO access_tokens (token_type, access_token, expires_at)
-        VALUES ('kite', $1, NOW() + INTERVAL '24 hours')
-    `
-
-	_, err := k.db.Exec(ctx, query, token)
-	if err != nil {
-		log.Error("Failed to store token in database", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return errors.New("failed to store token in database")
-	}
-
-	log.Info("Successfully stored token", map[string]interface{}{
-		"token_length": len(token),
-	})
-	return nil
-}
-
 // GenerateAccessToken generates and sets the access token using the request token
 func (k *KiteConnect) generateAccessToken(ctx context.Context, requestToken string) (string, error) {
 	log := logger.GetLogger()
+	cfg := config.GetConfig()
 
-	session, err := k.Kite.GenerateSession(requestToken, k.config.Kite.APISecret)
+	session, err := k.Kite.GenerateSession(requestToken, cfg.Kite.APISecret)
 	if err != nil {
 		log.Error("Failed to generate session", map[string]interface{}{
 			"error":      err.Error(),

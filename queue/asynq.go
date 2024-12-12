@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"time"
 
 	"gohustle/config"
@@ -38,26 +39,35 @@ func InitAsynqQueue(cfg *config.AsynqConfig) *AsynqQueue {
 		PoolSize: cfg.MaxConnections,
 	}
 
+	// Convert queue config to map[string]int for Asynq
+	queuePriorities := make(map[string]int)
+	for queueName, queueCfg := range cfg.Queues {
+		if queueCfg.Enabled {
+			queuePriorities[queueName] = queueCfg.Priority
+		}
+	}
+
 	client := asynq.NewClient(redisOpt)
 	server := asynq.NewServer(
 		redisOpt,
 		asynq.Config{
-			Concurrency: cfg.Concurrency,
-			Queues: map[string]int{
-				"ticks_file":      cfg.Queues["ticks_file"],
-				"ticks_timescale": cfg.Queues["ticks_timescale"],
-			},
+			Concurrency:    cfg.Concurrency,
+			Queues:         queuePriorities,
+			StrictPriority: true,
 			RetryDelayFunc: defaultRetryFunc,
 			IsFailure: func(err error) bool {
 				return err != nil
 			},
+			GroupAggregator: &TaskAggregator{},
 			ShutdownTimeout: 5 * time.Second,
 			Logger:          NewAsynqLogger(),
 		},
 	)
 
 	log.Info("Asynq Queue initialized", map[string]interface{}{
-		"concurrency": cfg.Concurrency,
+		"concurrency":     cfg.Concurrency,
+		"max_connections": cfg.MaxConnections,
+		"queues":          queuePriorities,
 	})
 
 	return &AsynqQueue{
@@ -120,15 +130,25 @@ func (a *AsynqQueue) HandleFunc(pattern string, handler func(context.Context, *a
 func (a *AsynqQueue) Start() error {
 	log := logger.GetLogger()
 	log.Info("Starting Asynq server", map[string]interface{}{
-		"queues": a.config.Queues,
+		"queues":      a.config.Queues,
+		"concurrency": runtime.NumCPU() * 100,
 	})
 
-	if err := a.server.Run(a.mux); err != nil { // Changed from Start to Run
-		log.Error("Failed to start Asynq server", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return err
-	}
+	// Create a channel to track server start
+	started := make(chan struct{})
+	go func() {
+		// Signal that server is starting
+		close(started)
+		if err := a.server.Run(a.mux); err != nil {
+			log.Error("Failed to run Asynq server", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}()
+
+	// Wait for server to start
+	<-started
+	log.Info("Asynq server started successfully")
 	return nil
 }
 
@@ -190,4 +210,17 @@ func (l *AsynqLogger) Fatal(args ...interface{}) {
 		"source": "asynq",
 		"level":  "FATAL",
 	})
+}
+
+type TaskAggregator struct{}
+
+func (ta *TaskAggregator) Aggregate(group string, tasks []*asynq.Task) *asynq.Task {
+	if len(tasks) > 100 {
+		return tasks[0]
+	}
+	return tasks[0]
+}
+
+func (a *AsynqQueue) GetMux() *asynq.ServeMux {
+	return a.mux
 }

@@ -2,13 +2,42 @@ package cache
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"fmt"
 	"gohustle/config"
 	"gohustle/logger"
-	"strings"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
+)
+
+// RedisTokenData represents token information stored in Redis
+type RedisTokenData struct {
+	AccessToken string `json:"access_token"`
+	CreatedAt   int64  `json:"created_at"` // Unix milliseconds
+	ExpiresAt   int64  `json:"expires_at"` // Unix milliseconds
+	IsValid     bool   `json:"is_valid"`
+}
+
+// Constants for database numbers
+const (
+	IndexSpotDB     = 1 // For index spot data
+	NiftyOptionsDB  = 2 // For NIFTY options
+	SensexOptionsDB = 3 // For SENSEX options
+	RelationalDB    = 4 // For relational data
+)
+
+// Add these constants for token management
+const (
+	TokenKeyPrefix = "kite:token:" // Prefix for token keys
+	TokenSetKey    = "kite:tokens" // Set to track all tokens
+)
+
+var (
+	redisInstance *RedisCache
+	redisOnce     sync.Once
+	redisMu       sync.RWMutex
 )
 
 type RedisCache struct {
@@ -18,62 +47,67 @@ type RedisCache struct {
 	mu     sync.RWMutex
 }
 
-// RedisInterface defines the contract for Redis operations
-type RedisInterface interface {
-	// Connection management
-	Close()
-	GetStats(db int) map[string]interface{}
+// NewRedisCache creates or returns existing Redis cache instance
+func NewRedisCache() (*RedisCache, error) {
+	redisMu.Lock()
+	defer redisMu.Unlock()
 
-	// Database-specific client
-	GetDefaultRedisDB0() *redis.Client // DB 0: Default database
+	var initErr error
+	redisOnce.Do(func() {
+		cfg := config.GetConfig()
+		redisInstance = &RedisCache{
+			pools:  make(map[int]*redis.Client),
+			log:    logger.GetLogger(),
+			config: &cfg.Redis,
+			mu:     sync.RWMutex{},
+		}
+		initErr = redisInstance.initialize()
+	})
 
-	// Stream operations
-	XAdd(ctx context.Context, stream string, values interface{}) error
-	XRead(ctx context.Context, args *redis.XReadArgs) ([]redis.XStream, error)
-	XGroupCreate(ctx context.Context, stream, group, start string) error
-	XReadGroup(ctx context.Context, group, consumer string, streams ...string) ([]redis.XStream, error)
-	XAck(ctx context.Context, stream, group string, ids ...string) error
-	Exists(ctx context.Context, key string) (int64, error)
-	SIsMember(ctx context.Context, key string, member interface{}) *redis.BoolCmd
-	SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd
-	SMembers(ctx context.Context, key string) *redis.StringSliceCmd
+	if initErr != nil {
+		return nil, fmt.Errorf("failed to initialize Redis: %w", initErr)
+	}
+
+	return redisInstance, nil
 }
 
-// Verify RedisCache implements RedisInterface at compile time
-var _ RedisInterface = (*RedisCache)(nil)
-
-// NewRedisCache creates a new Redis cache instance with connection pooling
-func NewRedisCache(config *config.RedisConfig) *RedisCache {
-	log := logger.GetLogger()
-
-	if config.MaxConnections == 0 {
-		config.MaxConnections = 100 // default max connections
+// initialize is internal initialization method
+func (rc *RedisCache) initialize() error {
+	// Set defaults if not configured
+	if rc.config.MaxConnections == 0 {
+		rc.config.MaxConnections = 100
 	}
-	if config.MinConnections == 0 {
-		config.MinConnections = 10 // default min connections
+	if rc.config.MinConnections == 0 {
+		rc.config.MinConnections = 10
 	}
-	if config.GetConnectTimeout() == 0 {
-		config.ConnectTimeout = "5s"
-		config.ParseDurations()
-	}
-	if config.GetMaxConnLifetime() == 0 {
-		config.MaxConnLifetime = "30m"
-		config.ParseDurations()
-	}
-	if config.GetMaxConnIdleTime() == 0 {
-		config.MaxConnIdleTime = "5m"
-		config.ParseDurations()
+	if rc.config.GetConnectTimeout() == 0 {
+		rc.config.ConnectTimeout = "5s"
+		if err := rc.config.ToDuration(); err != nil {
+			rc.log.Error("Failed to parse connect timeout", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
 
-	return &RedisCache{
-		pools:  make(map[int]*redis.Client),
-		log:    log,
-		config: config,
-		mu:     sync.RWMutex{},
+	// Create default DB client
+	client := rc.getRedisClient(0)
+	if client == nil {
+		return fmt.Errorf("failed to create default Redis client")
 	}
+
+	rc.log.Info("Redis cache initialized", map[string]interface{}{
+		"host":        rc.config.Host,
+		"port":        rc.config.Port,
+		"max_conns":   rc.config.MaxConnections,
+		"min_conns":   rc.config.MinConnections,
+		"aof_enabled": rc.config.Persistence.AOFEnabled,
+		"aof_sync":    rc.config.Persistence.AOFSync,
+	})
+
+	return nil
 }
 
-// getRedisClient gets or creates a Redis client for the specified database with connection pooling
+// getRedisClient gets or creates a Redis client for the specified database
 func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 	rc.mu.RLock()
 	if client, exists := rc.pools[db]; exists {
@@ -89,6 +123,9 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 	if client, exists := rc.pools[db]; exists {
 		return client
 	}
+
+	// Get database name based on DB number
+	dbName := getDBName(db)
 
 	client := redis.NewClient(&redis.Options{
 		Addr:            rc.config.Host + ":" + rc.config.Port,
@@ -108,10 +145,11 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 	ctx := context.Background()
 	if err := client.Ping(ctx).Err(); err != nil {
 		rc.log.Error("Failed to connect to Redis", map[string]interface{}{
-			"error": err.Error(),
-			"db":    db,
-			"host":  rc.config.Host,
-			"port":  rc.config.Port,
+			"error":   err.Error(),
+			"db":      db,
+			"db_name": dbName,
+			"host":    rc.config.Host,
+			"port":    rc.config.Port,
 		})
 		return nil
 	}
@@ -119,6 +157,7 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 	rc.pools[db] = client
 	rc.log.Info("Created new Redis connection pool", map[string]interface{}{
 		"db":             db,
+		"db_name":        dbName,
 		"max_conns":      rc.config.MaxConnections,
 		"min_idle_conns": rc.config.MinConnections,
 	})
@@ -127,29 +166,35 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 }
 
 // Helper methods for specific databases
-func (rc *RedisCache) GetDefaultRedisDB0() *redis.Client {
-	return rc.getRedisClient(1)
+func (rc *RedisCache) GetIndexSpotDB1() *redis.Client {
+	return rc.getRedisClient(IndexSpotDB)
 }
 
-// GetStats returns current connection pool statistics
-func (rc *RedisCache) GetStats(db int) map[string]interface{} {
-	rc.mu.RLock()
-	client, exists := rc.pools[db]
-	rc.mu.RUnlock()
+func (rc *RedisCache) GetNiftyOptionsDB2() *redis.Client {
+	return rc.getRedisClient(NiftyOptionsDB)
+}
 
-	if !exists {
-		return nil
-	}
+func (rc *RedisCache) GetSensexOptionsDB3() *redis.Client {
+	return rc.getRedisClient(SensexOptionsDB)
+}
 
-	stats := client.PoolStats()
-	return map[string]interface{}{
-		"total_conns":    stats.TotalConns,
-		"idle_conns":     stats.IdleConns,
-		"stale_conns":    stats.StaleConns,
-		"hits":           stats.Hits,
-		"misses":         stats.Misses,
-		"timeouts":       stats.Timeouts,
-		"total_commands": stats.TotalConns,
+func (rc *RedisCache) GetRelationalDB4() *redis.Client {
+	return rc.getRedisClient(RelationalDB)
+}
+
+// Helper function to get database names
+func getDBName(db int) string {
+	switch db {
+	case IndexSpotDB:
+		return fmt.Sprintf("ticks_index_spot_db_%d", db)
+	case NiftyOptionsDB:
+		return fmt.Sprintf("ticks_nifty_options_db_%d", db)
+	case SensexOptionsDB:
+		return fmt.Sprintf("ticks_sensex_options_db_%d", db)
+	case RelationalDB:
+		return fmt.Sprintf("relational_db_%d", db)
+	default:
+		return fmt.Sprintf("db_%d", db)
 	}
 }
 
@@ -164,180 +209,130 @@ func (rc *RedisCache) Close() {
 				"error": err.Error(),
 				"db":    db,
 			})
-		} else {
-			rc.log.Info("Closed Redis connection", map[string]interface{}{
-				"db": db,
-			})
 		}
 	}
 }
 
-// Implementation
-func (rc *RedisCache) XAdd(ctx context.Context, stream string, values interface{}) error {
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		return errors.New("redis client not initialized")
-	}
-	return client.XAdd(ctx, &redis.XAddArgs{
-		Stream: stream,
-		Values: values,
-	}).Err()
-}
-func (rc *RedisCache) XGroupCreate(ctx context.Context, stream, group, start string) error {
+// StoreAccessToken stores a new access token with 6 AM next day expiry
+func (rc *RedisCache) StoreAccessToken(ctx context.Context, accessToken string) error {
 	log := logger.GetLogger()
 
-	log.Info("Attempting to create consumer group", map[string]interface{}{
-		"stream": stream,
-		"group":  group,
-		"start":  start,
+	// Calculate expiry (6 AM next day) in milliseconds
+	tomorrow := time.Now().Add(24 * time.Hour)
+	expiryTime := time.Date(
+		tomorrow.Year(), tomorrow.Month(), tomorrow.Day(),
+		6, 0, 0, 0, tomorrow.Location(),
+	)
+
+	tokenData := RedisTokenData{
+		AccessToken: accessToken,
+		CreatedAt:   time.Now().UnixMilli(),
+		ExpiresAt:   expiryTime.UnixMilli(),
+		IsValid:     true,
+	}
+
+	// Serialize token data
+	data, err := json.Marshal(tokenData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal token data: %w", err)
+	}
+
+	// Get relational DB client
+	client := rc.GetRelationalDB4()
+
+	// Use fixed key "access_token" for both store and get
+	tokenKey := fmt.Sprintf("%s%s", TokenKeyPrefix, "access_token")
+
+	log.Info("Storing access token", map[string]interface{}{
+		"key":          tokenKey,
+		"token_length": len(accessToken),
+		"expires_at":   expiryTime.Format("2006-01-02 15:04:05"),
+		"data":         string(data),
 	})
 
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		log.Error("Redis client not initialized", map[string]interface{}{
-			"stream": stream,
-			"group":  group,
-		})
-		return errors.New("redis client not initialized")
-	}
+	pipe := client.Pipeline()
 
-	log.Debug("Got Redis client, creating group", map[string]interface{}{
-		"stream": stream,
-		"group":  group,
-	})
+	// Store token data with expiry
+	pipe.Set(ctx, tokenKey, data, time.Until(expiryTime))
 
-	// Add debug for actual Redis command
-	log.Debug("Executing XGroupCreate command", map[string]interface{}{
-		"stream":        stream,
-		"group":         group,
-		"start":         start,
-		"client_status": client.PoolStats(),
-	})
+	// Add to token set for tracking
+	pipe.SAdd(ctx, TokenSetKey, tokenKey)
 
-	result := client.XGroupCreate(ctx, stream, group, start)
-	if result.Err() != nil {
-		if strings.Contains(result.Err().Error(), "BUSYGROUP") {
-			log.Info("Consumer group already exists", map[string]interface{}{
-				"stream": stream,
-				"group":  group,
-				"start":  start,
-			})
-			return nil // Not an error case
-		}
-		log.Error("XGroupCreate command failed", map[string]interface{}{
-			"error":      result.Err().Error(),
-			"stream":     stream,
-			"group":      group,
-			"start":      start,
-			"raw_result": result.String(),
-		})
-		return result.Err()
-	}
-
-	log.Info("Successfully created new consumer group", map[string]interface{}{
-		"stream": stream,
-		"group":  group,
-		"start":  start,
-		"result": result.String(),
-	})
-	return nil
+	// Execute pipeline
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
-func (rc *RedisCache) XReadGroup(ctx context.Context, group, consumer string, streams ...string) ([]redis.XStream, error) {
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		return nil, errors.New("redis client not initialized")
-	}
-	return client.XReadGroup(ctx, &redis.XReadGroupArgs{
-		Group:    group,
-		Consumer: consumer,
-		Streams:  streams,
-		Count:    10,
-		Block:    0,
-	}).Result()
-}
-
-func (rc *RedisCache) XAck(ctx context.Context, stream, group string, ids ...string) error {
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		return errors.New("redis client not initialized")
-	}
-	return client.XAck(ctx, stream, group, ids...).Err()
-}
-
-func (rc *RedisCache) Exists(ctx context.Context, key string) (int64, error) {
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		return 0, errors.New("redis client not initialized")
-	}
-	return client.Exists(ctx, key).Result()
-}
-
-// SIsMember checks if a member exists in a set
-func (rc *RedisCache) SIsMember(ctx context.Context, key string, member interface{}) *redis.BoolCmd {
+// GetValidToken gets the current valid token or returns empty string if expired/invalid
+func (rc *RedisCache) GetValidToken(ctx context.Context) string {
 	log := logger.GetLogger()
+	client := rc.GetRelationalDB4()
+	tokenKey := fmt.Sprintf("%s%s", TokenKeyPrefix, "access_token")
 
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		log.Error("Redis client not initialized", map[string]interface{}{
-			"key":    key,
-			"member": member,
+	data, err := client.Get(ctx, tokenKey).Bytes()
+	if err != nil {
+		log.Error("Failed to get token from Redis", map[string]interface{}{
+			"error": err.Error(),
+			"key":   tokenKey,
 		})
-		return redis.NewBoolCmd(ctx)
+		return ""
 	}
 
-	log.Debug("Checking set membership", map[string]interface{}{
-		"key":    key,
-		"member": member,
+	var tokenData RedisTokenData
+	if err := json.Unmarshal(data, &tokenData); err != nil {
+		log.Error("Failed to unmarshal token data", map[string]interface{}{
+			"error": err.Error(),
+			"data":  string(data),
+		})
+		return ""
+	}
+
+	log.Info("Retrieved token data", map[string]interface{}{
+		"key":          tokenKey,
+		"token_length": len(tokenData.AccessToken),
+		"is_valid":     tokenData.IsValid,
+		"expires_at":   time.UnixMilli(tokenData.ExpiresAt).Format("2006-01-02 15:04:05"),
+		"created_at":   time.UnixMilli(tokenData.CreatedAt).Format("2006-01-02 15:04:05"),
 	})
 
-	return client.SIsMember(ctx, key, member)
-}
-
-// SAdd adds members to a set
-func (rc *RedisCache) SAdd(ctx context.Context, key string, members ...interface{}) *redis.IntCmd {
-	log := logger.GetLogger()
-
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		log.Error("Redis client not initialized", map[string]interface{}{
-			"key":     key,
-			"members": members,
-		})
-		return redis.NewIntCmd(ctx)
+	if tokenData.IsValid && time.UnixMilli(tokenData.ExpiresAt).After(time.Now()) {
+		return tokenData.AccessToken
 	}
 
-	log.Debug("Adding to set", map[string]interface{}{
-		"key":     key,
-		"members": members,
+	log.Info("Token invalid or expired", map[string]interface{}{
+		"is_valid":     tokenData.IsValid,
+		"expires_at":   time.UnixMilli(tokenData.ExpiresAt).Format("2006-01-02 15:04:05"),
+		"current_time": time.Now().Format("2006-01-02 15:04:05"),
 	})
-
-	return client.SAdd(ctx, key, members...)
+	return ""
 }
 
-// Optional: Add method to get all members
-func (rc *RedisCache) SMembers(ctx context.Context, key string) *redis.StringSliceCmd {
-	log := logger.GetLogger()
+// InvalidateToken marks a token as invalid
+func (rc *RedisCache) InvalidateToken(ctx context.Context, apiKey string) error {
+	client := rc.GetRelationalDB4()
+	tokenKey := fmt.Sprintf("%s%s", TokenKeyPrefix, apiKey)
 
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		log.Error("Redis client not initialized", map[string]interface{}{
-			"key": key,
-		})
-		return redis.NewStringSliceCmd(ctx)
+	// Get existing token data
+	data, err := client.Get(ctx, tokenKey).Bytes()
+	if err != nil {
+		return err
 	}
 
-	log.Debug("Getting set members", map[string]interface{}{
-		"key": key,
-	})
-
-	return client.SMembers(ctx, key)
-}
-
-func (rc *RedisCache) XRead(ctx context.Context, args *redis.XReadArgs) ([]redis.XStream, error) {
-	client := rc.GetDefaultRedisDB0()
-	if client == nil {
-		return nil, errors.New("redis client not initialized")
+	var tokenData RedisTokenData
+	if err := json.Unmarshal(data, &tokenData); err != nil {
+		return err
 	}
-	return client.XRead(ctx, args).Result()
+
+	// Mark as invalid
+	tokenData.IsValid = false
+
+	// Update token data
+	updatedData, err := json.Marshal(tokenData)
+	if err != nil {
+		return err
+	}
+
+	// Store updated data with remaining TTL
+	ttl := time.Until(time.UnixMilli(tokenData.ExpiresAt))
+	return client.Set(ctx, tokenKey, updatedData, ttl).Err()
 }

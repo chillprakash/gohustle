@@ -2,13 +2,15 @@
     "timescale": {
         "host": "localhost",
         "port": 5432,
+        "pgb_port": 6432,
         "user": "postgres",
         "password": "postgres",
         "DBName": "hustledb",
-        "max_connections": 500,
-        "min_connections": 50,
+        "max_connections": 1000,
+        "min_connections": 100,
         "max_conn_lifetime": "1h",
-        "max_conn_idle_time": "30m"
+        "max_conn_idle_time": "30m",
+        "pool_mode": "transaction"
     },
     "redis": {
         "host": "localhost",
@@ -18,7 +20,17 @@
         "min_connections": 50,
         "connect_timeout": "5s",
         "max_conn_lifetime": "30m",
-        "max_conn_idle_time": "5m"
+        "max_conn_idle_time": "5m",
+        "persistence": {
+            "aof_enabled": true,
+            "aof_fsync": "everysec",
+            "rdb_enabled": true,
+            "save_intervals": [
+                {"seconds": 900, "changes": 1},
+                {"seconds": 300, "changes": 10},
+                {"seconds": 60,  "changes": 10000}
+            ]
+        }
     },
     "kite": {
         "api_key": "mpztqt5n7hujwxhy",
@@ -36,12 +48,34 @@
         "port": "6379",
         "password": "",
         "db": 0,
-        "concurrency": 5000,
-        "retry_limit": 3,
-        "max_connections": 1000,
+        "max_connections": 100,
+        "concurrency": 400,
         "queues": {
-            "ticks_file": 100,
-            "ticks_timescale": 100
+            "nifty_index_queue": {
+                "priority": 10,
+                "concurrency": 50,
+                "enabled": true
+            },
+            "sensex_index_queue": {
+                "priority": 10,
+                "concurrency": 50,
+                "enabled": true
+            },
+            "nifty_options_queue": {
+                "priority": 5,
+                "concurrency": 100,
+                "enabled": true
+            },
+            "sensex_options_queue": {
+                "priority": 5,
+                "concurrency": 100,
+                "enabled": true
+            },
+            "default_queue": {
+                "priority": 1,
+                "concurrency": 50,
+                "enabled": true
+            }
         }
     },
     "telegram": {
@@ -55,11 +89,21 @@
         ],
         "spot_indices": [
             "NIFTY",
-            "SENSEX",
-            "BANKEX",
-            "BANKNIFTY",
-            "MIDCPNIFTY",
-            "FINNIFTY"
+            "SENSEX"
         ]
+    },
+    "clickhouse": {
+        "host": "localhost",
+        "port": 9000,
+        "user": "default",
+        "password": "",
+        "DBName": "hustledb",
+        "max_open_conns": 50,
+        "max_idle_conns": 5,
+        "conn_max_lifetime": "1h",
+        "dial_timeout": "10s",
+        "block_size": 1000000,
+        "pool_size": 100,
+        "debug": false
     }
 } 

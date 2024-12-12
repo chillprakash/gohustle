@@ -8,8 +8,11 @@ import (
 	"sync"
 	"time"
 
+	"gohustle/cache"
+	"gohustle/filestore"
 	"gohustle/logger"
 
+	"github.com/redis/go-redis/v9"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 	"google.golang.org/protobuf/proto"
 )
@@ -59,7 +62,7 @@ func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 	log := logger.GetLogger()
 
 	// Define instrument names we're interested in
-	instrumentNames := []string{"NIFTY", "BANKNIFTY", "MIDCPNIFTY", "FINNIFTY", "SENSEX", "BANKEX"}
+	instrumentNames := []string{"NIFTY", "SENSEX"}
 
 	// Get all instruments
 	allInstruments, err := k.Kite.GetInstruments()
@@ -83,7 +86,7 @@ func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 	return k.saveInstrumentsToFile(ctx, filteredInstruments)
 }
 
-func (k *KiteConnect) SyncInstrumentExpiriesFromFileToDB(ctx context.Context) error {
+func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context) error {
 	log := logger.GetLogger()
 
 	// Read expiries from file
@@ -95,15 +98,15 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToDB(ctx context.Context) er
 		return err
 	}
 
-	// Save expiries to DB
-	if err := k.saveInstrumentExpiriesToDB(ctx, expiries); err != nil {
-		log.Error("Failed to save expiries to DB", map[string]interface{}{
+	// Save to Redis
+	if err := k.saveExpiriesToRedis(ctx, expiries); err != nil {
+		log.Error("Failed to save expiries to Redis", map[string]interface{}{
 			"error": err.Error(),
 		})
 		return err
 	}
 
-	log.Info("Successfully synced expiries from file to DB", map[string]interface{}{
+	log.Info("Successfully synced expiries from file to Redis", map[string]interface{}{
 		"instruments_count": len(expiries),
 	})
 
@@ -114,9 +117,10 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToDB(ctx context.Context) er
 func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[string][]time.Time, error) {
 	log := logger.GetLogger()
 	currentDate := time.Now().Format("02-01-2006")
+	fileStore := filestore.NewDiskFileStore()
 
 	// Read the gzipped data
-	data, err := k.fileStore.ReadGzippedProto("instruments", currentDate)
+	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
 	if err != nil {
 		log.Error("Failed to read instrument data", map[string]interface{}{
 			"error": err.Error(),
@@ -158,7 +162,27 @@ func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[s
 		expiryMap[inst.Name][expiry] = true
 	}
 
-	return convertExpiryMapToSortedSlices(expiryMap), nil
+	result := convertExpiryMapToSortedSlices(expiryMap)
+
+	// Log the expiry data
+	log.Info("Instrument expiries read from file", map[string]interface{}{
+		"instruments_count": len(result),
+		"expiries":          formatExpiryMapForLog(result),
+	})
+
+	return result, nil
+}
+
+// Helper function to format expiry map for logging
+func formatExpiryMapForLog(m map[string][]time.Time) map[string][]string {
+	formatted := make(map[string][]string)
+	for instrument, dates := range m {
+		formatted[instrument] = make([]string, len(dates))
+		for i, date := range dates {
+			formatted[instrument][i] = date.Format("2006-01-02")
+		}
+	}
+	return formatted
 }
 
 // CreateLookupMapWithExpiryVSTokenMap extracts instrument tokens and creates a reverse lookup map
@@ -207,54 +231,6 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *Instrum
 	return tokensCache, reverseLookupCache
 }
 
-// SaveInstrumentExpiries saves the expiry dates to the database
-func (k *KiteConnect) saveInstrumentExpiriesToDB(ctx context.Context, expiries map[string][]time.Time) error {
-	log := logger.GetLogger()
-
-	// First, mark all existing records as inactive
-	deactivateQuery := `
-		UPDATE instrument_expiries 
-		SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP 
-		WHERE is_active = TRUE
-	`
-	if _, err := k.db.Exec(ctx, deactivateQuery); err != nil {
-		log.Error("Failed to deactivate existing expiries", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return err
-	}
-
-	// Insert new records
-	insertQuery := `
-		INSERT INTO instrument_expiries (instrument_name, expiry_date)
-		VALUES ($1, $2)
-		ON CONFLICT (instrument_name, expiry_date)
-		DO UPDATE SET 
-			is_active = TRUE,
-			updated_at = CURRENT_TIMESTAMP
-	`
-
-	for instrument, dates := range expiries {
-		for _, date := range dates {
-			if _, err := k.db.Exec(ctx, insertQuery, instrument, date); err != nil {
-				log.Error("Failed to insert expiry", map[string]interface{}{
-					"error":      err.Error(),
-					"instrument": instrument,
-					"expiry":     date,
-				})
-				return err
-			}
-		}
-
-		log.Info("Saved expiries for instrument", map[string]interface{}{
-			"instrument": instrument,
-			"count":      len(dates),
-		})
-	}
-
-	return nil
-}
-
 func convertExpiryMapToSortedSlices(expiryMap map[string]map[time.Time]bool) map[string][]time.Time {
 	result := make(map[string][]time.Time)
 
@@ -300,6 +276,7 @@ func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []st
 func (k *KiteConnect) saveInstrumentsToFile(ctx context.Context, instruments []kiteconnect.Instrument) error {
 	log := logger.GetLogger()
 	currentDate := time.Now().Format("02-01-2006")
+	fileStore := filestore.NewDiskFileStore()
 
 	// Convert to proto message
 	data, err := proto.Marshal(convertToProtoInstruments(instruments))
@@ -311,7 +288,7 @@ func (k *KiteConnect) saveInstrumentsToFile(ctx context.Context, instruments []k
 	}
 
 	// Save using filestore
-	if err := k.fileStore.SaveGzippedProto("instruments", currentDate, data); err != nil {
+	if err := fileStore.SaveGzippedProto("instruments", currentDate, data); err != nil {
 		log.Error("Failed to save instruments", map[string]interface{}{
 			"error": err.Error(),
 		})
@@ -351,8 +328,9 @@ func convertToProtoInstruments(instruments []kiteconnect.Instrument) *Instrument
 func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error) {
 	log := logger.GetLogger()
 	currentDate := time.Now().Format("02-01-2006")
+	fileStore := filestore.NewDiskFileStore()
 
-	data, err := k.fileStore.ReadGzippedProto("instruments", currentDate)
+	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
 	if err != nil {
 		log.Error("Failed to read instrument data", map[string]interface{}{
 			"error": err.Error(),
@@ -567,12 +545,12 @@ func extractIndex(symbol string) string {
 // GetIndexTokens returns a map of index names to their instrument tokens
 func (k *KiteConnect) GetIndexTokens() map[string]string {
 	return map[string]string{
-		"NIFTY":      "256265",
-		"SENSEX":     "265",
-		"BANKEX":     "274441",
-		"BANKNIFTY":  "260105",
-		"FINNIFTY":   "257801",
-		"MIDCPNIFTY": "288009",
+		"NIFTY":  "256265",
+		"SENSEX": "265",
+		// "BANKEX":     "274441",
+		// "BANKNIFTY":  "260105",
+		// "FINNIFTY":   "257801",
+		// "MIDCPNIFTY": "288009",
 	}
 }
 
@@ -632,4 +610,73 @@ func formatExpiryMap(m map[string][]time.Time) map[string][]string {
 		}
 	}
 	return formatted
+}
+
+func (k *KiteConnect) saveExpiriesToRedis(ctx context.Context, expiries map[string][]time.Time) error {
+	log := logger.GetLogger()
+
+	// Get Redis cache instance
+	redisCache, err := cache.NewRedisCache()
+	if err != nil {
+		return fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+
+	client := redisCache.GetRelationalDB4()
+	pipe := client.Pipeline()
+
+	// Key prefix for instrument expiries
+	const keyPrefix = "instrument:expiries:"
+
+	// Store expiries for each instrument
+	for instrument, dates := range expiries {
+		// Create sorted set key
+		setKey := fmt.Sprintf("%s%s", keyPrefix, instrument)
+
+		// Delete existing set
+		pipe.Del(ctx, setKey)
+
+		// Add all expiry dates to sorted set with score as Unix timestamp
+		for _, date := range dates {
+			// Skip invalid dates (like 0001-01-01)
+			if date.Year() < 2000 {
+				continue
+			}
+
+			// Use timestamp as score for natural date ordering
+			score := float64(date.Unix())
+			member := date.Format("2006-01-02")
+			pipe.ZAdd(ctx, setKey, redis.Z{
+				Score:  score,
+				Member: member,
+			})
+		}
+
+		// Set expiry for the key (7 days)
+		pipe.Expire(ctx, setKey, 7*24*time.Hour)
+	}
+
+	// Store list of instruments
+	instrumentsKey := keyPrefix + "list"
+	pipe.Del(ctx, instrumentsKey)
+	instruments := make([]string, 0, len(expiries))
+	for instrument := range expiries {
+		instruments = append(instruments, instrument)
+	}
+	pipe.SAdd(ctx, instrumentsKey, instruments)
+	pipe.Expire(ctx, instrumentsKey, 7*24*time.Hour)
+
+	// Execute pipeline
+	if _, err := pipe.Exec(ctx); err != nil {
+		log.Error("Failed to store expiries in Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	log.Info("Successfully stored expiries in Redis", map[string]interface{}{
+		"instruments_count": len(expiries),
+		"expiries":          formatExpiryMapForLog(expiries),
+	})
+
+	return nil
 }

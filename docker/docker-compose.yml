@@ -5,19 +5,38 @@ services:
       - "6379:6379"
     volumes:
       - 'redisData:/bitnami/redis/data'
-
+  
   timescaledb:
-    image: timescale/timescaledb:latest-pg14  # Use TimescaleDB image with PostgreSQL 14
+    image: timescale/timescaledb:latest-pg14
     restart: always
     ports:
-      - "5432:5432"  # Default PostgreSQL port
+      - "5432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: hustledb
     volumes:
-      - timescaleData:/var/lib/postgresql/data  # Data directory
+      - timescaleData:/var/lib/postgresql/data
     network_mode: bridge
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    restart: always
+    ports:
+      - "6432:6432"
+    environment:
+      - DB_HOST=timescaledb
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_PORT=5432
+      - LISTEN_PORT=6432
+      - MAX_CLIENT_CONN=100
+      - DEFAULT_POOL_SIZE=20
+    depends_on:
+      - timescaledb
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini
+      - ./users.txt:/etc/pgbouncer/users.txt
 
 volumes:
   redisData:

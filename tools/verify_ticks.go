@@ -1,156 +1,114 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"gohustle/proto"
+	"gohustle/zerodha"
 
 	googleproto "google.golang.org/protobuf/proto"
 )
 
-const DefaultDataPath = "data/ticks"
-
 func main() {
-	// Read all .pb files from data directory
-	pattern := filepath.Join(DefaultDataPath, "NIFTY_20241212_09122024.pb")
-	files, err := filepath.Glob(pattern)
+	// Hardcoded file path
+	dataPath := "data/instruments_12-12-2024.pb"
+
+	// Initialize KiteConnect for instrument info
+	kite := zerodha.NewKiteConnect(nil, nil, nil)
+	if err := kite.DownloadInstrumentData(context.Background()); err != nil {
+		fmt.Printf("Error downloading instrument data: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Read the entire file
+	data, err := os.ReadFile(dataPath)
 	if err != nil {
-		fmt.Printf("Error reading directory: %v\n", err)
-		return
+		fmt.Printf("Error reading file: %v\n", err)
+		os.Exit(1)
 	}
 
-	if len(files) == 0 {
-		fmt.Printf("No .pb files found in %s\n", DefaultDataPath)
-		return
+	// Try to unmarshal as a batch
+	batch := &proto.TickBatch{}
+	if err := googleproto.Unmarshal(data, batch); err != nil {
+		fmt.Printf("Error unmarshaling data: %v\n", err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Found %d files to process\n", len(files))
-	for _, file := range files {
-		fmt.Printf("\nProcessing file: %s\n", file)
+	fmt.Printf("\nFile size: %d bytes", len(data))
+	fmt.Printf("\nTotal ticks in batch: %d\n", len(batch.Ticks))
 
-		// Read file content
-		data, err := os.ReadFile(file)
-		if err != nil {
-			fmt.Printf("Error reading file %s: %v\n", file, err)
-			continue
-		}
+	if len(batch.Ticks) > 0 {
+		firstTick := batch.Ticks[0]
+		lastTick := batch.Ticks[len(batch.Ticks)-1]
 
-		fmt.Printf("File size: %d bytes\n", len(data))
+		// Get instrument info for first tick
+		tokenStr := fmt.Sprintf("%d", firstTick.InstrumentToken)
+		instrumentInfo, exists := kite.GetInstrumentInfo(tokenStr)
 
-		// Unmarshal protobuf
-		batch := &proto.TickBatch{}
-		if err := googleproto.Unmarshal(data, batch); err != nil {
-			fmt.Printf("Error unmarshaling file %s: %v\n", file, err)
-			continue
-		}
-
-		fmt.Printf("Number of ticks: %d\n", len(batch.Ticks))
-
-		// Add timestamp analysis
-		timestamps := make(map[time.Time]bool)
-		var lastEventTime time.Time
-		var firstEventTime time.Time
-
-		for _, tick := range batch.Ticks {
-			ts := time.Unix(tick.Timestamp, 0)
-			fmt.Printf("Tick timestamp: %v\n", ts)
-			timestamps[ts] = true
-
-			if firstEventTime.IsZero() {
-				firstEventTime = ts
+		fmt.Printf("\nInstrument Information:")
+		if exists {
+			fmt.Printf("\nToken: %s", tokenStr)
+			fmt.Printf("\nIndex: %s", instrumentInfo.Index)
+			fmt.Printf("\nIs Index: %v", instrumentInfo.IsIndex)
+			fmt.Printf("\nIs Options: %v", instrumentInfo.IsOptions)
+			if !instrumentInfo.IsIndex {
+				fmt.Printf("\nExpiry: %s", instrumentInfo.Expiry.Format("02-Jan-2006"))
 			}
-			if ts.After(lastEventTime) {
-				lastEventTime = ts
-			}
-		}
-
-		fmt.Printf("\nTimestamp Analysis:\n")
-		fmt.Printf("First Event: %v\n", firstEventTime)
-		fmt.Printf("Last Event: %v\n", lastEventTime)
-		fmt.Printf("Duration: %v\n", lastEventTime.Sub(firstEventTime))
-
-		// Check for missing seconds
-		missingCount := 0
-		for t := firstEventTime; !t.After(lastEventTime); t = t.Add(time.Second) {
-			if !timestamps[t] {
-				missingCount++
-				if missingCount <= 5 { // Show only first 5 missing timestamps
-					fmt.Printf("Missing data at: %v\n", t)
-				}
-			}
-		}
-		if missingCount > 0 {
-			fmt.Printf("Total missing seconds: %d\n", missingCount)
 		} else {
-			fmt.Printf("No missing seconds in the data\n")
+			fmt.Printf("\nNo instrument info found for token: %s", tokenStr)
 		}
 
-		fmt.Printf("Successfully unmarshaled batch\n")
-		fmt.Printf("Batch size: %d\n", len(batch.Ticks))
-		if batch.Metadata != nil {
-			fmt.Printf("Metadata: timestamp=%v, size=%d, retries=%d\n",
-				time.Unix(batch.Metadata.Timestamp, 0),
-				batch.Metadata.BatchSize,
-				batch.Metadata.RetryCount)
+		fmt.Printf("\n\nTime range:")
+		fmt.Printf("\nFirst tick: %s", time.Unix(firstTick.Timestamp, 0).Format("2006-01-02 15:04:05"))
+		fmt.Printf("\nLast tick:  %s", time.Unix(lastTick.Timestamp, 0).Format("2006-01-02 15:04:05"))
+		fmt.Printf("\nDuration:   %s\n", time.Unix(lastTick.Timestamp, 0).Sub(time.Unix(firstTick.Timestamp, 0)))
+
+		// Print sample tick details
+		fmt.Printf("\nSample tick details (first tick):")
+		fmt.Printf("\nInstrument Token: %d", firstTick.InstrumentToken)
+		fmt.Printf("\nIs Index: %v", firstTick.IsIndex)
+		fmt.Printf("\nOHLC:")
+		fmt.Printf("\n  Open:  %.2f", firstTick.Ohlc.Open)
+		fmt.Printf("\n  High:  %.2f", firstTick.Ohlc.High)
+		fmt.Printf("\n  Low:   %.2f", firstTick.Ohlc.Low)
+		fmt.Printf("\n  Close: %.2f", firstTick.Ohlc.Close)
+
+		if len(firstTick.Depth.Buy) > 0 {
+			fmt.Printf("\nMarket Depth (Top Buy):")
+			fmt.Printf("\n  Price: %.2f", firstTick.Depth.Buy[0].Price)
+			fmt.Printf("\n  Quantity: %d", firstTick.Depth.Buy[0].Quantity)
+			fmt.Printf("\n  Orders: %d", firstTick.Depth.Buy[0].Orders)
+		}
+	}
+
+	// Print all ticks with instrument info
+	fmt.Printf("\n\nTimestamp\t\t\tToken\t\tInstrument\t\tLast Price\tVolume\tOI\n")
+	fmt.Printf("--------------------------------------------------------------------------------------\n")
+	for _, tick := range batch.Ticks {
+		timestamp := time.Unix(tick.Timestamp, 0).Format("2006-01-02 15:04:05")
+		tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
+		instrumentInfo, exists := kite.GetInstrumentInfo(tokenStr)
+
+		instrumentDesc := "Unknown"
+		if exists {
+			if instrumentInfo.IsIndex {
+				instrumentDesc = fmt.Sprintf("%s-IDX", instrumentInfo.Index)
+			} else if instrumentInfo.IsOptions {
+				instrumentDesc = fmt.Sprintf("%s-OPT", instrumentInfo.Index)
+			} else {
+				instrumentDesc = fmt.Sprintf("%s-FUT", instrumentInfo.Index)
+			}
 		}
 
-		// Print all ticks with complete details
-		for i, tick := range batch.Ticks {
-			if i >= 5 {
-				break
-			}
-			fmt.Printf("\nTick %d:\n", i+1)
-			fmt.Printf("Basic Info:\n")
-			fmt.Printf("  InstrumentToken: %d\n", tick.InstrumentToken)
-			fmt.Printf("  IsTradable: %v\n", tick.IsTradable)
-			fmt.Printf("  IsIndex: %v\n", tick.IsIndex)
-			fmt.Printf("  Mode: %s\n", tick.Mode)
-
-			fmt.Printf("\nTimestamps:\n")
-			fmt.Printf("  Timestamp: %v\n", time.Unix(tick.Timestamp, 0))
-			fmt.Printf("  LastTradeTime: %v\n", time.Unix(tick.LastTradeTime, 0))
-
-			fmt.Printf("\nPrice and Quantity:\n")
-			fmt.Printf("  LastPrice: %.2f\n", tick.LastPrice)
-			fmt.Printf("  LastTradedQuantity: %d\n", tick.LastTradedQuantity)
-			fmt.Printf("  TotalBuyQuantity: %d\n", tick.TotalBuyQuantity)
-			fmt.Printf("  TotalSellQuantity: %d\n", tick.TotalSellQuantity)
-			fmt.Printf("  VolumeTraded: %d\n", tick.VolumeTraded)
-			fmt.Printf("  TotalBuy: %d\n", tick.TotalBuy)
-			fmt.Printf("  TotalSell: %d\n", tick.TotalSell)
-			fmt.Printf("  AverageTradePrice: %.2f\n", tick.AverageTradePrice)
-
-			fmt.Printf("\nOI Information:\n")
-			fmt.Printf("  OI: %d\n", tick.Oi)
-			fmt.Printf("  OI Day High: %d\n", tick.OiDayHigh)
-			fmt.Printf("  OI Day Low: %d\n", tick.OiDayLow)
-			fmt.Printf("  Net Change: %.2f%%\n", tick.NetChange)
-
-			if tick.Ohlc != nil {
-				fmt.Printf("\nOHLC Data:\n")
-				fmt.Printf("  Open: %.2f\n", tick.Ohlc.Open)
-				fmt.Printf("  High: %.2f\n", tick.Ohlc.High)
-				fmt.Printf("  Low: %.2f\n", tick.Ohlc.Low)
-				fmt.Printf("  Close: %.2f\n", tick.Ohlc.Close)
-			}
-
-			if tick.Depth != nil {
-				fmt.Printf("\nMarket Depth:\n")
-				fmt.Printf("  Buy Orders:\n")
-				for j, buy := range tick.Depth.Buy {
-					fmt.Printf("    %d. Price: %.2f, Quantity: %d, Orders: %d\n",
-						j+1, buy.Price, buy.Quantity, buy.Orders)
-				}
-				fmt.Printf("  Sell Orders:\n")
-				for j, sell := range tick.Depth.Sell {
-					fmt.Printf("    %d. Price: %.2f, Quantity: %d, Orders: %d\n",
-						j+1, sell.Price, sell.Quantity, sell.Orders)
-				}
-			}
-			fmt.Println("----------------------------------------")
-		}
+		fmt.Printf("%s\t%d\t%-20s\t%.2f\t\t%d\t%.0f\n",
+			timestamp,
+			tick.InstrumentToken,
+			instrumentDesc,
+			tick.LastPrice,
+			tick.VolumeTraded,
+			tick.Oi)
 	}
 }

@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gohustle
+spec:
+  selector:
+    matchLabels:
+      app: gohustle
+  template:
+    metadata:
+      labels:
+        app: gohustle
+    spec:
+      containers:
+      - name: gohustle
+        image: gohustle:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config
+        - name: data-volume
+          mountPath: /app/data
+      volumes:
+      - name: config-volume
+        configMap:
+          name: gohustle-config
+          items:
+          - key: config.json
+            path: config.json
+      - name: data-volume
+        emptyDir: {}

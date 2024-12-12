@@ -11,17 +11,19 @@ import (
 )
 
 type Config struct {
-	Timescale TimescaleConfig `json:"timescale"`
-	Redis     RedisConfig     `json:"redis"`
-	Kite      KiteConfig      `json:"kite"`
-	Asynq     AsynqConfig     `json:"asynq"`
-	Telegram  TelegramConfig  `json:"telegram"`
-	Indices   IndicesConfig   `json:"indices"`
+	Timescale  TimescaleConfig  `json:"timescale"`
+	Redis      RedisConfig      `json:"redis"`
+	Kite       KiteConfig       `json:"kite"`
+	Asynq      AsynqConfig      `json:"asynq"`
+	Telegram   TelegramConfig   `json:"telegram"`
+	Indices    IndicesConfig    `json:"indices"`
+	ClickHouse ClickHouseConfig `json:"clickhouse"`
 }
 
 type TimescaleConfig struct {
 	Host            string `json:"host"`
 	Port            int    `json:"port"`
+	PgBouncerPort   int    `json:"pgb_port"`
 	User            string `json:"user"`
 	Password        string `json:"password"`
 	DBName          string `json:"DBName"`
@@ -29,6 +31,7 @@ type TimescaleConfig struct {
 	MinConnections  int    `json:"min_connections"`
 	MaxConnLifetime string `json:"max_conn_lifetime"`
 	MaxConnIdleTime string `json:"max_conn_idle_time"`
+	PoolMode        string `json:"pool_mode"`
 
 	// Private fields to store parsed durations
 	maxConnLifetimeDuration time.Duration
@@ -36,19 +39,32 @@ type TimescaleConfig struct {
 }
 
 type RedisConfig struct {
-	Host            string `json:"host"`
-	Port            string `json:"port"`
-	Password        string `json:"password"`
-	MaxConnections  int    `json:"max_connections"`
-	MinConnections  int    `json:"min_connections"`
-	ConnectTimeout  string `json:"connect_timeout"`
-	MaxConnLifetime string `json:"max_conn_lifetime"`
-	MaxConnIdleTime string `json:"max_conn_idle_time"`
+	Host            string           `json:"host"`
+	Port            string           `json:"port"`
+	Password        string           `json:"password"`
+	MaxConnections  int              `json:"max_connections"`
+	MinConnections  int              `json:"min_connections"`
+	ConnectTimeout  string           `json:"connect_timeout"`
+	MaxConnLifetime string           `json:"max_conn_lifetime"`
+	MaxConnIdleTime string           `json:"max_conn_idle_time"`
+	Persistence     RedisPersistence `json:"persistence"`
 
 	// Private fields to store parsed durations
 	connectTimeoutDuration  time.Duration
 	maxConnLifetimeDuration time.Duration
 	maxConnIdleTimeDuration time.Duration
+}
+
+type RedisPersistence struct {
+	AOFEnabled    bool           `json:"aof_enabled"`
+	AOFSync       string         `json:"aof_fsync"` // always, everysec, no
+	RDBEnabled    bool           `json:"rdb_enabled"`
+	SaveIntervals []SaveInterval `json:"save_intervals"`
+}
+
+type SaveInterval struct {
+	Seconds int `json:"seconds"`
+	Changes int `json:"changes"`
 }
 
 type KiteConfig struct {
@@ -64,14 +80,19 @@ type KiteConfig struct {
 }
 
 type AsynqConfig struct {
-	Host           string         `json:"host"`
-	Port           string         `json:"port"`
-	Password       string         `json:"password"`
-	DB             int            `json:"db"`
-	Concurrency    int            `json:"concurrency"`
-	RetryLimit     int            `json:"retry_limit"`
-	MaxConnections int            `json:"max_connections"`
-	Queues         map[string]int `json:"queues"`
+	Host           string                 `json:"host"`
+	Port           string                 `json:"port"`
+	Password       string                 `json:"password"`
+	DB             int                    `json:"db"`
+	MaxConnections int                    `json:"max_connections"`
+	Concurrency    int                    `json:"concurrency"`
+	Queues         map[string]QueueConfig `json:"queues"`
+}
+
+type QueueConfig struct {
+	Priority    int  `json:"priority"`
+	Concurrency int  `json:"concurrency"`
+	Enabled     bool `json:"enabled"`
 }
 
 type TelegramConfig struct {
@@ -82,6 +103,22 @@ type TelegramConfig struct {
 type IndicesConfig struct {
 	DerivedIndices []string `json:"derived_indices"`
 	SpotIndices    []string `json:"spot_indices"`
+}
+
+// Add ClickHouse configuration
+type ClickHouseConfig struct {
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	User            string `json:"user"`
+	Password        string `json:"password"`
+	DBName          string `json:"DBName"`
+	MaxOpenConns    int    `json:"max_open_conns"`
+	MaxIdleConns    int    `json:"max_idle_conns"`
+	ConnMaxLifetime string `json:"conn_max_lifetime"`
+	DialTimeout     string `json:"dial_timeout"`
+	BlockSize       int    `json:"block_size"`
+	PoolSize        int    `json:"pool_size"`
+	Debug           bool   `json:"debug"`
 }
 
 // GetConfig loads configuration and handles errors internally
@@ -174,7 +211,7 @@ func (t *TimescaleConfig) GetMaxConnIdleTime() time.Duration {
 }
 
 // Add method to parse duration strings
-func (r *RedisConfig) ParseDurations() error {
+func (r *RedisConfig) ToDuration() error {
 	var err error
 	r.connectTimeoutDuration, err = time.ParseDuration(r.ConnectTimeout)
 	if err != nil {

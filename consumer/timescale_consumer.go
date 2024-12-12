@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,221 +19,123 @@ import (
 	googleproto "google.golang.org/protobuf/proto"
 )
 
-type TimescaleConsumer struct {
-	db          *db.TimescaleDB
-	batchSize   int
-	batchMutex  sync.Mutex
-	tickBatch   []*proto.TickData
-	tokenBatch  []zerodha.TokenInfo
-	flushTicker *time.Ticker
-}
-
-func NewTimescaleConsumer(db *db.TimescaleDB, batchSize int, flushInterval time.Duration) *TimescaleConsumer {
-	tc := &TimescaleConsumer{
-		db:          db,
-		batchSize:   batchSize,
-		tickBatch:   make([]*proto.TickData, 0, batchSize),
-		tokenBatch:  make([]zerodha.TokenInfo, 0, batchSize),
-		flushTicker: time.NewTicker(flushInterval),
-	}
-	return tc
-}
-
-func (tc *TimescaleConsumer) flushBatch() error {
-	if len(tc.tickBatch) == 0 {
-		return nil
-	}
-
-	// Create batch query
-	query := `INSERT INTO ticks (
-		instrument_token, timestamp, last_price, volume, oi, symbol, expiry
-	) VALUES ($1, $2, $3, $4, $5, $6, $7)`
-
-	// Begin transaction
-	tx, err := tc.db.GetPool().Begin(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback(context.Background())
-
-	// Execute for each tick
-	for i, tick := range tc.tickBatch {
-		_, err = tx.Exec(context.Background(), query,
-			tick.InstrumentToken,
-			time.Unix(tick.Timestamp, 0),
-			tick.LastPrice,
-			tick.VolumeTraded,
-			tick.Oi,
-			tc.tokenBatch[i].Symbol,
-			tc.tokenBatch[i].Expiry,
-		)
-		if err != nil {
-			return fmt.Errorf("failed to execute insert: %w", err)
-		}
-	}
-
-	if err := tx.Commit(context.Background()); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	tc.tickBatch = tc.tickBatch[:0]
-	tc.tokenBatch = tc.tokenBatch[:0]
-	return nil
-}
-
-func StartTimescaleConsumer(cfg *config.Config, kite *zerodha.KiteConnect, timescaleDB *db.TimescaleDB) {
+func StartTimescaleConsumer(cfg *config.Config, kite *zerodha.KiteConnect, timescaleDB *db.TimescaleDB, ready chan<- struct{}) {
 	log := logger.GetLogger()
 	log.Info("Starting Timescale Consumer", nil)
 
-	// Initialize all required tables
-	if err := InitializeTables(context.Background(), timescaleDB, kite, cfg); err != nil {
-		log.Fatal("Failed to initialize tables", map[string]interface{}{
-			"error": err.Error(),
-		})
+	// Create wait group for consumers
+	var wg sync.WaitGroup
+
+	// Get enabled queues from config
+	enabledQueues := make([]string, 0)
+	for queueName, queueCfg := range cfg.Asynq.Queues {
+		if queueCfg.Enabled {
+			enabledQueues = append(enabledQueues, queueName)
+			wg.Add(1)
+		}
 	}
 
-	// Register handler for timescale processing queue
-	kite.GetAsynqQueue().HandleFunc("process_tick_timescale", func(ctx context.Context, t *asynq.Task) error {
-		tick := &proto.TickData{}
-		if err := googleproto.Unmarshal(t.Payload(), tick); err != nil {
-			return fmt.Errorf("failed to unmarshal tick: %w", err)
-		}
+	// Start a consumer for each enabled queue
+	for _, queueName := range enabledQueues {
+		queueCfg := cfg.Asynq.Queues[queueName]
 
-		// Get the token info
-		tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
-		tokenInfo, exists := kite.GetInstrumentInfo(tokenStr)
-		if !exists {
-			return fmt.Errorf("token not found in lookup: %s", tokenStr)
-		}
+		// Start consumer for this queue
+		go func(qName string, qConfig config.QueueConfig) {
+			defer wg.Done()
 
-		// Generate table name using the same function
-		var tableName string
-		if tokenInfo.IsIndex {
-			tableName = generateTableName(tokenInfo.Index, nil)
-		} else {
-			tableName = generateTableName(tokenInfo.Index, &tokenInfo.Expiry)
-		}
-
-		// Store tick in TimescaleDB
-		if err := timescaleDB.StoreTick(tableName, tick); err != nil {
-			log.Error("Failed to store tick", map[string]interface{}{
-				"error":     err.Error(),
-				"token":     tokenStr,
-				"index":     tokenInfo.Index,
-				"expiry":    tokenInfo.Expiry.Format("20060102"),
-				"timestamp": time.Unix(tick.Timestamp, 0),
-				"table":     tableName,
-				"is_index":  tokenInfo.IsIndex,
+			log.Info("Starting consumer for queue", map[string]interface{}{
+				"queue_name":  qName,
+				"priority":    qConfig.Priority,
+				"concurrency": qConfig.Concurrency,
 			})
-			return err
-		}
 
-		log.Info("Stored tick successfully", map[string]interface{}{
-			"token":     tokenStr,
-			"index":     tokenInfo.Index,
-			"expiry":    tokenInfo.Expiry.Format("20060102"),
-			"timestamp": time.Unix(tick.Timestamp, 0),
-			"table":     tableName,
-			"is_index":  tokenInfo.IsIndex,
-		})
+			// Use queue-specific pattern
+			pattern := fmt.Sprintf("process_tick_%s", qName)
 
-		return nil
+			// Register handler for this queue
+			kite.GetAsynqQueue().HandleFunc(pattern, func(ctx context.Context, t *asynq.Task) error {
+				receiveTime := time.Now()
+
+				// Unmarshal the tick
+				tick := &proto.TickData{}
+				if err := googleproto.Unmarshal(t.Payload(), tick); err != nil {
+					log.Error("Failed to unmarshal tick", map[string]interface{}{
+						"error": err.Error(),
+						"queue": qName,
+					})
+					return fmt.Errorf("failed to unmarshal tick: %w", err)
+				}
+
+				processTime := time.Now()
+				// Log detailed tick information
+				log.Info("Processing tick", map[string]interface{}{
+					"queue":           qName,
+					"token":           tick.InstrumentToken,
+					"timestamp":       time.Unix(tick.Timestamp, 0).Format("2006-01-02 15:04:05.000"),
+					"last_trade_time": time.Unix(tick.LastTradeTime, 0).Format("2006-01-02 15:04:05.000"),
+					"price":           tick.LastPrice,
+					"last_traded_qty": tick.LastTradedQuantity,
+					"volume":          tick.VolumeTraded,
+					"total_buy_qty":   tick.TotalBuyQuantity,
+					"total_sell_qty":  tick.TotalSellQuantity,
+					"total_buy":       tick.TotalBuy,
+					"total_sell":      tick.TotalSell,
+					"avg_trade_price": tick.AverageTradePrice,
+					"oi":              tick.Oi,
+					"oi_day_high":     tick.OiDayHigh,
+					"oi_day_low":      tick.OiDayLow,
+					"net_change":      tick.NetChange,
+					"is_index":        tick.IsIndex,
+					"tradable":        tick.IsTradable,
+					"mode":            tick.Mode,
+					"ohlc": map[string]float64{
+						"open":  tick.Ohlc.Open,
+						"high":  tick.Ohlc.High,
+						"low":   tick.Ohlc.Low,
+						"close": tick.Ohlc.Close,
+					},
+					"depth": map[string]interface{}{
+						"buy":  formatDepth(tick.Depth.Buy),
+						"sell": formatDepth(tick.Depth.Sell),
+					},
+					"receive_latency": processTime.Sub(receiveTime).Milliseconds(),
+					"tick_latency":    processTime.Sub(time.Unix(tick.Timestamp, 0)).Milliseconds(),
+				})
+
+				return nil
+			})
+
+			log.Info("Consumer ready for queue", map[string]interface{}{
+				"queue":   qName,
+				"pattern": pattern,
+			})
+		}(queueName, queueCfg)
+	}
+
+	// Signal that all consumers are ready
+	close(ready)
+	log.Info("All Timescale Consumers ready to receive ticks", map[string]interface{}{
+		"enabled_queues": enabledQueues,
 	})
-
-	// Add heartbeat to confirm consumer is running
-	heartbeat := time.NewTicker(30 * time.Second)
-	go func() {
-		for range heartbeat.C {
-			log.Info("TimescaleConsumer heartbeat", map[string]interface{}{
-				"status": "running",
-			})
-		}
-	}()
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	heartbeat.Stop()
-	log.Info("Shutting down timescale consumer", nil)
+	log.Info("Shutting down timescale consumers")
+	wg.Wait() // Wait for all consumers to finish
 }
 
-// Helper function to check if a table exists
-func checkTableExists(ctx context.Context, db *db.TimescaleDB, tableName string) (bool, error) {
-	var exists bool
-	err := db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT FROM pg_tables
-			WHERE schemaname = 'public'
-			AND tablename = $1
-		)`, tableName).Scan(&exists)
-	return exists, err
-}
-
-// generateTableName creates consistent table names for both spot and tick indices
-func generateTableName(index string, expiry *time.Time) string {
-	if expiry == nil {
-		return fmt.Sprintf("ticks_%s", strings.ToLower(index))
-	}
-	return fmt.Sprintf("ticks_%s_%s",
-		strings.ToLower(index),
-		expiry.Format("20060102"),
-	)
-}
-
-// checkAndCreateTables checks if tables exist and creates them if they don't
-func checkAndCreateTables(ctx context.Context, db *db.TimescaleDB, index string) error {
-	log := logger.GetLogger()
-
-	query := `SELECT * FROM create_tick_tables($1)`
-	var tableName, depthTable, minuteView string
-	err := db.QueryRow(ctx, query, index).Scan(&tableName, &depthTable, &minuteView)
-	if err != nil {
-		return fmt.Errorf("failed to create tables: %w", err)
-	}
-
-	log.Info("Tables created successfully", map[string]interface{}{
-		"tick_table":  tableName,
-		"depth_table": depthTable,
-		"minute_view": minuteView,
-	})
-
-	return nil
-}
-
-// InitializeTables creates all necessary tables for spot and derived indices
-func InitializeTables(ctx context.Context, db *db.TimescaleDB, kite *zerodha.KiteConnect, cfg *config.Config) error {
-	log := logger.GetLogger()
-	log.Info("Initializing TimescaleDB tables", nil)
-
-	// Use a map to track which indices we've already processed
-	processedIndices := make(map[string]bool)
-
-	// Create tables for spot indices
-	for _, index := range cfg.Indices.SpotIndices {
-		if processedIndices[index] {
-			continue
+// Helper function to format depth data
+func formatDepth(items []*proto.TickData_DepthItem) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(items))
+	for i, item := range items {
+		result[i] = map[string]interface{}{
+			"price":    item.Price,
+			"quantity": item.Quantity,
+			"orders":   item.Orders,
 		}
-		if err := checkAndCreateTables(ctx, db, index); err != nil {
-			return fmt.Errorf("failed to create spot index table: %w", err)
-		}
-		processedIndices[index] = true
 	}
-
-	// Create tables for derived indices
-	for _, index := range cfg.Indices.DerivedIndices {
-		if processedIndices[index] {
-			continue
-		}
-		if err := checkAndCreateTables(ctx, db, index); err != nil {
-			return fmt.Errorf("failed to create derived index table: %w", err)
-		}
-		processedIndices[index] = true
-	}
-
-	log.Info("Successfully initialized all tables", map[string]interface{}{
-		"processed_indices": len(processedIndices),
-	})
-	return nil
+	return result
 }

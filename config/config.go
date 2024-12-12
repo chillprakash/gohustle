@@ -11,31 +11,10 @@ import (
 )
 
 type Config struct {
-	Timescale  TimescaleConfig  `json:"timescale"`
-	Redis      RedisConfig      `json:"redis"`
-	Kite       KiteConfig       `json:"kite"`
-	Asynq      AsynqConfig      `json:"asynq"`
-	Telegram   TelegramConfig   `json:"telegram"`
-	Indices    IndicesConfig    `json:"indices"`
-	ClickHouse ClickHouseConfig `json:"clickhouse"`
-}
-
-type TimescaleConfig struct {
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	PgBouncerPort   int    `json:"pgb_port"`
-	User            string `json:"user"`
-	Password        string `json:"password"`
-	DBName          string `json:"DBName"`
-	MaxConnections  int    `json:"max_connections"`
-	MinConnections  int    `json:"min_connections"`
-	MaxConnLifetime string `json:"max_conn_lifetime"`
-	MaxConnIdleTime string `json:"max_conn_idle_time"`
-	PoolMode        string `json:"pool_mode"`
-
-	// Private fields to store parsed durations
-	maxConnLifetimeDuration time.Duration
-	maxConnIdleTimeDuration time.Duration
+	Redis    RedisConfig    `json:"redis"`
+	Kite     KiteConfig     `json:"kite"`
+	Telegram TelegramConfig `json:"telegram"`
+	Indices  IndicesConfig  `json:"indices"`
 }
 
 type RedisConfig struct {
@@ -79,22 +58,6 @@ type KiteConfig struct {
 	TickWorkers  int    `json:"tick_workers"`
 }
 
-type AsynqConfig struct {
-	Host           string                 `json:"host"`
-	Port           string                 `json:"port"`
-	Password       string                 `json:"password"`
-	DB             int                    `json:"db"`
-	MaxConnections int                    `json:"max_connections"`
-	Concurrency    int                    `json:"concurrency"`
-	Queues         map[string]QueueConfig `json:"queues"`
-}
-
-type QueueConfig struct {
-	Priority    int  `json:"priority"`
-	Concurrency int  `json:"concurrency"`
-	Enabled     bool `json:"enabled"`
-}
-
 type TelegramConfig struct {
 	BotToken string `json:"bot_token"`
 	ChatID   string `json:"chat_id"`
@@ -103,22 +66,6 @@ type TelegramConfig struct {
 type IndicesConfig struct {
 	DerivedIndices []string `json:"derived_indices"`
 	SpotIndices    []string `json:"spot_indices"`
-}
-
-// Add ClickHouse configuration
-type ClickHouseConfig struct {
-	Host            string `json:"host"`
-	Port            int    `json:"port"`
-	User            string `json:"user"`
-	Password        string `json:"password"`
-	DBName          string `json:"DBName"`
-	MaxOpenConns    int    `json:"max_open_conns"`
-	MaxIdleConns    int    `json:"max_idle_conns"`
-	ConnMaxLifetime string `json:"conn_max_lifetime"`
-	DialTimeout     string `json:"dial_timeout"`
-	BlockSize       int    `json:"block_size"`
-	PoolSize        int    `json:"pool_size"`
-	Debug           bool   `json:"debug"`
 }
 
 // GetConfig loads configuration and handles errors internally
@@ -183,31 +130,6 @@ func GetConfig() *Config {
 	})
 
 	return &config
-}
-
-// Add this method to convert the string values to time.Duration after unmarshaling
-func (t *TimescaleConfig) ToDuration() error {
-	var err error
-	t.maxConnLifetimeDuration, err = time.ParseDuration(t.MaxConnLifetime)
-	if err != nil {
-		return fmt.Errorf("invalid max_conn_lifetime duration: %w", err)
-	}
-
-	t.maxConnIdleTimeDuration, err = time.ParseDuration(t.MaxConnIdleTime)
-	if err != nil {
-		return fmt.Errorf("invalid max_conn_idle_time duration: %w", err)
-	}
-
-	return nil
-}
-
-// Add getter methods to access the parsed durations
-func (t *TimescaleConfig) GetMaxConnLifetime() time.Duration {
-	return t.maxConnLifetimeDuration
-}
-
-func (t *TimescaleConfig) GetMaxConnIdleTime() time.Duration {
-	return t.maxConnIdleTimeDuration
 }
 
 // Add method to parse duration strings

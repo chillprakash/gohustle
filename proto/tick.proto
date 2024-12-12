@@ -39,18 +39,25 @@ message TickData {
     }
     OHLC ohlc = 19;
 
-    // Depth data
+    // Market depth
     message DepthItem {
         double price = 1;
         uint32 quantity = 2;
         uint32 orders = 3;
     }
 
-    message Depth {
+    message MarketDepth {
         repeated DepthItem buy = 1;
         repeated DepthItem sell = 2;
     }
-    Depth depth = 20;
+    MarketDepth depth = 20;
+
+    // Additional metadata
+    double change_percent = 21;
+    double last_trade_price = 22;
+    uint32 open_interest = 23;
+    uint32 open_interest_day_high = 24;
+    uint32 open_interest_day_low = 25;
 }
 
 message BatchMetadata {

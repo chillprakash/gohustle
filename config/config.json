@@ -1,18 +1,5 @@
 {
-    "timescale": {
-        "host": "localhost",
-        "port": 5432,
-        "pgb_port": 6432,
-        "user": "postgres",
-        "password": "postgres",
-        "DBName": "hustledb",
-        "max_connections": 1000,
-        "min_connections": 100,
-        "max_conn_lifetime": "1h",
-        "max_conn_idle_time": "30m",
-        "pool_mode": "transaction"
-    },
-    "redis": {
+   "redis": {
         "host": "localhost",
         "port": "6379",
         "password": "",
@@ -43,41 +30,6 @@
         "data_path": "data",
         "tick_workers": 700
     },
-    "asynq": {
-        "host": "localhost",
-        "port": "6379",
-        "password": "",
-        "db": 0,
-        "max_connections": 100,
-        "concurrency": 400,
-        "queues": {
-            "nifty_index_queue": {
-                "priority": 10,
-                "concurrency": 50,
-                "enabled": true
-            },
-            "sensex_index_queue": {
-                "priority": 10,
-                "concurrency": 50,
-                "enabled": true
-            },
-            "nifty_options_queue": {
-                "priority": 5,
-                "concurrency": 100,
-                "enabled": true
-            },
-            "sensex_options_queue": {
-                "priority": 5,
-                "concurrency": 100,
-                "enabled": true
-            },
-            "default_queue": {
-                "priority": 1,
-                "concurrency": 50,
-                "enabled": true
-            }
-        }
-    },
     "telegram": {
         "bot_token": "7911939409:AAFWHVIJNp_5DIhq4O6rTT8jDxpVPmiesgg",
         "chat_id": "7463070554"
@@ -91,19 +43,5 @@
             "NIFTY",
             "SENSEX"
         ]
-    },
-    "clickhouse": {
-        "host": "localhost",
-        "port": 9000,
-        "user": "default",
-        "password": "",
-        "DBName": "hustledb",
-        "max_open_conns": 50,
-        "max_idle_conns": 5,
-        "conn_max_lifetime": "1h",
-        "dial_timeout": "10s",
-        "block_size": 1000000,
-        "pool_size": 100,
-        "debug": false
     }
 } 

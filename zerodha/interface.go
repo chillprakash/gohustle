@@ -4,8 +4,6 @@ import (
 	"context"
 	proto "gohustle/proto"
 	"time"
-
-	"github.com/zerodha/gokiteconnect/v4/models"
 )
 
 // TokenOperations handles token management
@@ -30,11 +28,6 @@ type ExpiryOperations interface {
 // TokenOperations handles token management
 type KiteOperations interface {
 	GetCurrentSpotPriceOfAllIndices(ctx context.Context) (map[string]float64, error)
-}
-
-type AsynqQueueOperations interface {
-	EnqueueTickData(ctx context.Context, tick *models.Tick) error
-	DequeueTickData(ctx context.Context) (*models.Tick, error)
 }
 
 // KiteOperations combines all operations

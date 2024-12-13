@@ -27,6 +27,7 @@ const (
 	SensexOptionsDB = 3 // For SENSEX options
 	RelationalDB    = 4 // For relational data
 	SummaryDB       = 5 // For summary data
+	LTPDB           = 6 // For LTP data
 )
 
 // Add these constants for token management
@@ -185,6 +186,10 @@ func (rc *RedisCache) GetRelationalDB4() *redis.Client {
 
 func (rc *RedisCache) GetSummaryDB5() *redis.Client {
 	return rc.getRedisClient(SummaryDB)
+}
+
+func (rc *RedisCache) GetLTPDB6() *redis.Client {
+	return rc.getRedisClient(LTPDB)
 }
 
 // Helper function to get database names

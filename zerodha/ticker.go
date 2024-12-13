@@ -197,119 +197,137 @@ func (k *KiteConnect) handleTick(tick models.Tick, connectionID int) {
 	// Get instrument info
 	tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
 	instrumentInfo, exists := k.GetInstrumentInfo(tokenStr)
+	if !exists {
+		return
+	}
 
-	// Only process if it's NIFTY or SENSEX index
-	if exists && instrumentInfo.IsIndex &&
-		(instrumentInfo.Index == "NIFTY" || instrumentInfo.Index == "SENSEX") {
+	// Convert to protobuf and marshal
+	protoTick := &proto.TickData{
+		// Basic info
+		InstrumentToken: tick.InstrumentToken,
+		IsTradable:      tick.IsTradable,
+		IsIndex:         tick.IsIndex,
+		Mode:            tick.Mode,
 
-		// Convert to protobuf
-		protoTick := &proto.TickData{
-			// Basic info
-			InstrumentToken: tick.InstrumentToken,
-			IsTradable:      tick.IsTradable,
-			IsIndex:         tick.IsIndex,
-			Mode:            tick.Mode,
+		// Timestamps
+		Timestamp:     tick.Timestamp.Unix(),
+		LastTradeTime: tick.LastTradeTime.Unix(),
 
-			// Timestamps
-			Timestamp:     tick.Timestamp.Unix(),
-			LastTradeTime: tick.LastTradeTime.Unix(),
+		// Price and quantity
+		LastPrice:          tick.LastPrice,
+		LastTradedQuantity: tick.LastTradedQuantity,
+		TotalBuyQuantity:   tick.TotalBuyQuantity,
+		TotalSellQuantity:  tick.TotalSellQuantity,
+		VolumeTraded:       tick.VolumeTraded,
+		TotalBuy:           uint32(tick.TotalBuy),
+		TotalSell:          uint32(tick.TotalSell),
+		AverageTradePrice:  tick.AverageTradePrice,
 
-			// Price and quantity
-			LastPrice:          tick.LastPrice,
-			LastTradedQuantity: tick.LastTradedQuantity,
-			TotalBuyQuantity:   tick.TotalBuyQuantity,
-			TotalSellQuantity:  tick.TotalSellQuantity,
-			VolumeTraded:       tick.VolumeTraded,
-			TotalBuy:           uint32(tick.TotalBuy),
-			TotalSell:          uint32(tick.TotalSell),
-			AverageTradePrice:  tick.AverageTradePrice,
+		// OI related
+		Oi:        tick.OI,
+		OiDayHigh: tick.OIDayHigh,
+		OiDayLow:  tick.OIDayLow,
+		NetChange: tick.NetChange,
 
-			// OI related
-			Oi:        tick.OI,
-			OiDayHigh: tick.OIDayHigh,
-			OiDayLow:  tick.OIDayLow,
-			NetChange: tick.NetChange,
+		// OHLC data
+		Ohlc: &proto.TickData_OHLC{
+			Open:  tick.OHLC.Open,
+			High:  tick.OHLC.High,
+			Low:   tick.OHLC.Low,
+			Close: tick.OHLC.Close,
+		},
 
-			// OHLC data
-			Ohlc: &proto.TickData_OHLC{
-				Open:  tick.OHLC.Open,
-				High:  tick.OHLC.High,
-				Low:   tick.OHLC.Low,
-				Close: tick.OHLC.Close,
-			},
+		// Market depth
+		Depth: &proto.TickData_MarketDepth{
+			Buy:  convertDepthItems(tick.Depth.Buy[:]),
+			Sell: convertDepthItems(tick.Depth.Sell[:]),
+		},
 
-			// Market depth
-			Depth: &proto.TickData_MarketDepth{
-				Buy:  convertDepthItems(tick.Depth.Buy[:]),
-				Sell: convertDepthItems(tick.Depth.Sell[:]),
-			},
-
-			// Additional metadata
-			ChangePercent:       tick.NetChange,
-			LastTradePrice:      tick.LastPrice,
-			OpenInterest:        tick.OI,
-			OpenInterestDayHigh: tick.OIDayHigh,
-			OpenInterestDayLow:  tick.OIDayLow,
-		}
-
-		// Get Redis cache instance
-		redisCache, err := cache.NewRedisCache()
-		if err != nil {
-			log.Error("Failed to get Redis cache", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return
-		}
-
-		// Use pipeline for efficient batch operations
-		pipe := redisCache.GetIndexSpotDB1().Pipeline()
-		ctx := context.Background()
-
-		// Key format: index:NIFTY:timestamp (using Unix timestamp for easy range queries)
-		key := fmt.Sprintf("index:%s:%d", instrumentInfo.Index, tick.Timestamp.Unix())
-
-		// Serialize protobuf
-		data, err := googleproto.Marshal(protoTick)
-		if err != nil {
-			log.Error("Failed to marshal tick", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return
-		}
-
-		// Store serialized protobuf with 24-hour expiry
-		pipe.Set(ctx, key, data, 24*time.Hour)
-
-		// Add to sorted set for time-based queries
-		sortedSetKey := fmt.Sprintf("index:%s:ticks", instrumentInfo.Index)
-		pipe.ZAdd(ctx, sortedSetKey, redis.Z{
-			Score:  float64(tick.Timestamp.Unix()),
-			Member: key,
+		// Additional metadata
+		ChangePercent:       tick.NetChange,
+		LastTradePrice:      tick.LastPrice,
+		OpenInterest:        tick.OI,
+		OpenInterestDayHigh: tick.OIDayHigh,
+		OpenInterestDayLow:  tick.OIDayLow,
+	}
+	data, err := googleproto.Marshal(protoTick)
+	if err != nil {
+		log.Error("Failed to marshal tick", map[string]interface{}{
+			"error": err.Error(),
 		})
-		pipe.Expire(ctx, sortedSetKey, 24*time.Hour)
+		return
+	}
 
-		// Execute pipeline
-		if _, err := pipe.Exec(ctx); err != nil {
-			log.Error("Failed to store tick in Redis", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return
-		}
+	// Get Redis cache instance
+	redisCache, err := cache.NewRedisCache()
+	if err != nil {
+		log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
 
-		log.Info("Stored index tick", map[string]interface{}{
-			"index":     instrumentInfo.Index,
-			"token":     tick.InstrumentToken,
-			"timestamp": tick.Timestamp.Format("2006-01-02 15:04:05.000"),
-			"price":     tick.LastPrice,
-			"volume":    tick.VolumeTraded,
-			"oi":        tick.OI,
-			"depth": map[string]interface{}{
-				"buy_depth":  len(tick.Depth.Buy),
-				"sell_depth": len(tick.Depth.Sell),
-			},
-			"key": key,
+	ctx := context.Background()
+	dataKey := fmt.Sprintf("tick:%d:%d", tick.InstrumentToken, tick.Timestamp.Unix())
+
+	// 1. Store actual data in appropriate DB based on instrument type
+	var dataDB *redis.Client
+	if instrumentInfo.IsIndex {
+		dataDB = redisCache.GetIndexSpotDB1()
+	} else if instrumentInfo.Index == "NIFTY" {
+		dataDB = redisCache.GetNiftyOptionsDB2()
+	} else {
+		dataDB = redisCache.GetSensexOptionsDB3()
+	}
+
+	// Store data in appropriate DB
+	dataPipe := dataDB.Pipeline()
+	dataPipe.Set(ctx, dataKey, data, 24*time.Hour)
+	if _, err := dataPipe.Exec(ctx); err != nil {
+		log.Error("Failed to store tick data", map[string]interface{}{
+			"error": err.Error(),
+			"db":    dataDB,
+		})
+		return
+	}
+
+	// 2. Store indices in summary DB
+	summaryPipe := redisCache.GetSummaryDB5().Pipeline()
+
+	// Add to index-level sorted set
+	if instrumentInfo.IsIndex {
+		indexSetKey := fmt.Sprintf("index:%s:ticks", instrumentInfo.Index)
+		summaryPipe.ZAdd(ctx, indexSetKey, redis.Z{
+			Score:  float64(tick.Timestamp.Unix()),
+			Member: dataKey,
 		})
 	}
+
+	// Add to instrument-specific sorted set
+	instrumentSetKey := fmt.Sprintf("index:%s:%d", instrumentInfo.Index, tick.InstrumentToken)
+	summaryPipe.ZAdd(ctx, instrumentSetKey, redis.Z{
+		Score:  float64(tick.Timestamp.Unix()),
+		Member: dataKey,
+	})
+
+	// Execute summary pipeline
+	if _, err := summaryPipe.Exec(ctx); err != nil {
+		log.Error("Failed to store tick indices", map[string]interface{}{
+			"error": err.Error(),
+			"db":    "summary",
+		})
+		return
+	}
+
+	log.Info("Stored tick", map[string]interface{}{
+		"token":          tick.InstrumentToken,
+		"index":          instrumentInfo.Index,
+		"is_index":       instrumentInfo.IsIndex,
+		"timestamp":      tick.Timestamp.Format("2006-01-02 15:04:05.000"),
+		"data_key":       dataKey,
+		"data_db":        getDBName(dataDB),
+		"instrument_set": instrumentSetKey,
+	})
 }
 
 func (k *KiteConnect) onError(err error) {
@@ -357,4 +375,20 @@ func convertDepthItems(items []models.DepthItem) []*proto.TickData_DepthItem {
 		}
 	}
 	return result
+}
+
+// Helper function to get DB name for logging
+func getDBName(client *redis.Client) string {
+	switch client.Options().DB {
+	case cache.IndexSpotDB:
+		return "index_spot_db"
+	case cache.NiftyOptionsDB:
+		return "nifty_options_db"
+	case cache.SensexOptionsDB:
+		return "sensex_options_db"
+	case cache.SummaryDB:
+		return "summary_db"
+	default:
+		return fmt.Sprintf("db_%d", client.Options().DB)
+	}
 }

@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// TokenOperations handles token management
 type TokenOperations interface {
 	GetValidToken(ctx context.Context) (string, error)
 }

@@ -8,7 +8,9 @@ import (
 	"syscall"
 	"time"
 
+	"gohustle/cache"
 	"gohustle/config"
+	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/zerodha"
 )
@@ -33,7 +35,12 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Initialize components
+	// Initialize writer pool first
+	writerPool := filestore.NewWriterPool()
+	writerPool.Start()
+	defer writerPool.Stop()
+
+	// Initialize KiteConnect with writer pool
 	kiteConnect := zerodha.NewKiteConnect(true)
 	if kiteConnect == nil {
 		log.Fatal("Failed to initialize KiteConnect", nil)
@@ -90,14 +97,9 @@ func main() {
 	// sched := scheduler.NewScheduler()
 	// sched.Start()
 
-	// // Initialize writer pool early
-	// writerPool := zerodha.NewWriterPool()
-	// writerPool.Start()
-	// defer writerPool.Stop()
-
-	// // Initialize consumer with writer pool
-	// consumer := cache.NewConsumer(writerPool)
-	// consumer.Start()
+	// Initialize consumer with writer pool
+	consumer := cache.NewConsumer(writerPool)
+	consumer.Start()
 
 	// Block until we receive a signal
 	sig := <-sigChan
@@ -118,7 +120,7 @@ func main() {
 
 		// Stop components in reverse order
 		log.Info("Stopping consumer...", nil)
-		consumer.Stop()
+		// consumer.Stop()
 
 		log.Info("Closing KiteConnect...", nil)
 		if kiteConnect != nil {

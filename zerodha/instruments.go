@@ -643,7 +643,7 @@ func (k *KiteConnect) saveExpiriesToRedis(ctx context.Context, expiries map[stri
 		return fmt.Errorf("failed to get Redis cache: %w", err)
 	}
 
-	client := redisCache.GetRelationalDB4()
+	client := redisCache.GetRelationalDB1()
 	pipe := client.Pipeline()
 
 	// Key prefix for instrument expiries

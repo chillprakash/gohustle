@@ -12,7 +12,6 @@ import (
 	"gohustle/logger"
 	"gohustle/proto"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/zerodha/gokiteconnect/v4/models"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
 )
@@ -264,7 +263,7 @@ func (k *KiteConnect) handleTick(tick models.Tick, connectionID int) {
 
 	// 3. Store LTP data in LTP DB
 	dataKey := fmt.Sprintf("ltp:%d", tick.InstrumentToken)
-	ltpDB := redisCache.GetLTPDB6()
+	ltpDB := redisCache.GetListDB2()
 	ctx := context.Background()
 	ltpDB.Set(ctx, dataKey, tick.LastPrice, 24*time.Hour)
 
@@ -322,20 +321,4 @@ func convertDepthItems(items []models.DepthItem) []*proto.TickData_DepthItem {
 		}
 	}
 	return result
-}
-
-// Helper function to get DB name for logging
-func getDBName(client *redis.Client) string {
-	switch client.Options().DB {
-	case cache.IndexSpotDB:
-		return "index_spot_db"
-	case cache.NiftyOptionsDB:
-		return "nifty_options_db"
-	case cache.SensexOptionsDB:
-		return "sensex_options_db"
-	case cache.SummaryDB:
-		return "summary_db"
-	default:
-		return fmt.Sprintf("db_%d", client.Options().DB)
-	}
 }

@@ -1,4 +1,4 @@
-package zerodha
+package cache
 
 import (
 	"context"
@@ -58,7 +58,7 @@ func (d *TickDistributor) DistributeTick(ctx context.Context, tick *proto.TickDa
 	listKey := d.getListKey(tick.InstrumentToken)
 
 	// Push to Redis list
-	if err := d.redisCache.GetListDB7().LPush(ctx, listKey, data).Err(); err != nil {
+	if err := d.redisCache.GetListDB2().LPush(ctx, listKey, data).Err(); err != nil {
 		return fmt.Errorf("failed to push to list %s: %w", listKey, err)
 	}
 

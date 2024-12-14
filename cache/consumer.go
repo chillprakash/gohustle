@@ -1,4 +1,4 @@
-package zerodha
+package cache
 
 import (
 	"context"
@@ -6,12 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/proto"
-	"gohustle/zerodha"
 
 	"github.com/redis/go-redis/v9"
 	googleproto "google.golang.org/protobuf/proto"
@@ -44,7 +42,7 @@ type Worker struct {
 	ctx          context.Context
 	batchSize    int
 	metrics      *WorkerMetrics
-	writerPool   *parquet.WriterPool
+	writerPool   *filestore.WriterPool
 }
 
 type WorkerMetrics struct {
@@ -55,9 +53,9 @@ type WorkerMetrics struct {
 	mu             sync.Mutex
 }
 
-func NewConsumer(writerPool *zerodha.WriterPool) *Consumer {
+func NewConsumer(writerPool *filestore.WriterPool) *Consumer {
 	cfg := config.GetConfig()
-	redisCache, _ := cache.NewRedisCache()
+	redisCache, _ := NewRedisCache()
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Consumer{
@@ -105,7 +103,7 @@ func (w *Worker) processBatch(ticks []*proto.TickData) error {
 func (w *Worker) writeTicksToFile(targetFile string, ticks []*proto.TickData) error {
 	// Create write request for each tick
 	for _, tick := range ticks {
-		req := &parquet.WriteRequest{
+		req := &filestore.WriteRequest{
 			TargetFile: targetFile,
 			Tick:       tick,
 			ResultChan: make(chan error, 1),
@@ -124,37 +122,24 @@ func (w *Worker) writeTicksToFile(targetFile string, ticks []*proto.TickData) er
 }
 
 func (w *Worker) processListItems(listKey string) error {
-	w.log.Info("Checking list for items", map[string]interface{}{
+	w.log.Debug("Checking list for items", map[string]interface{}{
 		"worker_id":  w.id,
 		"list_key":   listKey,
 		"is_primary": w.isPrimary,
 	})
 
-	// Add DB verification
-	w.log.Info("Redis DB Info", map[string]interface{}{
-		"worker_id": w.id,
-		"db_number": w.redisCache.GetSummaryDB5().Options().DB,
-	})
-
 	// Try to get batch of items from Redis list
-	result, err := w.redisCache.GetListDB7().BRPop(w.ctx, defaultTimeout, listKey).Result()
+	result, err := w.redisCache.GetListDB2().BRPop(w.ctx, defaultTimeout, listKey).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return nil
 		}
-		w.log.Error("Failed to pop items", map[string]interface{}{
-			"error":     err.Error(),
-			"worker_id": w.id,
-			"list_key":  listKey,
-		})
 		return fmt.Errorf("failed to pop items: %w", err)
 	}
 
-	if len(result) < 2 { // BRPOP returns [key, value]
+	if len(result) < 2 {
 		return nil
 	}
-
-	startTime := time.Now()
 
 	// Process the item
 	tick := &proto.TickData{}
@@ -162,39 +147,45 @@ func (w *Worker) processListItems(listKey string) error {
 		w.metrics.mu.Lock()
 		w.metrics.FailedTicks++
 		w.metrics.mu.Unlock()
-		w.log.Error("Failed to unmarshal tick", map[string]interface{}{
-			"error":     err.Error(),
-			"worker_id": w.id,
-			"list_key":  listKey,
-		})
 		return fmt.Errorf("failed to unmarshal tick: %w", err)
 	}
 
-	batch := []*proto.TickData{tick}
+	// Create write request
+	req := &filestore.WriteRequest{
+		TargetFile: tick.TargetFile,
+		Tick:       tick,
+		ResultChan: make(chan error, 1),
+	}
 
-	// Process the batch
-	if err := w.processBatch(batch); err != nil {
-		w.log.Error("Failed to process batch", map[string]interface{}{
-			"error":      err.Error(),
-			"worker_id":  w.id,
-			"list_key":   listKey,
-			"batch_size": len(batch),
+	// Send to writer pool
+	if err := w.writerPool.Write(req); err != nil {
+		w.log.Error("Failed to write tick", map[string]interface{}{
+			"error":       err.Error(),
+			"worker_id":   w.id,
+			"target_file": tick.TargetFile,
+		})
+		return err
+	}
+
+	// Wait for write confirmation
+	if err := <-req.ResultChan; err != nil {
+		w.log.Error("Write failed", map[string]interface{}{
+			"error":       err.Error(),
+			"worker_id":   w.id,
+			"target_file": tick.TargetFile,
 		})
 		return err
 	}
 
 	w.metrics.mu.Lock()
 	w.metrics.ProcessedTicks++
-	w.metrics.BatchesWritten++
 	w.metrics.LastProcessed = time.Now()
 	w.metrics.mu.Unlock()
 
-	w.log.Info("Processed tick batch", map[string]interface{}{
-		"worker_id":       w.id,
-		"list_key":        listKey,
-		"batch_size":      len(batch),
-		"processing_time": time.Since(startTime).String(),
-		"total_processed": w.metrics.ProcessedTicks,
+	w.log.Info("Processed and wrote tick", map[string]interface{}{
+		"worker_id":   w.id,
+		"list_key":    listKey,
+		"target_file": tick.TargetFile,
 	})
 
 	return nil
@@ -252,7 +243,7 @@ func (c *Consumer) findLongestList() string {
 	var maxLen int64
 	var longestKey string
 
-	pipe := c.redisCache.GetListDB7().Pipeline()
+	pipe := c.redisCache.GetListDB2().Pipeline()
 	cmds := make([]*redis.IntCmd, c.numLists)
 
 	// Queue all LLEN commands

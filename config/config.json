@@ -42,5 +42,10 @@
             "NIFTY",
             "SENSEX"
         ]
+    },
+    "queue": {
+        "primary_workers": 10,
+        "list_prefix": "tick_queue:",
+        "secondary_workers": 10
     }
 } 

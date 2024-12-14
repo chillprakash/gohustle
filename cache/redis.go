@@ -28,6 +28,7 @@ const (
 	RelationalDB    = 4 // For relational data
 	SummaryDB       = 5 // For summary data
 	LTPDB           = 6 // For LTP data
+	ListDB          = 7 // For list data
 )
 
 // Add these constants for token management
@@ -190,6 +191,10 @@ func (rc *RedisCache) GetSummaryDB5() *redis.Client {
 
 func (rc *RedisCache) GetLTPDB6() *redis.Client {
 	return rc.getRedisClient(LTPDB)
+}
+
+func (rc *RedisCache) GetListDB7() *redis.Client {
+	return rc.getRedisClient(ListDB)
 }
 
 // Helper function to get database names

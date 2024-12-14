@@ -15,7 +15,6 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/zerodha/gokiteconnect/v4/models"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
-	googleproto "google.golang.org/protobuf/proto"
 )
 
 func (k *KiteConnect) ConnectTicker() error {
@@ -193,6 +192,8 @@ func (k *KiteConnect) CloseTicker() error {
 // Internal handlers
 func (k *KiteConnect) handleTick(tick models.Tick, connectionID int) {
 	log := logger.GetLogger()
+	distributor := cache.NewTickDistributor()
+	redisCache, _ := cache.NewRedisCache()
 
 	// Get instrument info
 	tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
@@ -249,89 +250,30 @@ func (k *KiteConnect) handleTick(tick models.Tick, connectionID int) {
 		OpenInterest:        tick.OI,
 		OpenInterestDayHigh: tick.OIDayHigh,
 		OpenInterestDayLow:  tick.OIDayLow,
+		TargetFile:          instrumentInfo.TargetFile,
 	}
-	data, err := googleproto.Marshal(protoTick)
-	if err != nil {
-		log.Error("Failed to marshal tick", map[string]interface{}{
+
+	// Distribute the tick
+	if err := distributor.DistributeTick(context.Background(), protoTick); err != nil {
+		log.Error("Failed to distribute tick", map[string]interface{}{
 			"error": err.Error(),
-		})
-		return
-	}
-
-	// Get Redis cache instance
-	redisCache, err := cache.NewRedisCache()
-	if err != nil {
-		log.Error("Failed to get Redis cache", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	ctx := context.Background()
-	dataKey := fmt.Sprintf("tick:%d:%d", tick.InstrumentToken, tick.Timestamp.Unix())
-
-	// 1. Store actual data in appropriate DB based on instrument type
-	var dataDB *redis.Client
-	if instrumentInfo.IsIndex {
-		dataDB = redisCache.GetIndexSpotDB1()
-	} else if instrumentInfo.Index == "NIFTY" {
-		dataDB = redisCache.GetNiftyOptionsDB2()
-	} else {
-		dataDB = redisCache.GetSensexOptionsDB3()
-	}
-
-	// Store data in appropriate DB
-	dataPipe := dataDB.Pipeline()
-	dataPipe.Set(ctx, dataKey, data, 24*time.Hour)
-	if _, err := dataPipe.Exec(ctx); err != nil {
-		log.Error("Failed to store tick data", map[string]interface{}{
-			"error": err.Error(),
-			"db":    dataDB,
-		})
-		return
-	}
-
-	// 2. Store indices in summary DB
-	summaryPipe := redisCache.GetSummaryDB5().Pipeline()
-
-	// Add to index-level sorted set
-	if instrumentInfo.IsIndex {
-		indexSetKey := fmt.Sprintf("index:%s:ticks", instrumentInfo.Index)
-		summaryPipe.ZAdd(ctx, indexSetKey, redis.Z{
-			Score:  float64(tick.Timestamp.Unix()),
-			Member: dataKey,
-		})
-	}
-
-	// Add to instrument-specific sorted set
-	instrumentSetKey := fmt.Sprintf("index:%s:%d", instrumentInfo.Index, tick.InstrumentToken)
-	summaryPipe.ZAdd(ctx, instrumentSetKey, redis.Z{
-		Score:  float64(tick.Timestamp.Unix()),
-		Member: dataKey,
-	})
-
-	// Execute summary pipeline
-	if _, err := summaryPipe.Exec(ctx); err != nil {
-		log.Error("Failed to store tick indices", map[string]interface{}{
-			"error": err.Error(),
-			"db":    "summary",
+			"token": tick.InstrumentToken,
 		})
 		return
 	}
 
 	// 3. Store LTP data in LTP DB
-	dataKey = fmt.Sprintf("ltp:%d", tick.InstrumentToken)
+	dataKey := fmt.Sprintf("ltp:%d", tick.InstrumentToken)
 	ltpDB := redisCache.GetLTPDB6()
+	ctx := context.Background()
 	ltpDB.Set(ctx, dataKey, tick.LastPrice, 24*time.Hour)
 
 	log.Info("Stored tick", map[string]interface{}{
-		"token":          tick.InstrumentToken,
-		"index":          instrumentInfo.Index,
-		"is_index":       instrumentInfo.IsIndex,
-		"timestamp":      tick.Timestamp.Format("2006-01-02 15:04:05.000"),
-		"data_key":       dataKey,
-		"data_db":        getDBName(dataDB),
-		"instrument_set": instrumentSetKey,
+		"token":     tick.InstrumentToken,
+		"index":     instrumentInfo.Index,
+		"is_index":  instrumentInfo.IsIndex,
+		"timestamp": tick.Timestamp.Format("2006-01-02 15:04:05.000"),
+		"data_key":  dataKey,
 	})
 }
 

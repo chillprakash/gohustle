@@ -35,10 +35,11 @@ type InstrumentExpiryMap struct {
 }
 
 type TokenInfo struct {
-	Expiry  time.Time
-	Symbol  string
-	Index   string
-	IsIndex bool
+	Expiry     time.Time
+	Symbol     string
+	Index      string
+	IsIndex    bool
+	TargetFile string
 }
 
 var (
@@ -195,21 +196,27 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *Instrum
 		for _, expiryMap := range instrumentMap.Data {
 			for expiry, options := range expiryMap {
 				for _, call := range options.Calls {
+					index := extractIndex(call.Symbol)
+					targetFile := generateTargetFileName(expiry, index)
 					tokensCache[call.InstrumentToken] = call.Symbol
 					reverseLookupCache[call.InstrumentToken] = TokenInfo{
-						Expiry:  expiry,
-						Symbol:  call.Symbol,
-						Index:   extractIndex(call.Symbol),
-						IsIndex: false,
+						Expiry:     expiry,
+						Symbol:     call.Symbol,
+						Index:      index,
+						IsIndex:    false,
+						TargetFile: targetFile,
 					}
 				}
 				for _, put := range options.Puts {
+					index := extractIndex(put.Symbol)
+					targetFile := generateTargetFileName(expiry, index)
 					tokensCache[put.InstrumentToken] = put.Symbol
 					reverseLookupCache[put.InstrumentToken] = TokenInfo{
-						Expiry:  expiry,
-						Symbol:  put.Symbol,
-						Index:   extractIndex(put.Symbol),
-						IsIndex: false,
+						Expiry:     expiry,
+						Symbol:     put.Symbol,
+						Index:      index,
+						IsIndex:    false,
+						TargetFile: targetFile,
 					}
 				}
 			}
@@ -218,17 +225,32 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *Instrum
 		// Add indices (IsIndex = true)
 		indexTokens := k.GetIndexTokens()
 		for name, token := range indexTokens {
+			targetFile := generateTargetFileName(time.Time{}, name) // zero time for indices
 			tokensCache[token] = name
 			reverseLookupCache[token] = TokenInfo{
-				Expiry:  time.Time{}, // zero time for indices
-				Symbol:  name,
-				Index:   name,
-				IsIndex: true,
+				Expiry:     time.Time{}, // zero time for indices
+				Symbol:     name,
+				Index:      name,
+				IsIndex:    true,
+				TargetFile: targetFile,
 			}
 		}
 	})
 
 	return tokensCache, reverseLookupCache
+}
+
+func generateTargetFileName(expiry time.Time, index string) string {
+	currentDate := time.Now().Format("020106") // ddmmyy format
+
+	// For indices (when expiry is zero time)
+	if expiry.IsZero() {
+		return fmt.Sprintf("%s_%s.parquet", index, currentDate)
+	}
+
+	// For options
+	expiryDate := expiry.Format("020106") // ddmmyy format
+	return fmt.Sprintf("%s_%s_%s.parquet", index, expiryDate, currentDate)
 }
 
 func convertExpiryMapToSortedSlices(expiryMap map[string]map[time.Time]bool) map[string][]time.Time {
@@ -474,7 +496,7 @@ func formatOptionSample(options []OptionTokenPair, limit int) []map[string]strin
 	return sample
 }
 
-func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error) {
+func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, indices []string) ([]string, error) {
 	log := logger.GetLogger()
 
 	// Get the full instrument map
@@ -493,8 +515,8 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments [
 	now := time.Now().Truncate(24 * time.Hour)
 	upcomingExpiry := make(map[string]time.Time)
 
-	for _, instrument := range instruments {
-		if expiryMap, exists := symbolMap.Data[instrument]; exists {
+	for _, index := range indices {
+		if expiryMap, exists := symbolMap.Data[index]; exists {
 			var minExpiry time.Time
 			for expiry := range expiryMap {
 				normalizedExpiry := expiry.Truncate(24 * time.Hour)
@@ -505,7 +527,7 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments [
 				}
 			}
 			if !minExpiry.IsZero() {
-				upcomingExpiry[instrument] = minExpiry
+				upcomingExpiry[index] = minExpiry
 			}
 		}
 	}
@@ -513,8 +535,8 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments [
 	// Collect tokens for upcoming expiry
 	tokens := make([]string, 0)
 	for token, info := range tokenInfo {
-		for _, instrument := range instruments {
-			if expiry, exists := upcomingExpiry[instrument]; exists {
+		for _, index := range indices {
+			if expiry, exists := upcomingExpiry[index]; exists {
 				if info.Expiry.Equal(expiry) {
 					tokens = append(tokens, token)
 				}
@@ -523,7 +545,7 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, instruments [
 	}
 
 	log.Info("Retrieved upcoming expiry tokens", map[string]interface{}{
-		"instruments":  instruments,
+		"indices":      indices,
 		"tokens_count": len(tokens),
 	})
 

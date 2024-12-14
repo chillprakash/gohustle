@@ -15,6 +15,7 @@ type Config struct {
 	Kite     KiteConfig     `json:"kite"`
 	Telegram TelegramConfig `json:"telegram"`
 	Indices  IndicesConfig  `json:"indices"`
+	Queue    QueueConfig    `json:"queue"`
 }
 
 type RedisConfig struct {
@@ -68,6 +69,12 @@ type IndicesConfig struct {
 	SpotIndices    []string `json:"spot_indices"`
 }
 
+type QueueConfig struct {
+	PrimaryWorkers   int    `json:"primary_workers"`
+	ListPrefix       string `json:"list_prefix"`
+	SecondaryWorkers int    `json:"secondary_workers"`
+}
+
 // GetConfig loads configuration and handles errors internally
 func GetConfig() *Config {
 	log := logger.GetLogger()
@@ -91,7 +98,7 @@ func GetConfig() *Config {
 		os.Exit(1)
 	}
 
-	log.Info("Loading configuration", map[string]interface{}{
+	log.Debug("Loading configuration", map[string]interface{}{
 		"working_dir":    workDir,
 		"config_path":    configPath,
 		"file_exists":    true,
@@ -125,7 +132,7 @@ func GetConfig() *Config {
 		os.Exit(1)
 	}
 
-	log.Info("Successfully loaded config", map[string]interface{}{
+	log.Debug("Successfully loaded config", map[string]interface{}{
 		"path": configPath,
 	})
 

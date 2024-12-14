@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,23 +16,31 @@ import (
 func main() {
 	log := logger.GetLogger()
 	log.Info("Application starting...", nil)
-	cfg := config.GetConfig()
 
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
+	// Write PID to file at the start
+	pid := os.Getpid()
+	if err := os.WriteFile("app.pid", []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+		log.Fatal("Failed to write PID file", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+	defer os.Remove("app.pid")
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Initialize components
 	kiteConnect := zerodha.NewKiteConnect(true)
 	if kiteConnect == nil {
 		log.Fatal("Failed to initialize KiteConnect", nil)
 		return
 	}
 
-	defer func() {
-		if kiteConnect != nil {
-			kiteConnect.Close()
-		}
-	}()
+	cfg := config.GetConfig()
 
 	// Download instrument data
 	if err := kiteConnect.DownloadInstrumentData(context.Background()); err != nil {
@@ -77,13 +86,56 @@ func main() {
 		"total_tokens": len(allTokens),
 	})
 
-	// Wait for shutdown signal
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
+	// // Initialize and start scheduler
+	// sched := scheduler.NewScheduler()
+	// sched.Start()
 
-	// Graceful shutdown
-	log.Info("Initiating graceful shutdown", nil)
-	kiteConnect.Close()
-	log.Info("Shutdown complete", nil)
+	// // Initialize writer pool early
+	// writerPool := zerodha.NewWriterPool()
+	// writerPool.Start()
+	// defer writerPool.Stop()
+
+	// // Initialize consumer with writer pool
+	// consumer := cache.NewConsumer(writerPool)
+	// consumer.Start()
+
+	// Block until we receive a signal
+	sig := <-sigChan
+	log.Info("Received shutdown signal", map[string]interface{}{
+		"signal": sig.String(),
+	})
+
+	// Start graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	// Create a channel to track shutdown completion
+	shutdownComplete := make(chan struct{})
+
+	go func() {
+		// Cancel the main context
+		cancel()
+
+		// Stop components in reverse order
+		log.Info("Stopping consumer...", nil)
+		consumer.Stop()
+
+		log.Info("Closing KiteConnect...", nil)
+		if kiteConnect != nil {
+			kiteConnect.Close()
+		}
+
+		close(shutdownComplete)
+	}()
+
+	// Wait for shutdown to complete or timeout
+	select {
+	case <-shutdownComplete:
+		log.Info("Clean shutdown successful", nil)
+	case <-shutdownCtx.Done():
+		log.Error("Shutdown timed out, forcing exit", nil)
+	}
+
+	// Force exit after logging
+	os.Exit(0)
 }

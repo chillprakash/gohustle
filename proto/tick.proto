@@ -58,6 +58,9 @@ message TickData {
     uint32 open_interest = 23;
     uint32 open_interest_day_high = 24;
     uint32 open_interest_day_low = 25;
+
+    // File management
+    string target_file = 26;  // The parquet file this tick should be written to
 }
 
 message BatchMetadata {

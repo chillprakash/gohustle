@@ -12,15 +12,19 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// RedisTokenData represents token information stored in Redis
+type RedisTokenData struct {
+	AccessToken string `json:"access_token"`
+	CreatedAt   int64  `json:"created_at"` // Unix milliseconds
+	ExpiresAt   int64  `json:"expires_at"` // Unix milliseconds
+	IsValid     bool   `json:"is_valid"`
+}
+
 // Constants for database numbers
 const (
-	IndexSpotDB     = 1 // For index spot data
-	NiftyOptionsDB  = 2 // For NIFTY options
-	SensexOptionsDB = 3 // For SENSEX options
-	RelationalDB    = 4 // For relational data
-	SummaryDB       = 5 // For summary data
-	LTPDB           = 6 // For LTP data
-	ListDB          = 7 // For list data
+	RelationalDB = 1 // For relational data
+	ListDB       = 2 // For list data
+	LTPDB        = 3 // For LTP data
 )
 
 // Add these constants for token management
@@ -119,9 +123,6 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 		return client
 	}
 
-	// Get database name based on DB number
-	dbName := getDBName(db)
-
 	client := redis.NewClient(&redis.Options{
 		Addr:            rc.config.Host + ":" + rc.config.Port,
 		Password:        rc.config.Password,
@@ -140,11 +141,10 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 	ctx := context.Background()
 	if err := client.Ping(ctx).Err(); err != nil {
 		rc.log.Error("Failed to connect to Redis", map[string]interface{}{
-			"error":   err.Error(),
-			"db":      db,
-			"db_name": dbName,
-			"host":    rc.config.Host,
-			"port":    rc.config.Port,
+			"error": err.Error(),
+			"db":    db,
+			"host":  rc.config.Host,
+			"port":  rc.config.Port,
 		})
 		return nil
 	}
@@ -152,7 +152,6 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 	rc.pools[db] = client
 	rc.log.Info("Created new Redis connection pool", map[string]interface{}{
 		"db":             db,
-		"db_name":        dbName,
 		"max_conns":      rc.config.MaxConnections,
 		"min_idle_conns": rc.config.MinConnections,
 	})
@@ -160,49 +159,16 @@ func (rc *RedisCache) getRedisClient(db int) *redis.Client {
 	return client
 }
 
-// Helper methods for specific databases
-func (rc *RedisCache) GetIndexSpotDB1() *redis.Client {
-	return rc.getRedisClient(IndexSpotDB)
-}
-
-func (rc *RedisCache) GetNiftyOptionsDB2() *redis.Client {
-	return rc.getRedisClient(NiftyOptionsDB)
-}
-
-func (rc *RedisCache) GetSensexOptionsDB3() *redis.Client {
-	return rc.getRedisClient(SensexOptionsDB)
-}
-
-func (rc *RedisCache) GetRelationalDB4() *redis.Client {
+func (rc *RedisCache) GetRelationalDB1() *redis.Client {
 	return rc.getRedisClient(RelationalDB)
 }
 
-func (rc *RedisCache) GetSummaryDB5() *redis.Client {
-	return rc.getRedisClient(SummaryDB)
-}
-
-func (rc *RedisCache) GetLTPDB6() *redis.Client {
-	return rc.getRedisClient(LTPDB)
-}
-
-func (rc *RedisCache) GetListDB7() *redis.Client {
+func (rc *RedisCache) GetListDB2() *redis.Client {
 	return rc.getRedisClient(ListDB)
 }
 
-// Helper function to get database names
-func getDBName(db int) string {
-	switch db {
-	case IndexSpotDB:
-		return fmt.Sprintf("ticks_index_spot_db_%d", db)
-	case NiftyOptionsDB:
-		return fmt.Sprintf("ticks_nifty_options_db_%d", db)
-	case SensexOptionsDB:
-		return fmt.Sprintf("ticks_sensex_options_db_%d", db)
-	case RelationalDB:
-		return fmt.Sprintf("relational_db_%d", db)
-	default:
-		return fmt.Sprintf("db_%d", db)
-	}
+func (rc *RedisCache) GetLTPDB3() *redis.Client {
+	return rc.getRedisClient(LTPDB)
 }
 
 // Close closes all Redis connections
@@ -245,7 +211,7 @@ func (rc *RedisCache) StoreAccessToken(ctx context.Context, accessToken string) 
 	}
 
 	// Get relational DB client
-	client := rc.GetRelationalDB4()
+	client := rc.GetRelationalDB1()
 
 	// Use fixed key "access_token" for both store and get
 	tokenKey := fmt.Sprintf("%s%s", TokenKeyPrefix, "access_token")
@@ -273,7 +239,7 @@ func (rc *RedisCache) StoreAccessToken(ctx context.Context, accessToken string) 
 // GetValidToken gets the current valid token or returns empty string if expired/invalid
 func (rc *RedisCache) GetValidToken(ctx context.Context) string {
 	log := logger.GetLogger()
-	client := rc.GetRelationalDB4()
+	client := rc.GetRelationalDB1()
 	tokenKey := fmt.Sprintf("%s%s", TokenKeyPrefix, "access_token")
 
 	data, err := client.Get(ctx, tokenKey).Bytes()
@@ -316,7 +282,7 @@ func (rc *RedisCache) GetValidToken(ctx context.Context) string {
 
 // InvalidateToken marks a token as invalid
 func (rc *RedisCache) InvalidateToken(ctx context.Context, apiKey string) error {
-	client := rc.GetRelationalDB4()
+	client := rc.GetRelationalDB1()
 	tokenKey := fmt.Sprintf("%s%s", TokenKeyPrefix, apiKey)
 
 	// Get existing token data

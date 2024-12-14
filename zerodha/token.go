@@ -20,14 +20,6 @@ import (
 	"github.com/pquerna/otp/totp"
 )
 
-// RedisTokenData represents token information stored in Redis
-type RedisTokenData struct {
-	AccessToken string `json:"access_token"`
-	CreatedAt   int64  `json:"created_at"` // Unix milliseconds
-	ExpiresAt   int64  `json:"expires_at"` // Unix milliseconds
-	IsValid     bool   `json:"is_valid"`
-}
-
 // Constants for token management
 const (
 	TokenKeyPrefix = "kite:token:" // Prefix for token keys

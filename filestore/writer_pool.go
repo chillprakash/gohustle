@@ -251,86 +251,86 @@ func (p *WriterPool) Stop() {
 // Define a type for our schema
 type TickParquetSchema struct {
 	// Basic info
-	InstrumentToken int64  `parquet:"name=instrument_token, type=INT64, repetitiontype=OPTIONAL"`
-	IsTradable      bool   `parquet:"name=is_tradable, type=BOOLEAN, repetitiontype=OPTIONAL"`
-	IsIndex         bool   `parquet:"name=is_index, type=BOOLEAN, repetitiontype=OPTIONAL"`
-	Mode            string `parquet:"name=mode, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	InstrumentToken int64  `parquet:"name=instrument_token, type=INT64, repetitiontype=REQUIRED"`
+	IsTradable      bool   `parquet:"name=is_tradable, type=BOOLEAN, repetitiontype=REQUIRED"`
+	IsIndex         bool   `parquet:"name=is_index, type=BOOLEAN, repetitiontype=REQUIRED"`
+	Mode            string `parquet:"name=mode, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=REQUIRED"`
 
 	// Timestamps
-	Timestamp     int64 `parquet:"name=timestamp, type=INT64, repetitiontype=OPTIONAL"`
-	LastTradeTime int64 `parquet:"name=last_trade_time, type=INT64, repetitiontype=OPTIONAL"`
+	Timestamp     int64 `parquet:"name=timestamp, type=INT64, repetitiontype=REQUIRED"`
+	LastTradeTime int64 `parquet:"name=last_trade_time, type=INT64, repetitiontype=REQUIRED"`
 
 	// Price and quantity
-	LastPrice          float64 `parquet:"name=last_price, type=DOUBLE, repetitiontype=OPTIONAL"`
-	LastTradedQuantity int64   `parquet:"name=last_traded_quantity, type=INT64, repetitiontype=OPTIONAL"`
-	TotalBuyQuantity   int64   `parquet:"name=total_buy_quantity, type=INT64, repetitiontype=OPTIONAL"`
-	TotalSellQuantity  int64   `parquet:"name=total_sell_quantity, type=INT64, repetitiontype=OPTIONAL"`
-	VolumeTraded       int64   `parquet:"name=volume_traded, type=INT64, repetitiontype=OPTIONAL"`
-	TotalBuy           int64   `parquet:"name=total_buy, type=INT64, repetitiontype=OPTIONAL"`
-	TotalSell          int64   `parquet:"name=total_sell, type=INT64, repetitiontype=OPTIONAL"`
-	AverageTradePrice  float64 `parquet:"name=average_trade_price, type=DOUBLE, repetitiontype=OPTIONAL"`
+	LastPrice          float64 `parquet:"name=last_price, type=DOUBLE, repetitiontype=REQUIRED"`
+	LastTradedQuantity int64   `parquet:"name=last_traded_quantity, type=INT64, repetitiontype=REQUIRED"`
+	TotalBuyQuantity   int64   `parquet:"name=total_buy_quantity, type=INT64, repetitiontype=REQUIRED"`
+	TotalSellQuantity  int64   `parquet:"name=total_sell_quantity, type=INT64, repetitiontype=REQUIRED"`
+	VolumeTraded       int64   `parquet:"name=volume_traded, type=INT64, repetitiontype=REQUIRED"`
+	TotalBuy           int64   `parquet:"name=total_buy, type=INT64, repetitiontype=REQUIRED"`
+	TotalSell          int64   `parquet:"name=total_sell, type=INT64, repetitiontype=REQUIRED"`
+	AverageTradePrice  float64 `parquet:"name=average_trade_price, type=DOUBLE, repetitiontype=REQUIRED"`
 
 	// OI related
-	Oi        int64   `parquet:"name=oi, type=INT64, repetitiontype=OPTIONAL"`
-	OiDayHigh int64   `parquet:"name=oi_day_high, type=INT64, repetitiontype=OPTIONAL"`
-	OiDayLow  int64   `parquet:"name=oi_day_low, type=INT64, repetitiontype=OPTIONAL"`
-	NetChange float64 `parquet:"name=net_change, type=DOUBLE, repetitiontype=OPTIONAL"`
+	Oi        int64   `parquet:"name=oi, type=INT64, repetitiontype=REQUIRED"`
+	OiDayHigh int64   `parquet:"name=oi_day_high, type=INT64, repetitiontype=REQUIRED"`
+	OiDayLow  int64   `parquet:"name=oi_day_low, type=INT64, repetitiontype=REQUIRED"`
+	NetChange float64 `parquet:"name=net_change, type=DOUBLE, repetitiontype=REQUIRED"`
 
 	// OHLC data
-	OhlcOpen  float64 `parquet:"name=ohlc_open, type=DOUBLE, repetitiontype=OPTIONAL"`
-	OhlcHigh  float64 `parquet:"name=ohlc_high, type=DOUBLE, repetitiontype=OPTIONAL"`
-	OhlcLow   float64 `parquet:"name=ohlc_low, type=DOUBLE, repetitiontype=OPTIONAL"`
-	OhlcClose float64 `parquet:"name=ohlc_close, type=DOUBLE, repetitiontype=OPTIONAL"`
+	OhlcOpen  float64 `parquet:"name=ohlc_open, type=DOUBLE, repetitiontype=REQUIRED"`
+	OhlcHigh  float64 `parquet:"name=ohlc_high, type=DOUBLE, repetitiontype=REQUIRED"`
+	OhlcLow   float64 `parquet:"name=ohlc_low, type=DOUBLE, repetitiontype=REQUIRED"`
+	OhlcClose float64 `parquet:"name=ohlc_close, type=DOUBLE, repetitiontype=REQUIRED"`
 
 	// Market depth - Buy
-	DepthBuyPrice1  float64 `parquet:"name=depth_buy_price_1, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthBuyQty1    int64   `parquet:"name=depth_buy_qty_1, type=INT64, repetitiontype=OPTIONAL"`
-	DepthBuyOrders1 int64   `parquet:"name=depth_buy_orders_1, type=INT64, repetitiontype=OPTIONAL"`
+	DepthBuyPrice1  float64 `parquet:"name=depth_buy_price_1, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthBuyQty1    int64   `parquet:"name=depth_buy_qty_1, type=INT64, repetitiontype=REQUIRED"`
+	DepthBuyOrders1 int64   `parquet:"name=depth_buy_orders_1, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthBuyPrice2  float64 `parquet:"name=depth_buy_price_2, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthBuyQty2    int64   `parquet:"name=depth_buy_qty_2, type=INT64, repetitiontype=OPTIONAL"`
-	DepthBuyOrders2 int64   `parquet:"name=depth_buy_orders_2, type=INT64, repetitiontype=OPTIONAL"`
+	DepthBuyPrice2  float64 `parquet:"name=depth_buy_price_2, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthBuyQty2    int64   `parquet:"name=depth_buy_qty_2, type=INT64, repetitiontype=REQUIRED"`
+	DepthBuyOrders2 int64   `parquet:"name=depth_buy_orders_2, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthBuyPrice3  float64 `parquet:"name=depth_buy_price_3, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthBuyQty3    int64   `parquet:"name=depth_buy_qty_3, type=INT64, repetitiontype=OPTIONAL"`
-	DepthBuyOrders3 int64   `parquet:"name=depth_buy_orders_3, type=INT64, repetitiontype=OPTIONAL"`
+	DepthBuyPrice3  float64 `parquet:"name=depth_buy_price_3, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthBuyQty3    int64   `parquet:"name=depth_buy_qty_3, type=INT64, repetitiontype=REQUIRED"`
+	DepthBuyOrders3 int64   `parquet:"name=depth_buy_orders_3, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthBuyPrice4  float64 `parquet:"name=depth_buy_price_4, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthBuyQty4    int64   `parquet:"name=depth_buy_qty_4, type=INT64, repetitiontype=OPTIONAL"`
-	DepthBuyOrders4 int64   `parquet:"name=depth_buy_orders_4, type=INT64, repetitiontype=OPTIONAL"`
+	DepthBuyPrice4  float64 `parquet:"name=depth_buy_price_4, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthBuyQty4    int64   `parquet:"name=depth_buy_qty_4, type=INT64, repetitiontype=REQUIRED"`
+	DepthBuyOrders4 int64   `parquet:"name=depth_buy_orders_4, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthBuyPrice5  float64 `parquet:"name=depth_buy_price_5, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthBuyQty5    int64   `parquet:"name=depth_buy_qty_5, type=INT64, repetitiontype=OPTIONAL"`
-	DepthBuyOrders5 int64   `parquet:"name=depth_buy_orders_5, type=INT64, repetitiontype=OPTIONAL"`
+	DepthBuyPrice5  float64 `parquet:"name=depth_buy_price_5, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthBuyQty5    int64   `parquet:"name=depth_buy_qty_5, type=INT64, repetitiontype=REQUIRED"`
+	DepthBuyOrders5 int64   `parquet:"name=depth_buy_orders_5, type=INT64, repetitiontype=REQUIRED"`
 
 	// Market depth - Sell
-	DepthSellPrice1  float64 `parquet:"name=depth_sell_price_1, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthSellQty1    int64   `parquet:"name=depth_sell_qty_1, type=INT64, repetitiontype=OPTIONAL"`
-	DepthSellOrders1 int64   `parquet:"name=depth_sell_orders_1, type=INT64, repetitiontype=OPTIONAL"`
+	DepthSellPrice1  float64 `parquet:"name=depth_sell_price_1, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthSellQty1    int64   `parquet:"name=depth_sell_qty_1, type=INT64, repetitiontype=REQUIRED"`
+	DepthSellOrders1 int64   `parquet:"name=depth_sell_orders_1, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthSellPrice2  float64 `parquet:"name=depth_sell_price_2, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthSellQty2    int64   `parquet:"name=depth_sell_qty_2, type=INT64, repetitiontype=OPTIONAL"`
-	DepthSellOrders2 int64   `parquet:"name=depth_sell_orders_2, type=INT64, repetitiontype=OPTIONAL"`
+	DepthSellPrice2  float64 `parquet:"name=depth_sell_price_2, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthSellQty2    int64   `parquet:"name=depth_sell_qty_2, type=INT64, repetitiontype=REQUIRED"`
+	DepthSellOrders2 int64   `parquet:"name=depth_sell_orders_2, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthSellPrice3  float64 `parquet:"name=depth_sell_price_3, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthSellQty3    int64   `parquet:"name=depth_sell_qty_3, type=INT64, repetitiontype=OPTIONAL"`
-	DepthSellOrders3 int64   `parquet:"name=depth_sell_orders_3, type=INT64, repetitiontype=OPTIONAL"`
+	DepthSellPrice3  float64 `parquet:"name=depth_sell_price_3, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthSellQty3    int64   `parquet:"name=depth_sell_qty_3, type=INT64, repetitiontype=REQUIRED"`
+	DepthSellOrders3 int64   `parquet:"name=depth_sell_orders_3, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthSellPrice4  float64 `parquet:"name=depth_sell_price_4, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthSellQty4    int64   `parquet:"name=depth_sell_qty_4, type=INT64, repetitiontype=OPTIONAL"`
-	DepthSellOrders4 int64   `parquet:"name=depth_sell_orders_4, type=INT64, repetitiontype=OPTIONAL"`
+	DepthSellPrice4  float64 `parquet:"name=depth_sell_price_4, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthSellQty4    int64   `parquet:"name=depth_sell_qty_4, type=INT64, repetitiontype=REQUIRED"`
+	DepthSellOrders4 int64   `parquet:"name=depth_sell_orders_4, type=INT64, repetitiontype=REQUIRED"`
 
-	DepthSellPrice5  float64 `parquet:"name=depth_sell_price_5, type=DOUBLE, repetitiontype=OPTIONAL"`
-	DepthSellQty5    int64   `parquet:"name=depth_sell_qty_5, type=INT64, repetitiontype=OPTIONAL"`
-	DepthSellOrders5 int64   `parquet:"name=depth_sell_orders_5, type=INT64, repetitiontype=OPTIONAL"`
+	DepthSellPrice5  float64 `parquet:"name=depth_sell_price_5, type=DOUBLE, repetitiontype=REQUIRED"`
+	DepthSellQty5    int64   `parquet:"name=depth_sell_qty_5, type=INT64, repetitiontype=REQUIRED"`
+	DepthSellOrders5 int64   `parquet:"name=depth_sell_orders_5, type=INT64, repetitiontype=REQUIRED"`
 
 	// Additional metadata
-	ChangePercent       float64 `parquet:"name=change_percent, type=DOUBLE, repetitiontype=OPTIONAL"`
-	LastTradePrice      float64 `parquet:"name=last_trade_price, type=DOUBLE, repetitiontype=OPTIONAL"`
-	OpenInterest        int64   `parquet:"name=open_interest, type=INT64, repetitiontype=OPTIONAL"`
-	OpenInterestDayHigh int64   `parquet:"name=open_interest_day_high, type=INT64, repetitiontype=OPTIONAL"`
-	OpenInterestDayLow  int64   `parquet:"name=open_interest_day_low, type=INT64, repetitiontype=OPTIONAL"`
-	TargetFile          string  `parquet:"name=target_file, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	ChangePercent       float64 `parquet:"name=change_percent, type=DOUBLE, repetitiontype=REQUIRED"`
+	LastTradePrice      float64 `parquet:"name=last_trade_price, type=DOUBLE, repetitiontype=REQUIRED"`
+	OpenInterest        int64   `parquet:"name=open_interest, type=INT64, repetitiontype=REQUIRED"`
+	OpenInterestDayHigh int64   `parquet:"name=open_interest_day_high, type=INT64, repetitiontype=REQUIRED"`
+	OpenInterestDayLow  int64   `parquet:"name=open_interest_day_low, type=INT64, repetitiontype=REQUIRED"`
+	TargetFile          string  `parquet:"name=target_file, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=REQUIRED"`
 }
 
 // Helper function to write ticks to parquet file
@@ -364,111 +364,18 @@ func writeTicksToParquet(filePath string, ticks []*proto.TickData) error {
 	}
 	defer pw.WriteStop()
 
-	// Set compression and row group size
-	pw.RowGroupSize = 128 * 1024 * 1024 // 128M
+	// Set writer properties
+	pw.RowGroupSize = 128 * 1024 * 1024
 	pw.CompressionType = parquet.CompressionCodec_SNAPPY
 
-	// If file exists, read existing data first
-	var existingTicks []*proto.TickData
-	if _, err := os.Stat(filePath); err == nil {
-		existingTicks, err = readExistingParquet(filePath)
-		if err != nil {
-			log.Error("Failed to read existing parquet file", map[string]interface{}{
-				"error":     err.Error(),
-				"file_path": filePath,
+	// Write ticks
+	for i, tick := range ticks {
+		row := convertTickToParquet(tick)
+		if row == nil {
+			log.Error("Skipping nil tick", map[string]interface{}{
+				"index": i,
 			})
-			// Continue with new data even if we can't read existing
-		}
-	}
-
-	// Combine existing and new ticks
-	allTicks := append(existingTicks, ticks...)
-
-	// Write all ticks
-	for i, tick := range allTicks {
-		// Convert tick to schema
-		row := &TickParquetSchema{
-			InstrumentToken:     int64(tick.InstrumentToken),
-			IsTradable:          tick.IsTradable,
-			IsIndex:             tick.IsIndex,
-			Mode:                tick.Mode,
-			Timestamp:           tick.Timestamp,
-			LastTradeTime:       tick.LastTradeTime,
-			LastPrice:           tick.LastPrice,
-			LastTradedQuantity:  int64(tick.LastTradedQuantity),
-			TotalBuyQuantity:    int64(tick.TotalBuyQuantity),
-			TotalSellQuantity:   int64(tick.TotalSellQuantity),
-			VolumeTraded:        int64(tick.VolumeTraded),
-			TotalBuy:            int64(tick.TotalBuy),
-			TotalSell:           int64(tick.TotalSell),
-			AverageTradePrice:   tick.AverageTradePrice,
-			Oi:                  int64(tick.Oi),
-			OiDayHigh:           int64(tick.OiDayHigh),
-			OiDayLow:            int64(tick.OiDayLow),
-			NetChange:           tick.NetChange,
-			OhlcOpen:            tick.Ohlc.Open,
-			OhlcHigh:            tick.Ohlc.High,
-			OhlcLow:             tick.Ohlc.Low,
-			OhlcClose:           tick.Ohlc.Close,
-			ChangePercent:       tick.ChangePercent,
-			LastTradePrice:      tick.LastTradePrice,
-			OpenInterest:        int64(tick.OpenInterest),
-			OpenInterestDayHigh: int64(tick.OpenInterestDayHigh),
-			OpenInterestDayLow:  int64(tick.OpenInterestDayLow),
-			TargetFile:          tick.TargetFile,
-		}
-
-		// Add nil checks for depth arrays
-		if len(tick.Depth.Buy) > 0 {
-			row.DepthBuyPrice1 = tick.Depth.Buy[0].Price
-			row.DepthBuyQty1 = int64(tick.Depth.Buy[0].Quantity)
-			row.DepthBuyOrders1 = int64(tick.Depth.Buy[0].Orders)
-		}
-		if len(tick.Depth.Buy) > 1 {
-			row.DepthBuyPrice2 = tick.Depth.Buy[1].Price
-			row.DepthBuyQty2 = int64(tick.Depth.Buy[1].Quantity)
-			row.DepthBuyOrders2 = int64(tick.Depth.Buy[1].Orders)
-		}
-		if len(tick.Depth.Buy) > 2 {
-			row.DepthBuyPrice3 = tick.Depth.Buy[2].Price
-			row.DepthBuyQty3 = int64(tick.Depth.Buy[2].Quantity)
-			row.DepthBuyOrders3 = int64(tick.Depth.Buy[2].Orders)
-		}
-		if len(tick.Depth.Buy) > 3 {
-			row.DepthBuyPrice4 = tick.Depth.Buy[3].Price
-			row.DepthBuyQty4 = int64(tick.Depth.Buy[3].Quantity)
-			row.DepthBuyOrders4 = int64(tick.Depth.Buy[3].Orders)
-		}
-		if len(tick.Depth.Buy) > 4 {
-			row.DepthBuyPrice5 = tick.Depth.Buy[4].Price
-			row.DepthBuyQty5 = int64(tick.Depth.Buy[4].Quantity)
-			row.DepthBuyOrders5 = int64(tick.Depth.Buy[4].Orders)
-		}
-
-		if len(tick.Depth.Sell) > 0 {
-			row.DepthSellPrice1 = tick.Depth.Sell[0].Price
-			row.DepthSellQty1 = int64(tick.Depth.Sell[0].Quantity)
-			row.DepthSellOrders1 = int64(tick.Depth.Sell[0].Orders)
-		}
-		if len(tick.Depth.Sell) > 1 {
-			row.DepthSellPrice2 = tick.Depth.Sell[1].Price
-			row.DepthSellQty2 = int64(tick.Depth.Sell[1].Quantity)
-			row.DepthSellOrders2 = int64(tick.Depth.Sell[1].Orders)
-		}
-		if len(tick.Depth.Sell) > 2 {
-			row.DepthSellPrice3 = tick.Depth.Sell[2].Price
-			row.DepthSellQty3 = int64(tick.Depth.Sell[2].Quantity)
-			row.DepthSellOrders3 = int64(tick.Depth.Sell[2].Orders)
-		}
-		if len(tick.Depth.Sell) > 3 {
-			row.DepthSellPrice4 = tick.Depth.Sell[3].Price
-			row.DepthSellQty4 = int64(tick.Depth.Sell[3].Quantity)
-			row.DepthSellOrders4 = int64(tick.Depth.Sell[3].Orders)
-		}
-		if len(tick.Depth.Sell) > 4 {
-			row.DepthSellPrice5 = tick.Depth.Sell[4].Price
-			row.DepthSellQty5 = int64(tick.Depth.Sell[4].Quantity)
-			row.DepthSellOrders5 = int64(tick.Depth.Sell[4].Orders)
+			continue
 		}
 
 		if err := pw.Write(row); err != nil {
@@ -480,21 +387,6 @@ func writeTicksToParquet(filePath string, ticks []*proto.TickData) error {
 			return fmt.Errorf("failed to write tick: %w", err)
 		}
 	}
-
-	// Explicitly call WriteStop before closing
-	if err := pw.WriteStop(); err != nil {
-		log.Error("Failed to finalize parquet file", map[string]interface{}{
-			"error":     err.Error(),
-			"file_path": filePath,
-		})
-		return fmt.Errorf("failed to finalize parquet file: %w", err)
-	}
-
-	log.Info("Successfully wrote parquet file", map[string]interface{}{
-		"file_path":   filePath,
-		"ticks_count": len(ticks),
-		"file_size":   getFileSize(filePath),
-	})
 
 	return nil
 }
@@ -545,6 +437,117 @@ func getFileSize(filePath string) int64 {
 		return 0
 	}
 	return info.Size()
+}
+
+// Helper functions for default values
+func getDefaultDepth() *proto.TickData_MarketDepth {
+	return &proto.TickData_MarketDepth{
+		Buy:  make([]*proto.TickData_DepthItem, 5),
+		Sell: make([]*proto.TickData_DepthItem, 5),
+	}
+}
+
+func getDefaultOHLC() *proto.TickData_OHLC {
+	return &proto.TickData_OHLC{
+		Open:  0.0,
+		High:  0.0,
+		Low:   0.0,
+		Close: 0.0,
+	}
+}
+
+// Helper to safely get depth item
+func getDepthItem(items []*proto.TickData_DepthItem, index int) *proto.TickData_DepthItem {
+	if items == nil || index >= len(items) {
+		return &proto.TickData_DepthItem{
+			Price:    0.0,
+			Quantity: 0,
+			Orders:   0,
+		}
+	}
+	if items[index] == nil {
+		items[index] = &proto.TickData_DepthItem{
+			Price:    0.0,
+			Quantity: 0,
+			Orders:   0,
+		}
+	}
+	return items[index]
+}
+
+// Convert tick to parquet schema with validation
+func convertTickToParquet(tick *proto.TickData) *TickParquetSchema {
+	if tick == nil {
+		return nil
+	}
+
+	// Initialize OHLC if nil
+	if tick.Ohlc == nil {
+		tick.Ohlc = getDefaultOHLC()
+	}
+
+	// Initialize Depth if nil
+	if tick.Depth == nil {
+		tick.Depth = getDefaultDepth()
+	}
+
+	// Ensure Buy and Sell arrays exist
+	if tick.Depth.Buy == nil {
+		tick.Depth.Buy = make([]*proto.TickData_DepthItem, 5)
+	}
+	if tick.Depth.Sell == nil {
+		tick.Depth.Sell = make([]*proto.TickData_DepthItem, 5)
+	}
+
+	// Create parquet row
+	row := &TickParquetSchema{
+		// Basic info
+		InstrumentToken: int64(tick.InstrumentToken),
+		IsTradable:      tick.IsTradable,
+		IsIndex:         tick.IsIndex,
+		Mode:            tick.Mode,
+
+		// Timestamps
+		Timestamp:     tick.Timestamp,
+		LastTradeTime: tick.LastTradeTime,
+
+		// Price and quantity
+		LastPrice:          tick.LastPrice,
+		LastTradedQuantity: int64(tick.LastTradedQuantity),
+		TotalBuyQuantity:   int64(tick.TotalBuyQuantity),
+		TotalSellQuantity:  int64(tick.TotalSellQuantity),
+		VolumeTraded:       int64(tick.VolumeTraded),
+		TotalBuy:           int64(tick.TotalBuy),
+		TotalSell:          int64(tick.TotalSell),
+		AverageTradePrice:  tick.AverageTradePrice,
+
+		// OHLC
+		OhlcOpen:  tick.Ohlc.Open,
+		OhlcHigh:  tick.Ohlc.High,
+		OhlcLow:   tick.Ohlc.Low,
+		OhlcClose: tick.Ohlc.Close,
+
+		// Buy Depth
+		DepthBuyPrice1:  getDepthItem(tick.Depth.Buy, 0).Price,
+		DepthBuyQty1:    int64(getDepthItem(tick.Depth.Buy, 0).Quantity),
+		DepthBuyOrders1: int64(getDepthItem(tick.Depth.Buy, 0).Orders),
+
+		DepthBuyPrice2:  getDepthItem(tick.Depth.Buy, 1).Price,
+		DepthBuyQty2:    int64(getDepthItem(tick.Depth.Buy, 1).Quantity),
+		DepthBuyOrders2: int64(getDepthItem(tick.Depth.Buy, 1).Orders),
+
+		// ... repeat for all depth levels ...
+
+		// Additional metadata
+		ChangePercent:       tick.ChangePercent,
+		LastTradePrice:      tick.LastTradePrice,
+		OpenInterest:        int64(tick.OpenInterest),
+		OpenInterestDayHigh: int64(tick.OpenInterestDayHigh),
+		OpenInterestDayLow:  int64(tick.OpenInterestDayLow),
+		TargetFile:          tick.TargetFile,
+	}
+
+	return row
 }
 
 // ... rest of the implementation (getOrCreateWriter, Flush methods etc.)

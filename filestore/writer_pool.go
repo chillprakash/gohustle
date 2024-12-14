@@ -6,9 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"gohustle/logger"
 	"gohustle/proto"
+
+	"github.com/xitongsys/parquet-go-source/local"
+	"github.com/xitongsys/parquet-go/parquet"
+	"github.com/xitongsys/parquet-go/writer"
 )
 
 const (
@@ -57,11 +62,33 @@ func (p *WriterPool) Start() {
 func (p *WriterPool) runWorker(w *WriterWorker) {
 	defer p.wg.Done()
 
+	// Add periodic flush
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-p.ctx.Done():
 			w.flushAll() // Flush before exit
 			return
+		case <-ticker.C:
+			// Periodic flush
+			for targetFile := range w.buffer {
+				if len(w.buffer[targetFile]) > 0 {
+					w.log.Info("Periodic flush triggered", map[string]interface{}{
+						"worker_id":   w.id,
+						"target_file": targetFile,
+						"buffer_size": len(w.buffer[targetFile]),
+					})
+					if err := w.flushFile(targetFile); err != nil {
+						w.log.Error("Failed periodic flush", map[string]interface{}{
+							"error":       err.Error(),
+							"worker_id":   w.id,
+							"target_file": targetFile,
+						})
+					}
+				}
+			}
 		case req := <-w.workChan:
 			w.processRequest(req)
 		}
@@ -72,9 +99,27 @@ func (w *WriterWorker) processRequest(req *WriteRequest) {
 	// Add single tick to appropriate buffer
 	w.buffer[req.TargetFile] = append(w.buffer[req.TargetFile], req.Tick)
 
+	w.log.Debug("Added tick to buffer", map[string]interface{}{
+		"worker_id":    w.id,
+		"target_file":  req.TargetFile,
+		"buffer_size":  len(w.buffer[req.TargetFile]),
+		"buffer_limit": w.bufferSize,
+	})
+
 	// Check buffer size
 	if len(w.buffer[req.TargetFile]) >= w.bufferSize {
+		w.log.Info("Buffer full, flushing", map[string]interface{}{
+			"worker_id":   w.id,
+			"target_file": req.TargetFile,
+			"buffer_size": len(w.buffer[req.TargetFile]),
+		})
+
 		if err := w.flushFile(req.TargetFile); err != nil {
+			w.log.Error("Failed to flush file", map[string]interface{}{
+				"error":       err.Error(),
+				"worker_id":   w.id,
+				"target_file": req.TargetFile,
+			})
 			req.ResultChan <- err
 			return
 		}
@@ -90,26 +135,30 @@ func (w *WriterWorker) flushFile(targetFile string) error {
 		return nil
 	}
 
-	// Construct full file path
 	fullPath := filepath.Join(w.baseDir, targetFile)
+
+	w.log.Info("Preparing to write ticks", map[string]interface{}{
+		"worker_id":   w.id,
+		"file":        targetFile,
+		"ticks_count": len(ticks),
+		"full_path":   fullPath,
+		"buffer_size": len(w.buffer[targetFile]),
+	})
 
 	// Ensure directory exists
 	dir := filepath.Dir(fullPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
+		w.log.Error("Failed to create directory", map[string]interface{}{
+			"error": err.Error(),
+			"dir":   dir,
+		})
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
 	// Write to parquet file
 	if err := writeTicksToParquet(fullPath, ticks); err != nil {
-		return fmt.Errorf("failed to write parquet file %s: %w", fullPath, err)
+		return err
 	}
-
-	w.log.Debug("Flushed ticks to file", map[string]interface{}{
-		"worker_id":   w.id,
-		"file":        targetFile,
-		"ticks_count": len(ticks),
-		"full_path":   fullPath,
-	})
 
 	// Clear buffer after successful write
 	w.buffer[targetFile] = w.buffer[targetFile][:0]
@@ -135,7 +184,7 @@ func NewWriterPool() *WriterPool {
 	numWorkers := defaultNumWorkers // 10 workers
 	bufferSize := defaultBufferSize // 1000 ticks per buffer
 
-	// Get project root directory
+	// Get project root directory and create data directory
 	rootDir, err := os.Getwd()
 	if err != nil {
 		panic(fmt.Sprintf("failed to get working directory: %v", err))
@@ -148,6 +197,15 @@ func NewWriterPool() *WriterPool {
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		panic(fmt.Sprintf("failed to create ticks directory: %v", err))
 	}
+
+	log := logger.GetLogger()
+	log.Info("Initialized writer pool", map[string]interface{}{
+		"root_dir":    rootDir,
+		"base_dir":    baseDir,
+		"num_workers": numWorkers,
+		"buffer_size": bufferSize,
+		"queue_size":  defaultQueueSize,
+	})
 
 	pool := &WriterPool{
 		workers:    make([]*WriterWorker, numWorkers),
@@ -189,11 +247,174 @@ func (p *WriterPool) Stop() {
 	p.wg.Wait()
 }
 
+// Define a type for our schema
+type TickParquetSchema struct {
+	// Basic info
+	InstrumentToken uint32 `parquet:"name=instrument_token, type=INT32"`
+	IsTradable      bool   `parquet:"name=is_tradable, type=BOOLEAN"`
+	IsIndex         bool   `parquet:"name=is_index, type=BOOLEAN"`
+	Mode            string `parquet:"name=mode, type=BYTE_ARRAY, convertedtype=UTF8"`
+
+	// Timestamps
+	Timestamp     int64 `parquet:"name=timestamp, type=INT64"`
+	LastTradeTime int64 `parquet:"name=last_trade_time, type=INT64"`
+
+	// Price and quantity
+	LastPrice          float64 `parquet:"name=last_price, type=DOUBLE"`
+	LastTradedQuantity uint32  `parquet:"name=last_traded_quantity, type=INT32"`
+	TotalBuyQuantity   uint32  `parquet:"name=total_buy_quantity, type=INT32"`
+	TotalSellQuantity  uint32  `parquet:"name=total_sell_quantity, type=INT32"`
+	VolumeTraded       uint32  `parquet:"name=volume_traded, type=INT32"`
+	TotalBuy           uint32  `parquet:"name=total_buy, type=INT32"`
+	TotalSell          uint32  `parquet:"name=total_sell, type=INT32"`
+	AverageTradePrice  float64 `parquet:"name=average_trade_price, type=DOUBLE"`
+
+	// OI related
+	Oi        uint32  `parquet:"name=oi, type=INT32"`
+	OiDayHigh uint32  `parquet:"name=oi_day_high, type=INT32"`
+	OiDayLow  uint32  `parquet:"name=oi_day_low, type=INT32"`
+	NetChange float64 `parquet:"name=net_change, type=DOUBLE"`
+
+	// OHLC data
+	OhlcOpen  float64 `parquet:"name=ohlc_open, type=DOUBLE"`
+	OhlcHigh  float64 `parquet:"name=ohlc_high, type=DOUBLE"`
+	OhlcLow   float64 `parquet:"name=ohlc_low, type=DOUBLE"`
+	OhlcClose float64 `parquet:"name=ohlc_close, type=DOUBLE"`
+
+	// Market depth - Buy
+	DepthBuyPrice1  float64 `parquet:"name=depth_buy_price_1, type=DOUBLE"`
+	DepthBuyQty1    uint32  `parquet:"name=depth_buy_qty_1, type=INT32"`
+	DepthBuyOrders1 uint32  `parquet:"name=depth_buy_orders_1, type=INT32"`
+	// ... repeat for all 5 depth levels ...
+	DepthBuyPrice5  float64 `parquet:"name=depth_buy_price_5, type=DOUBLE"`
+	DepthBuyQty5    uint32  `parquet:"name=depth_buy_qty_5, type=INT32"`
+	DepthBuyOrders5 uint32  `parquet:"name=depth_buy_orders_5, type=INT32"`
+
+	// Market depth - Sell
+	DepthSellPrice1  float64 `parquet:"name=depth_sell_price_1, type=DOUBLE"`
+	DepthSellQty1    uint32  `parquet:"name=depth_sell_qty_1, type=INT32"`
+	DepthSellOrders1 uint32  `parquet:"name=depth_sell_orders_1, type=INT32"`
+	// ... repeat for all 5 depth levels ...
+	DepthSellPrice5  float64 `parquet:"name=depth_sell_price_5, type=DOUBLE"`
+	DepthSellQty5    uint32  `parquet:"name=depth_sell_qty_5, type=INT32"`
+	DepthSellOrders5 uint32  `parquet:"name=depth_sell_orders_5, type=INT32"`
+
+	// Additional metadata
+	ChangePercent       float64 `parquet:"name=change_percent, type=DOUBLE"`
+	LastTradePrice      float64 `parquet:"name=last_trade_price, type=DOUBLE"`
+	OpenInterest        uint32  `parquet:"name=open_interest, type=INT32"`
+	OpenInterestDayHigh uint32  `parquet:"name=open_interest_day_high, type=INT32"`
+	OpenInterestDayLow  uint32  `parquet:"name=open_interest_day_low, type=INT32"`
+	TargetFile          string  `parquet:"name=target_file, type=BYTE_ARRAY, convertedtype=UTF8"`
+}
+
 // Helper function to write ticks to parquet file
 func writeTicksToParquet(filePath string, ticks []*proto.TickData) error {
-	// TODO: Implement actual parquet writing
-	// For now, just log the operation
+	log := logger.GetLogger()
+
+	log.Info("Starting parquet write", map[string]interface{}{
+		"file_path":   filePath,
+		"ticks_count": len(ticks),
+	})
+
+	// Create parquet file
+	fw, err := local.NewLocalFileWriter(filePath)
+	if err != nil {
+		log.Error("Failed to create file writer", map[string]interface{}{
+			"error":     err.Error(),
+			"file_path": filePath,
+		})
+		return fmt.Errorf("failed to create file writer: %w", err)
+	}
+	defer fw.Close()
+
+	// Create parquet writer with schema
+	pw, err := writer.NewParquetWriter(fw, new(TickParquetSchema), 4)
+	if err != nil {
+		log.Error("Failed to create parquet writer", map[string]interface{}{
+			"error":     err.Error(),
+			"file_path": filePath,
+		})
+		return fmt.Errorf("failed to create parquet writer: %w", err)
+	}
+	defer pw.WriteStop()
+
+	// Set compression
+	pw.RowGroupSize = 128 * 1024 * 1024 // 128M
+	pw.CompressionType = parquet.CompressionCodec_SNAPPY
+
+	// Write ticks
+	for i, tick := range ticks {
+		// Convert tick to schema
+		row := &TickParquetSchema{
+			InstrumentToken:     tick.InstrumentToken,
+			IsTradable:          tick.IsTradable,
+			IsIndex:             tick.IsIndex,
+			Mode:                tick.Mode,
+			Timestamp:           tick.Timestamp,
+			LastTradeTime:       tick.LastTradeTime,
+			LastPrice:           tick.LastPrice,
+			LastTradedQuantity:  tick.LastTradedQuantity,
+			TotalBuyQuantity:    tick.TotalBuyQuantity,
+			TotalSellQuantity:   tick.TotalSellQuantity,
+			VolumeTraded:        tick.VolumeTraded,
+			TotalBuy:            tick.TotalBuy,
+			TotalSell:           tick.TotalSell,
+			AverageTradePrice:   tick.AverageTradePrice,
+			Oi:                  tick.Oi,
+			OiDayHigh:           tick.OiDayHigh,
+			OiDayLow:            tick.OiDayLow,
+			NetChange:           tick.NetChange,
+			OhlcOpen:            tick.Ohlc.Open,
+			OhlcHigh:            tick.Ohlc.High,
+			OhlcLow:             tick.Ohlc.Low,
+			OhlcClose:           tick.Ohlc.Close,
+			DepthBuyPrice1:      tick.Depth.Buy[0].Price,
+			DepthBuyQty1:        tick.Depth.Buy[0].Quantity,
+			DepthBuyOrders1:     tick.Depth.Buy[0].Orders,
+			DepthBuyPrice5:      tick.Depth.Buy[4].Price,
+			DepthBuyQty5:        tick.Depth.Buy[4].Quantity,
+			DepthBuyOrders5:     tick.Depth.Buy[4].Orders,
+			DepthSellPrice1:     tick.Depth.Sell[0].Price,
+			DepthSellQty1:       tick.Depth.Sell[0].Quantity,
+			DepthSellOrders1:    tick.Depth.Sell[0].Orders,
+			DepthSellPrice5:     tick.Depth.Sell[4].Price,
+			DepthSellQty5:       tick.Depth.Sell[4].Quantity,
+			DepthSellOrders5:    tick.Depth.Sell[4].Orders,
+			ChangePercent:       tick.ChangePercent,
+			LastTradePrice:      tick.LastTradePrice,
+			OpenInterest:        tick.OpenInterest,
+			OpenInterestDayHigh: tick.OpenInterestDayHigh,
+			OpenInterestDayLow:  tick.OpenInterestDayLow,
+			TargetFile:          tick.TargetFile,
+		}
+
+		if err := pw.Write(row); err != nil {
+			log.Error("Failed to write tick", map[string]interface{}{
+				"error":      err.Error(),
+				"file_path":  filePath,
+				"tick_index": i,
+			})
+			return fmt.Errorf("failed to write tick: %w", err)
+		}
+	}
+
+	log.Info("Successfully wrote parquet file", map[string]interface{}{
+		"file_path":   filePath,
+		"ticks_count": len(ticks),
+		"file_size":   getFileSize(filePath),
+	})
+
 	return nil
+}
+
+// Helper to get file size
+func getFileSize(filePath string) int64 {
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 // ... rest of the implementation (getOrCreateWriter, Flush methods etc.)

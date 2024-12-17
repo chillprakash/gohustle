@@ -53,11 +53,10 @@ func newDuckDB() (*DuckDB, error) {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	// Build connection string with DuckDB-specific settings
-	connStr := fmt.Sprintf("?threads=%d&memory_limit=%s&access_mode=%s",
+	// Simple connection string with basic settings
+	connStr := fmt.Sprintf("?threads=%d&memory_limit=%s",
 		cfg.DuckDB.Threads,
 		cfg.DuckDB.MemoryLimit,
-		cfg.DuckDB.AccessMode,
 	)
 
 	db, err := sql.Open("duckdb", connStr)
@@ -65,7 +64,7 @@ func newDuckDB() (*DuckDB, error) {
 		return nil, fmt.Errorf("failed to open duckdb: %w", err)
 	}
 
-	// Set connection pool settings from config
+	// Basic connection pool settings
 	db.SetMaxOpenConns(cfg.DuckDB.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.DuckDB.MaxIdleConns)
 
@@ -75,36 +74,9 @@ func newDuckDB() (*DuckDB, error) {
 	}
 	db.SetConnMaxLifetime(connLifetime)
 
-	// Set DuckDB specific settings for better performance
-	if _, err := db.Exec("SET temp_directory='data/db/temp'"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set temp directory: %w", err)
-	}
-
-	// Set memory settings
-	if _, err := db.Exec(fmt.Sprintf("SET memory_limit='%s'", cfg.DuckDB.MemoryLimit)); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set memory limit: %w", err)
-	}
-
-	// Set other optimizations
-	optimizations := []string{
-		"SET checkpoint_threshold='1GB'",
-		"SET threads TO " + fmt.Sprint(cfg.DuckDB.Threads),
-		"SET preserve_insertion_order=false",
-	}
-
-	for _, opt := range optimizations {
-		if _, err := db.Exec(opt); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("failed to set optimization %s: %w", opt, err)
-		}
-	}
-
 	duck := &DuckDB{
-		db:         sqlx.NewDb(db, "duckdb"),
-		exportPath: filepath.Join(cfg.DuckDB.DataDir, "exports"),
-
+		db:           sqlx.NewDb(db, "duckdb"),
+		exportPath:   filepath.Join(cfg.DuckDB.DataDir, "exports"),
 		exportTicker: time.NewTicker(1 * time.Hour),
 		log:          log,
 		tables:       make(map[string]bool),
@@ -123,7 +95,6 @@ func newDuckDB() (*DuckDB, error) {
 		"data_dir":      cfg.DuckDB.DataDir,
 		"threads":       cfg.DuckDB.Threads,
 		"memory_limit":  cfg.DuckDB.MemoryLimit,
-		"access_mode":   cfg.DuckDB.AccessMode,
 		"max_open_conn": cfg.DuckDB.MaxOpenConns,
 	})
 	return duck, nil
@@ -334,18 +305,63 @@ func (d *DuckDB) logColumnCount() {
 
 // WriteTick writes a single tick to DuckDB
 func (d *DuckDB) WriteTick(tick *proto.TickData) error {
+	// Add detailed entry logging
+	d.log.Info("WriteTick entry", map[string]interface{}{
+		"instrument_token": tick.InstrumentToken,
+		"timestamp":        tick.Timestamp,
+		"target_file":      tick.TargetFile,
+		"last_price":       tick.LastPrice,
+		"is_index":         tick.IsIndex,
+	})
+
 	if tick.TargetFile == "" {
 		return fmt.Errorf("target file is empty")
 	}
 
-	// Generate table name from target file
+	// Generate and sanitize table name
 	tableName := strings.TrimSuffix(tick.TargetFile, ".parquet")
 	tableName = strings.ReplaceAll(tableName, "-", "_")
+	tableName = strings.ToUpper(tableName) // Ensure uppercase
 
-	// Ensure table exists (cached check)
+	// Log table creation attempt
+	d.log.Info("Ensuring table exists", map[string]interface{}{
+		"table": tableName,
+	})
+
+	// Ensure table exists
 	if err := d.ensureTableExists(tableName); err != nil {
+		d.log.Error("Failed to ensure table exists", map[string]interface{}{
+			"error": err.Error(),
+			"table": tableName,
+		})
 		return fmt.Errorf("failed to ensure table exists: %w", err)
 	}
+
+	// Verify table exists after creation
+	var exists bool
+	err := d.db.QueryRow(fmt.Sprintf(`
+        SELECT EXISTS (
+            SELECT 1 
+            FROM information_schema.tables 
+            WHERE table_name = '%s'
+        )
+    `, tableName)).Scan(&exists)
+
+	if err != nil || !exists {
+		d.log.Error("Table verification failed", map[string]interface{}{
+			"error":  err,
+			"exists": exists,
+			"table":  tableName,
+		})
+		return fmt.Errorf("table verification failed: %v", err)
+	}
+
+	// Log the actual insert attempt
+	d.log.Info("Attempting insert", map[string]interface{}{
+		"table":      tableName,
+		"timestamp":  tick.Timestamp,
+		"last_price": tick.LastPrice,
+	})
 
 	// Insert into specific table
 	query := fmt.Sprintf(`
@@ -387,7 +403,9 @@ func (d *DuckDB) WriteTick(tick *proto.TickData) error {
             :net_change, :target_file, :tick_received_time, :tick_stored_in_db_time
         )
     `, tableName)
-
+	logger.GetLogger().Info("Table Name ", map[string]interface{}{
+		"table": tableName,
+	})
 	// Prepare the data for insertion
 	tickData := struct {
 		InstrumentToken    uint32  `db:"instrument_token"`
@@ -509,7 +527,7 @@ func (d *DuckDB) WriteTick(tick *proto.TickData) error {
 		TickStoredInDbTime: time.Now().UnixMilli(),
 	}
 
-	_, err := d.db.NamedExec(query, tickData)
+	result, err := d.db.NamedExec(query, tickData)
 	if err != nil {
 		d.log.Error("Failed to insert tick", map[string]interface{}{
 			"error": err.Error(),
@@ -517,6 +535,58 @@ func (d *DuckDB) WriteTick(tick *proto.TickData) error {
 			"table": tableName,
 		})
 		return fmt.Errorf("failed to insert tick into %s: %w", tableName, err)
+	}
+
+	// Get the number of rows affected
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		d.log.Error("Failed to get rows affected", map[string]interface{}{
+			"error": err.Error(),
+			"token": tick.InstrumentToken,
+			"table": tableName,
+		})
+	} else {
+		// Log successful write with confirmation
+		d.log.Info("Successfully wrote tick", map[string]interface{}{
+			"table":            tableName,
+			"timestamp":        tick.Timestamp,
+			"instrument_token": tick.InstrumentToken,
+			"rows_affected":    rowsAffected,
+			"last_price":       tick.LastPrice,
+			"write_time":       time.Now().UnixMilli(),
+		})
+
+		// Optional: Verify the write
+		if rowsAffected != 1 {
+			d.log.Error("Unexpected number of rows affected", map[string]interface{}{
+				"rows_affected":    rowsAffected,
+				"table":            tableName,
+				"instrument_token": tick.InstrumentToken,
+			})
+		}
+	}
+
+	// After insert, verify the data was written
+	var count int64
+	err = d.db.QueryRow(fmt.Sprintf(`
+        SELECT COUNT(*) 
+        FROM %s 
+        WHERE instrument_token = ? 
+        AND timestamp = ?
+    `, tableName), tick.InstrumentToken, tick.Timestamp*1000).Scan(&count)
+
+	if err != nil {
+		d.log.Error("Failed to verify write", map[string]interface{}{
+			"error": err.Error(),
+			"table": tableName,
+		})
+	} else {
+		d.log.Info("Write verification", map[string]interface{}{
+			"table":      tableName,
+			"count":      count,
+			"timestamp":  tick.Timestamp,
+			"last_price": tick.LastPrice,
+		})
 	}
 
 	return nil
@@ -755,4 +825,83 @@ func (d *DuckDB) Shutdown() error {
 
 	// Close database connection
 	return d.db.Close()
+}
+
+// Add this helper function
+func (d *DuckDB) VerifyTableContents(tableName string) error {
+	// Check if table exists
+	var exists bool
+	err := d.db.QueryRow(fmt.Sprintf(`
+        SELECT EXISTS (
+            SELECT 1 
+            FROM information_schema.tables 
+            WHERE table_name = '%s'
+        )
+    `, tableName)).Scan(&exists)
+
+	if err != nil {
+		return fmt.Errorf("failed to check table existence: %w", err)
+	}
+
+	if !exists {
+		return fmt.Errorf("table %s does not exist", tableName)
+	}
+
+	// Get table stats
+	var (
+		rowCount    int64
+		latestTs    int64
+		distinctIds int64
+	)
+
+	err = d.db.QueryRow(fmt.Sprintf(`
+        SELECT 
+            COUNT(*) as row_count,
+            MAX(timestamp) as latest_ts,
+            COUNT(DISTINCT instrument_token) as distinct_ids
+        FROM %s
+    `, tableName)).Scan(&rowCount, &latestTs, &distinctIds)
+
+	if err != nil {
+		return fmt.Errorf("failed to get table stats: %w", err)
+	}
+
+	d.log.Info("Table verification", map[string]interface{}{
+		"table":        tableName,
+		"row_count":    rowCount,
+		"latest_time":  time.Unix(latestTs/1000, 0).Format(time.RFC3339),
+		"distinct_ids": distinctIds,
+		"current_time": time.Now().Format(time.RFC3339),
+	})
+
+	// Get sample of recent data
+	rows, err := d.db.Query(fmt.Sprintf(`
+        SELECT instrument_token, timestamp, last_price
+        FROM %s
+        ORDER BY timestamp DESC
+        LIMIT 5
+    `, tableName))
+	if err != nil {
+		return fmt.Errorf("failed to get recent data: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			token     uint32
+			ts        int64
+			lastPrice float64
+		)
+		if err := rows.Scan(&token, &ts, &lastPrice); err != nil {
+			continue
+		}
+		d.log.Info("Recent tick", map[string]interface{}{
+			"table":            tableName,
+			"instrument_token": token,
+			"timestamp":        time.Unix(ts/1000, 0).Format(time.RFC3339),
+			"last_price":       lastPrice,
+		})
+	}
+
+	return nil
 }

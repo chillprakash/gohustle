@@ -89,6 +89,22 @@ type DuckDBConfig struct {
 	WALEnabled   bool   `json:"wal_enabled"`
 }
 
+type TimescaleConfig struct {
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	User            string `json:"user"`
+	Password        string `json:"password"`
+	DBName          string `json:"DBName"`
+	MaxConnections  int    `json:"max_connections"`
+	MinConnections  int    `json:"min_connections"`
+	MaxConnLifetime string `json:"max_conn_lifetime"`
+	MaxConnIdleTime string `json:"max_conn_idle_time"`
+
+	// Private fields to store parsed durations
+	maxConnLifetimeDuration time.Duration
+	maxConnIdleTimeDuration time.Duration
+}
+
 // GetConfig loads configuration and handles errors internally
 func GetConfig() *Config {
 	log := logger.GetLogger()

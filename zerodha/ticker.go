@@ -204,7 +204,7 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 
 	// 3. Store LTP data in LTP DB
 	dataKey := fmt.Sprintf("ltp:%d", tick.InstrumentToken)
-	ltpDB := redisCache.GetListDB2()
+	ltpDB := redisCache.GetLTPDB3()
 	ctx := context.Background()
 	ltpDB.Set(ctx, dataKey, tick.LastPrice, 24*time.Hour)
 

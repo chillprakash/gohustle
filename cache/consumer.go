@@ -68,7 +68,7 @@ func NewConsumer() *Consumer {
 }
 
 func (w *Worker) processListItems(listKey string) error {
-	w.log.Debug("Checking list for items", map[string]interface{}{
+	w.log.Info("Checking list for items", map[string]interface{}{
 		"worker_id":  w.id,
 		"list_key":   listKey,
 		"is_primary": w.isPrimary,

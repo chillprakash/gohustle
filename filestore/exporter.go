@@ -39,7 +39,7 @@ func (e *Exporter) ExportTableToProto(ctx context.Context, tableName string) (st
 	})
 
 	// Create export directory
-	exportDir := filepath.Join(e.baseDir, time.Now().Format("20060102"))
+	exportDir := filepath.Join(e.baseDir)
 	if err := os.MkdirAll(exportDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create export directory: %w", err)
 	}
@@ -47,7 +47,7 @@ func (e *Exporter) ExportTableToProto(ctx context.Context, tableName string) (st
 	// Create proto file with gzip compression
 	protoFile := filepath.Join(exportDir, fmt.Sprintf("%s_%s.pb.gz",
 		tableName,
-		time.Now().Format("20060102_150405"),
+		time.Now().Format("20060102"),
 	))
 
 	// Create gzip writer

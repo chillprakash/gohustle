@@ -56,7 +56,7 @@ func (s *Scheduler) runDailyExport() {
 		// Calculate next run time (3:45 PM IST)
 		nextRun := time.Date(
 			now.Year(), now.Month(), now.Day(),
-			15, 52, 0, 0,
+			17, 37, 0, 0,
 			time.FixedZone("IST", 5*60*60+30*60), // IST offset: +5:30
 		)
 
@@ -85,7 +85,59 @@ func (s *Scheduler) runDailyExport() {
 			s.log.Info("Starting scheduled export", map[string]interface{}{
 				"time": time.Now().Format(time.RFC3339),
 			})
+
+			// Export data first
 			s.exportData()
+
+			// Now collect exported files and send notification
+			date := time.Now().Format("20060102")
+			var files []string
+			var totalRows int
+
+			// Verify exports and collect file information
+			for _, tableName := range tables {
+				filename := fmt.Sprintf("%s_%s.pb.gz", tableName, date)
+				fullPath := filepath.Join(s.exportPath, date, filename)
+
+				// Verify file exists and is not empty
+				if fileInfo, err := os.Stat(fullPath); err == nil && fileInfo.Size() > 0 {
+					files = append(files, fullPath)
+
+					// Get row count
+					var count int
+					countQuery := fmt.Sprintf(`
+							SELECT COUNT(*) FROM %s 
+							WHERE timestamp::date = CURRENT_DATE
+						`, tableName)
+
+					if err := s.timescale.GetPool().QueryRow(s.ctx, countQuery).Scan(&count); err == nil {
+						totalRows += count
+					}
+				} else {
+					s.log.Error("Export verification failed", map[string]interface{}{
+						"table": tableName,
+						"file":  fullPath,
+						"error": err,
+					})
+				}
+			}
+
+			// Send notification only if we have successful exports
+			if len(files) > 0 {
+				if err := s.notifyExportComplete(files, totalRows); err != nil {
+					s.log.Error("Failed to send export notification", map[string]interface{}{
+						"error": err.Error(),
+						"files": len(files),
+					})
+				} else {
+					s.log.Info("Export notification sent", map[string]interface{}{
+						"files":      len(files),
+						"total_rows": totalRows,
+					})
+				}
+			} else {
+				s.log.Error("No successful exports to notify", nil)
+			}
 		}
 	}
 }
@@ -169,7 +221,7 @@ func (s *Scheduler) exportData() {
 
 		// Add file to list
 		date := time.Now().Format("20060102")
-		filename := fmt.Sprintf("%s_%s.parquet", tableName, date)
+		filename := fmt.Sprintf("%s_%s.pb.gz", tableName, date)
 		fullPath := filepath.Join(s.exportPath, filename)
 
 		// Verify file exists and is not empty
@@ -280,7 +332,8 @@ func (s *Scheduler) exportData() {
 func (s *Scheduler) exportTable(tableName string) (int, error) {
 	exporter := filestore.NewExporter(s.timescale.GetPool(), s.exportPath)
 
-	exportedFile, err := exporter.ExportTable(s.ctx, tableName)
+	// Use ExportTableToProto instead of ExportTable
+	exportedFile, err := exporter.ExportTableToProto(s.ctx, tableName)
 	if err != nil {
 		return 0, fmt.Errorf("failed to export table %s: %w", tableName, err)
 	}

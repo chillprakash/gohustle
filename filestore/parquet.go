@@ -2,6 +2,7 @@ package filestore
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -9,9 +10,18 @@ import (
 	"github.com/apache/arrow/go/v14/arrow/array"
 	"github.com/apache/arrow/go/v14/arrow/memory"
 	"github.com/apache/arrow/go/v14/parquet"
+	"github.com/apache/arrow/go/v14/parquet/compress"
 	"github.com/apache/arrow/go/v14/parquet/pqarrow"
 	"github.com/jackc/pgx/v5/pgtype"
 )
+
+// WriterStats holds statistics about the parquet writing process
+type WriterStats struct {
+	RecordCount      int64   // Number of records written
+	UncompressedSize int64   // Estimated size of data before compression
+	CompressedSize   int64   // Actual size of data after compression
+	CompressionRatio float64 // Ratio of uncompressed to compressed size
+}
 
 // TickRecord represents a single tick record for parquet writing
 type TickRecord struct {
@@ -82,9 +92,11 @@ type TickRecord struct {
 }
 
 type ParquetWriter struct {
-	file       *os.File
-	writer     *pqarrow.FileWriter
-	recordBldr *array.RecordBuilder
+	file             *os.File
+	writer           *pqarrow.FileWriter
+	recordBldr       *array.RecordBuilder
+	recordCount      int64
+	uncompressedSize int64
 }
 
 func NewParquetWriter(filePath string) (*ParquetWriter, error) {
@@ -95,7 +107,7 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 	}
 
 	// Create file
-	file, err := os.Create(filePath)
+	f, err := os.Create(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %w", err)
 	}
@@ -174,34 +186,41 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 	// Create Arrow memory allocator
 	pool := memory.NewGoAllocator()
 
-	// Create writer properties
+	// Create writer properties with maximum compression
 	writerProps := parquet.NewWriterProperties(
-		parquet.WithDictionaryDefault(false),
-		parquet.WithDataPageSize(1024*1024), // 1MB
-		parquet.WithBatchSize(1000),
+		parquet.WithCompression(compress.Codecs.Zstd),
+		parquet.WithDictionaryDefault(true),
+		parquet.WithDataPageSize(1024*1024),                 // 1MB page size
+		parquet.WithDictionaryPageSizeLimit(1024*1024*1024), // 1GB dictionary size
+		parquet.WithMaxRowGroupLength(128*1024*1024),        // 128MB row groups
+		parquet.WithCreatedBy("GoHustle Exporter v1.0"),     // Add creator info
+		parquet.WithVersion(parquet.V2_LATEST),              // Use latest version
 	)
 
-	// Create Arrow writer properties
+	// Create Arrow writer properties - remove compression setting
 	arrowProps := pqarrow.NewArrowWriterProperties(
 		pqarrow.WithStoreSchema(),
+		pqarrow.WithAllocator(pool),
 	)
 
 	// Create parquet writer
 	writer, err := pqarrow.NewFileWriter(
 		schema,
-		file,
+		f,
 		writerProps,
 		arrowProps,
 	)
 	if err != nil {
-		file.Close()
+		f.Close()
 		return nil, fmt.Errorf("failed to create parquet writer: %w", err)
 	}
 
 	return &ParquetWriter{
-		file:       file,
-		writer:     writer,
-		recordBldr: array.NewRecordBuilder(pool, schema),
+		file:             f,
+		writer:           writer,
+		recordBldr:       array.NewRecordBuilder(pool, schema),
+		recordCount:      0,
+		uncompressedSize: 0,
 	}, nil
 }
 
@@ -292,9 +311,54 @@ func (w *ParquetWriter) Write(record TickRecord) error {
 	rec := w.recordBldr.NewRecord()
 	defer rec.Release()
 
+	// Update record count
+	w.recordCount++
+
+	// Simple size estimation based on fixed sizes
+	// This is an approximation, but good enough for monitoring
+	const (
+		boolSize      = 1
+		int32Size     = 4
+		int64Size     = 8
+		float64Size   = 8
+		timestampSize = 8
+	)
+
+	size := int64(
+		2*int64Size + // ID, InstrumentToken
+			3*boolSize + // IsTradable, IsIndex
+			len(record.Mode) + // Mode (string)
+			7*float64Size + // Price information
+			4*int32Size + // Quantities
+			4*float64Size + // OHLC
+			15*float64Size + // Depth Buy Prices
+			15*int32Size + // Depth Buy Quantities
+			15*int32Size + // Depth Buy Orders
+			15*float64Size + // Depth Sell Prices
+			15*int32Size + // Depth Sell Quantities
+			15*int32Size + // Depth Sell Orders
+			3*timestampSize + // Timestamps
+			float64Size, // NetChange
+	)
+
+	w.uncompressedSize += size
+
 	// Write record batch
 	if err := w.writer.Write(rec); err != nil {
 		return fmt.Errorf("failed to write record: %w", err)
+	}
+
+	// Monitor compression ratio every 10000 records
+	if w.recordCount%10000 == 0 {
+		if stats, err := w.GetStats(); err == nil {
+			if stats.CompressionRatio < 2.0 {
+				log.Printf("Warning: Low compression ratio (%.2f) for file %s after %d records",
+					stats.CompressionRatio,
+					w.file.Name(),
+					w.recordCount,
+				)
+			}
+		}
 	}
 
 	return nil
@@ -306,4 +370,23 @@ func (w *ParquetWriter) Close() error {
 		return fmt.Errorf("failed to close writer: %w", err)
 	}
 	return w.file.Close()
+}
+
+func (w *ParquetWriter) GetStats() (WriterStats, error) {
+	stats := WriterStats{
+		RecordCount:      w.recordCount,
+		UncompressedSize: w.uncompressedSize,
+	}
+
+	fileInfo, err := w.file.Stat()
+	if err != nil {
+		return stats, fmt.Errorf("failed to get file stats: %w", err)
+	}
+
+	stats.CompressedSize = fileInfo.Size()
+	if stats.CompressedSize > 0 {
+		stats.CompressionRatio = float64(stats.UncompressedSize) / float64(stats.CompressedSize)
+	}
+
+	return stats, nil
 }

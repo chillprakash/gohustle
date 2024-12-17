@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -32,6 +33,12 @@ var tables = []string{
 	"sensex_upcoming_expiry_ticks",
 }
 
+const (
+	maxTelegramFileSize = 50 * 1024 * 1024 // 50MB - Telegram's limit
+	maxRetries          = 3
+	retryDelay          = 5 * time.Second
+)
+
 func NewScheduler(ctx context.Context, exportPath string, telegramCfg *config.TelegramConfig) *Scheduler {
 	return &Scheduler{
 		ctx:        ctx,
@@ -56,7 +63,7 @@ func (s *Scheduler) runDailyExport() {
 		// Calculate next run time (3:45 PM IST)
 		nextRun := time.Date(
 			now.Year(), now.Month(), now.Day(),
-			17, 37, 0, 0,
+			17, 50, 0, 0,
 			time.FixedZone("IST", 5*60*60+30*60), // IST offset: +5:30
 		)
 
@@ -97,7 +104,7 @@ func (s *Scheduler) runDailyExport() {
 			// Verify exports and collect file information
 			for _, tableName := range tables {
 				filename := fmt.Sprintf("%s_%s.pb.gz", tableName, date)
-				fullPath := filepath.Join(s.exportPath, date, filename)
+				fullPath := filepath.Join(s.exportPath, filename)
 
 				// Verify file exists and is not empty
 				if fileInfo, err := os.Stat(fullPath); err == nil && fileInfo.Size() > 0 {
@@ -143,16 +150,21 @@ func (s *Scheduler) runDailyExport() {
 }
 
 func (s *Scheduler) notifyExportComplete(files []string, totalRows int) error {
+	// First send the summary message
 	message := fmt.Sprintf(`🔄 Daily Data Export Complete
 
 📊 Summary:
 - Total Files: %d
 - Total Rows: %d
+- Time: %s
 
 📁 Files:
-`, len(files), totalRows)
+`, len(files), totalRows, time.Now().Format("15:04:05"))
 
-	// Add file details
+	// Add file details with size check
+	var largeFiles []string
+	var regularFiles []string
+
 	for _, file := range files {
 		fileInfo, err := os.Stat(file)
 		if err != nil {
@@ -163,28 +175,163 @@ func (s *Scheduler) notifyExportComplete(files []string, totalRows int) error {
 			continue
 		}
 
-		// Add file size in MB
 		sizeMB := float64(fileInfo.Size()) / 1024 / 1024
-		message += fmt.Sprintf("- %s (%.2f MB)\n", filepath.Base(file), sizeMB)
+		message += fmt.Sprintf("- %s (%.2f MB)", filepath.Base(file), sizeMB)
+
+		// Mark files that exceed Telegram's limit
+		if fileInfo.Size() > maxTelegramFileSize {
+			message += " ⚠️ Large file - will be split\n"
+			largeFiles = append(largeFiles, file)
+		} else {
+			message += "\n"
+			regularFiles = append(regularFiles, file)
+		}
 	}
 
-	// Send message
+	// Send initial message
 	if err := s.notifier.SendMessage(message); err != nil {
 		return fmt.Errorf("failed to send notification: %w", err)
 	}
 
-	// Send files
-	for _, file := range files {
-		if err := s.notifier.SendFile(file); err != nil {
-			s.log.Error("Failed to send file", map[string]interface{}{
+	// Send regular files with retries
+	for _, file := range regularFiles {
+		if err := s.sendFileWithRetry(file); err != nil {
+			s.log.Error("Failed to send file after retries", map[string]interface{}{
 				"error": err.Error(),
-				"file":  file,
+				"file":  filepath.Base(file),
+			})
+		}
+	}
+
+	// Handle large files
+	for _, file := range largeFiles {
+		if err := s.handleLargeFile(file); err != nil {
+			s.log.Error("Failed to handle large file", map[string]interface{}{
+				"error": err.Error(),
+				"file":  filepath.Base(file),
+			})
+		}
+	}
+
+	return nil
+}
+
+func (s *Scheduler) sendFileWithRetry(file string) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		fileStartTime := time.Now()
+		s.log.Info("Sending file to Telegram", map[string]interface{}{
+			"file":    filepath.Base(file),
+			"attempt": attempt,
+			"max":     maxRetries,
+		})
+
+		if err := s.notifier.SendFile(file); err != nil {
+			lastErr = err
+			s.log.Error("File send attempt failed", map[string]interface{}{
+				"error":   err.Error(),
+				"file":    filepath.Base(file),
+				"attempt": attempt,
+			})
+
+			if attempt < maxRetries {
+				time.Sleep(retryDelay * time.Duration(attempt)) // Exponential backoff
+				continue
+			}
+			return fmt.Errorf("failed after %d attempts: %w", maxRetries, lastErr)
+		}
+
+		s.log.Info("File sent successfully", map[string]interface{}{
+			"file":     filepath.Base(file),
+			"attempt":  attempt,
+			"duration": time.Since(fileStartTime).String(),
+		})
+		return nil
+	}
+	return lastErr
+}
+
+func (s *Scheduler) handleLargeFile(file string) error {
+	fileInfo, err := os.Stat(file)
+	if err != nil {
+		return fmt.Errorf("failed to get file info: %w", err)
+	}
+
+	// Send notification about splitting
+	splitMsg := fmt.Sprintf("📦 Splitting large file: %s (%.2f MB)",
+		filepath.Base(file),
+		float64(fileInfo.Size())/1024/1024,
+	)
+	if err := s.notifier.SendMessage(splitMsg); err != nil {
+		s.log.Error("Failed to send split notification", map[string]interface{}{
+			"error": err.Error(),
+			"file":  filepath.Base(file),
+		})
+	}
+
+	// Create temporary directory for splits
+	splitDir := filepath.Join(os.TempDir(), "gohustle_splits")
+	if err := os.MkdirAll(splitDir, 0755); err != nil {
+		return fmt.Errorf("failed to create split directory: %w", err)
+	}
+	defer os.RemoveAll(splitDir) // Clean up after sending
+
+	// Split the file
+	splitFiles, err := s.splitFile(file, splitDir)
+	if err != nil {
+		return fmt.Errorf("failed to split file: %w", err)
+	}
+
+	// Send each part
+	for i, splitFile := range splitFiles {
+		partMsg := fmt.Sprintf("📤 Sending part %d/%d of %s",
+			i+1,
+			len(splitFiles),
+			filepath.Base(file),
+		)
+		if err := s.notifier.SendMessage(partMsg); err != nil {
+			s.log.Error("Failed to send part notification", map[string]interface{}{
+				"error": err.Error(),
+				"file":  filepath.Base(splitFile),
+				"part":  i + 1,
+			})
+		}
+
+		if err := s.sendFileWithRetry(splitFile); err != nil {
+			s.log.Error("Failed to send file part", map[string]interface{}{
+				"error": err.Error(),
+				"file":  filepath.Base(splitFile),
+				"part":  i + 1,
 			})
 			continue
 		}
 	}
 
 	return nil
+}
+
+func (s *Scheduler) splitFile(file string, splitDir string) ([]string, error) {
+	// Use split command for reliable file splitting
+	baseName := filepath.Join(splitDir, filepath.Base(file))
+	cmd := exec.Command("split",
+		"-b", fmt.Sprintf("%dM", maxTelegramFileSize/(1024*1024)-1), // Leave 1MB buffer
+		"-d", // Use numeric suffixes
+		file,
+		baseName+"_part_",
+	)
+
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("split command failed: %w", err)
+	}
+
+	// Get list of split files
+	pattern := baseName + "_part_*"
+	splitFiles, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list split files: %w", err)
+	}
+
+	return splitFiles, nil
 }
 
 func (s *Scheduler) exportData() {

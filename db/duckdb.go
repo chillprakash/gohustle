@@ -76,12 +76,15 @@ func newDuckDB() (*DuckDB, error) {
 }
 
 func initializeTables(db *sql.DB) error {
-	// Print the number of columns for debugging
 	log := logger.GetLogger()
 	log.Info("Creating table schema", nil)
 
+	// Modified SQL to use DuckDB's supported syntax
 	_, err := db.Exec(`
         CREATE TABLE IF NOT EXISTS ticks (
+            -- Add a sequence for unique IDs
+            id BIGINT,
+            
             -- Basic info
             instrument_token BIGINT,
             timestamp BIGINT,
@@ -149,28 +152,52 @@ func initializeTables(db *sql.DB) error {
             -- Metadata
             target_file VARCHAR,
             tick_received_time BIGINT,
-            tick_stored_in_db_time BIGINT,
-            
-            -- Indexes
-            PRIMARY KEY (instrument_token, timestamp)
+            tick_stored_in_db_time BIGINT
         );
     `)
-
-	// Count columns for verification
-	var columnCount int
-	err = db.QueryRow(`
-        SELECT COUNT(*) 
-        FROM information_schema.columns 
-        WHERE table_name = 'ticks'
-    `).Scan(&columnCount)
-
-	if err == nil {
-		log.Info("Table schema created", map[string]interface{}{
-			"column_count": columnCount,
+	if err != nil {
+		log.Error("Failed to create table", map[string]interface{}{
+			"error": err.Error(),
 		})
+		return err
 	}
 
-	return err
+	// Create index in a separate statement
+	_, err = db.Exec(`
+        CREATE INDEX IF NOT EXISTS idx_token_time ON ticks (instrument_token, timestamp);
+    `)
+	if err != nil {
+		log.Error("Failed to create index", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// Verify table creation
+	var tableExists bool
+	err = db.QueryRow(`
+        SELECT EXISTS (
+            SELECT 1 
+            FROM information_schema.tables 
+            WHERE table_name = 'ticks'
+        );
+    `).Scan(&tableExists)
+
+	if err != nil {
+		log.Error("Failed to verify table creation", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	if tableExists {
+		log.Info("Table 'ticks' created successfully", nil)
+	} else {
+		log.Error("Table 'ticks' was not created", nil)
+		return fmt.Errorf("table 'ticks' was not created")
+	}
+
+	return nil
 }
 
 // Helper function to count columns and values

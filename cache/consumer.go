@@ -68,7 +68,7 @@ func NewConsumer() *Consumer {
 }
 
 func (w *Worker) processListItems(listKey string) error {
-	w.log.Info("Checking list for items", map[string]interface{}{
+	w.log.Debug("Checking list for items", map[string]interface{}{
 		"worker_id":  w.id,
 		"list_key":   listKey,
 		"is_primary": w.isPrimary,
@@ -99,7 +99,7 @@ func (w *Worker) processListItems(listKey string) error {
 		})
 		// Note: Not returning error here to continue with other operations
 	} else {
-		w.log.Info("Successfully wrote ticks to DuckDB", map[string]interface{}{
+		w.log.Debug("Successfully wrote ticks to DuckDB", map[string]interface{}{
 			"ticks_count": 1,
 		})
 	}

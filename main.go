@@ -12,6 +12,7 @@ import (
 	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/logger"
+	"gohustle/scheduler"
 	"gohustle/zerodha"
 )
 
@@ -100,9 +101,13 @@ func main() {
 
 	kiteConnect.InitializeTickersWithTokens(allTokens)
 
-	// // Initialize and start scheduler
-	// sched := scheduler.NewScheduler()
-	// sched.Start()
+	// Initialize and start scheduler
+	scheduler := scheduler.NewScheduler(
+		ctx,
+		"data/exports",
+		&cfg.Telegram,
+	)
+	scheduler.Start()
 
 	// Initialize consumer with writer pool
 	consumer := cache.NewConsumer()

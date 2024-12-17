@@ -209,7 +209,7 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	ctx := context.Background()
 	ltpDB.Set(ctx, dataKey, tick.LastPrice, 24*time.Hour)
 
-	log.Info("Stored tick", map[string]interface{}{
+	log.Debug("Stored tick", map[string]interface{}{
 		"token":     tick.InstrumentToken,
 		"index":     instrumentInfo.Index,
 		"is_index":  instrumentInfo.IsIndex,

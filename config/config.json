@@ -46,6 +46,7 @@
     "queue": {
         "num_lists": 10,
         "list_prefix": "tick_queue:",
+        "batch_size": 1000,
         "primary_workers": 10,
         "secondary_workers": 10
     }

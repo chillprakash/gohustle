@@ -11,7 +11,6 @@ import (
 
 	"gohustle/cache"
 	"gohustle/config"
-	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/zerodha"
 )
@@ -35,11 +34,6 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// Initialize writer pool first
-	writerPool := filestore.NewWriterPool()
-	writerPool.Start()
-	defer writerPool.Stop()
 
 	// Initialize KiteConnect with writer pool
 	kiteConnect := zerodha.GetKiteConnect()
@@ -111,7 +105,7 @@ func main() {
 	// sched.Start()
 
 	// Initialize consumer with writer pool
-	consumer := cache.NewConsumer(writerPool)
+	consumer := cache.NewConsumer()
 	consumer.Start()
 
 	// Block until we receive a signal

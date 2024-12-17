@@ -36,7 +36,6 @@ type KiteConnector interface {
 	KiteOperations
 	GetValidToken(ctx context.Context) (string, error)
 	ConnectTicker() error
-	Close()
 }
 
 type TickWriterOperations interface {

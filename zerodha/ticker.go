@@ -154,8 +154,13 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		Mode:            tick.Mode,
 
 		// Timestamps
-		Timestamp:     tick.Timestamp.Unix(),
-		LastTradeTime: tick.LastTradeTime.Unix(),
+		Timestamp:        tick.Timestamp.Unix(),
+		LastTradeTime:    tick.LastTradeTime.Unix(),
+		TickRecievedTime: time.Now().Unix(),
+
+		// Additional metadata
+
+		TargetFile: instrumentInfo.TargetFile,
 
 		// Price and quantity
 		LastPrice:          tick.LastPrice,
@@ -186,14 +191,6 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 			Buy:  convertDepthItems(tick.Depth.Buy[:]),
 			Sell: convertDepthItems(tick.Depth.Sell[:]),
 		},
-
-		// Additional metadata
-		ChangePercent:       tick.NetChange,
-		LastTradePrice:      tick.LastPrice,
-		OpenInterest:        tick.OI,
-		OpenInterestDayHigh: tick.OIDayHigh,
-		OpenInterestDayLow:  tick.OIDayLow,
-		TargetFile:          instrumentInfo.TargetFile,
 	}
 
 	// Distribute the tick

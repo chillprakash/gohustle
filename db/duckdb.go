@@ -140,7 +140,6 @@ func initializeTables(db *sql.DB) error {
             depth_sell_orders_5 BIGINT,
             
             -- Additional fields
-            change_percent DOUBLE,
             last_trade_time BIGINT,
             oi BIGINT,
             oi_day_high BIGINT,
@@ -149,7 +148,8 @@ func initializeTables(db *sql.DB) error {
             
             -- Metadata
             target_file VARCHAR,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            tick_received_time BIGINT,
+            tick_stored_in_db_time BIGINT,
             
             -- Indexes
             PRIMARY KEY (instrument_token, timestamp)
@@ -201,60 +201,28 @@ func (d *DuckDB) WriteTick(tick *proto.TickData) error {
 
 	// Convert proto.TickData to models.TickData
 	tickData := TickData{
-		InstrumentToken:    int64(tick.InstrumentToken),
+		InstrumentToken:    uint32(tick.InstrumentToken),
 		Timestamp:          tick.Timestamp * 1000,
 		IsTradable:         tick.IsTradable,
 		IsIndex:            tick.IsIndex,
 		Mode:               tick.Mode,
 		LastPrice:          tick.LastPrice,
-		LastTradedQuantity: int64(tick.LastTradedQuantity),
+		LastTradedQuantity: uint32(tick.LastTradedQuantity),
 		AverageTradePrice:  tick.AverageTradePrice,
-		VolumeTraded:       int64(tick.VolumeTraded),
-		TotalBuyQuantity:   int64(tick.TotalBuyQuantity),
-		TotalSellQuantity:  int64(tick.TotalSellQuantity),
-		TotalBuy:           int64(tick.TotalBuy),
-		TotalSell:          int64(tick.TotalSell),
-		OhlcOpen:           tick.Ohlc.Open,
-		OhlcHigh:           tick.Ohlc.High,
-		OhlcLow:            tick.Ohlc.Low,
-		OhlcClose:          tick.Ohlc.Close,
-		DepthBuyPrice1:     getDepthValue(tick.Depth.Buy, 0, "price"),
-		DepthBuyQuantity1:  int64(getDepthValue(tick.Depth.Buy, 0, "quantity")),
-		DepthBuyOrders1:    int64(getDepthValue(tick.Depth.Buy, 0, "orders")),
-		DepthBuyPrice2:     getDepthValue(tick.Depth.Buy, 1, "price"),
-		DepthBuyQuantity2:  int64(getDepthValue(tick.Depth.Buy, 1, "quantity")),
-		DepthBuyOrders2:    int64(getDepthValue(tick.Depth.Buy, 1, "orders")),
-		DepthBuyPrice3:     getDepthValue(tick.Depth.Buy, 2, "price"),
-		DepthBuyQuantity3:  int64(getDepthValue(tick.Depth.Buy, 2, "quantity")),
-		DepthBuyOrders3:    int64(getDepthValue(tick.Depth.Buy, 2, "orders")),
-		DepthBuyPrice4:     getDepthValue(tick.Depth.Buy, 3, "price"),
-		DepthBuyQuantity4:  int64(getDepthValue(tick.Depth.Buy, 3, "quantity")),
-		DepthBuyOrders4:    int64(getDepthValue(tick.Depth.Buy, 3, "orders")),
-		DepthBuyPrice5:     getDepthValue(tick.Depth.Buy, 4, "price"),
-		DepthBuyQuantity5:  int64(getDepthValue(tick.Depth.Buy, 4, "quantity")),
-		DepthBuyOrders5:    int64(getDepthValue(tick.Depth.Buy, 4, "orders")),
-		DepthSellPrice1:    getDepthValue(tick.Depth.Sell, 0, "price"),
-		DepthSellQuantity1: int64(getDepthValue(tick.Depth.Sell, 0, "quantity")),
-		DepthSellOrders1:   int64(getDepthValue(tick.Depth.Sell, 0, "orders")),
-		DepthSellPrice2:    getDepthValue(tick.Depth.Sell, 1, "price"),
-		DepthSellQuantity2: int64(getDepthValue(tick.Depth.Sell, 1, "quantity")),
-		DepthSellOrders2:   int64(getDepthValue(tick.Depth.Sell, 1, "orders")),
-		DepthSellPrice3:    getDepthValue(tick.Depth.Sell, 2, "price"),
-		DepthSellQuantity3: int64(getDepthValue(tick.Depth.Sell, 2, "quantity")),
-		DepthSellOrders3:   int64(getDepthValue(tick.Depth.Sell, 2, "orders")),
-		DepthSellPrice4:    getDepthValue(tick.Depth.Sell, 3, "price"),
-		DepthSellQuantity4: int64(getDepthValue(tick.Depth.Sell, 3, "quantity")),
-		DepthSellOrders4:   int64(getDepthValue(tick.Depth.Sell, 3, "orders")),
-		DepthSellPrice5:    getDepthValue(tick.Depth.Sell, 4, "price"),
-		DepthSellQuantity5: int64(getDepthValue(tick.Depth.Sell, 4, "quantity")),
-		DepthSellOrders5:   int64(getDepthValue(tick.Depth.Sell, 4, "orders")),
-		ChangePercent:      tick.ChangePercent,
+		VolumeTraded:       uint32(tick.VolumeTraded),
+		TotalBuyQuantity:   uint32(tick.TotalBuyQuantity),
+		TotalSellQuantity:  uint32(tick.TotalSellQuantity),
+		TotalBuy:           uint32(tick.TotalBuy),
+		TotalSell:          uint32(tick.TotalSell),
+		Ohlc:               OHLC{Open: tick.Ohlc.Open, High: tick.Ohlc.High, Low: tick.Ohlc.Low, Close: tick.Ohlc.Close},
+		Depth:              MarketDepth{Buy: convertDepthItems(tick.Depth.Buy[:]), Sell: convertDepthItems(tick.Depth.Sell[:])},
 		LastTradeTime:      tick.LastTradeTime,
-		Oi:                 int64(tick.Oi),
-		OiDayHigh:          int64(tick.OiDayHigh),
-		OiDayLow:           int64(tick.OiDayLow),
+		Oi:                 uint32(tick.Oi),
+		OiDayHigh:          uint32(tick.OiDayHigh),
+		OiDayLow:           uint32(tick.OiDayLow),
 		NetChange:          tick.NetChange,
 		TargetFile:         tick.TargetFile,
+		TickStoredInDbTime: time.Now().Unix(),
 	}
 
 	// Use sqlx.NamedExec to insert using struct
@@ -275,26 +243,28 @@ func (d *DuckDB) WriteTick(tick *proto.TickData) error {
             depth_sell_price_3, depth_sell_quantity_3, depth_sell_orders_3,
             depth_sell_price_4, depth_sell_quantity_4, depth_sell_orders_4,
             depth_sell_price_5, depth_sell_quantity_5, depth_sell_orders_5,
-            change_percent, last_trade_time, oi, oi_day_high, oi_day_low,
-            net_change, target_file, created_at
+            last_trade_time, oi, oi_day_high, oi_day_low,
+            net_change, target_file, tick_received_time, tick_stored_in_db_time
         ) VALUES (
             :instrument_token, :timestamp, :is_tradable, :is_index, :mode,
             :last_price, :last_traded_quantity, :average_trade_price,
             :volume_traded, :total_buy_quantity, :total_sell_quantity,
             :total_buy, :total_sell,
-            :ohlc_open, :ohlc_high, :ohlc_low, :ohlc_close,
-            :depth_buy_price_1, :depth_buy_quantity_1, :depth_buy_orders_1,
-            :depth_buy_price_2, :depth_buy_quantity_2, :depth_buy_orders_2,
-            :depth_buy_price_3, :depth_buy_quantity_3, :depth_buy_orders_3,
-            :depth_buy_price_4, :depth_buy_quantity_4, :depth_buy_orders_4,
-            :depth_buy_price_5, :depth_buy_quantity_5, :depth_buy_orders_5,
-            :depth_sell_price_1, :depth_sell_quantity_1, :depth_sell_orders_1,
-            :depth_sell_price_2, :depth_sell_quantity_2, :depth_sell_orders_2,
-            :depth_sell_price_3, :depth_sell_quantity_3, :depth_sell_orders_3,
-            :depth_sell_price_4, :depth_sell_quantity_4, :depth_sell_orders_4,
-            :depth_sell_price_5, :depth_sell_quantity_5, :depth_sell_orders_5,
-            :change_percent, :last_trade_time, :oi, :oi_day_high, :oi_day_low,
-            :net_change, :target_file, CURRENT_TIMESTAMP
+            :ohlc.ohlc_open, :ohlc.ohlc_high, :ohlc.ohlc_low, :ohlc.ohlc_close,
+            :depth.buy[0].price, :depth.buy[0].quantity, :depth.buy[0].orders,
+            :depth.buy[1].price, :depth.buy[1].quantity, :depth.buy[1].orders,
+            :depth.buy[2].price, :depth.buy[2].quantity, :depth.buy[2].orders,
+            :depth.buy[3].price, :depth.buy[3].quantity, :depth.buy[3].orders,
+            :depth.buy[4].price, :depth.buy[4].quantity, :depth.buy[4].orders,
+            :depth.buy[5].price, :depth.buy[5].quantity, :depth.buy[5].orders,
+            :depth.sell[0].price, :depth.sell[0].quantity, :depth.sell[0].orders,
+            :depth.sell[1].price, :depth.sell[1].quantity, :depth.sell[1].orders,
+            :depth.sell[2].price, :depth.sell[2].quantity, :depth.sell[2].orders,
+            :depth.sell[3].price, :depth.sell[3].quantity, :depth.sell[3].orders,
+            :depth.sell[4].price, :depth.sell[4].quantity, :depth.sell[4].orders,
+            :depth.sell[5].price, :depth.sell[5].quantity, :depth.sell[5].orders,
+            :last_trade_time, :oi, :oi_day_high, :oi_day_low,
+            :net_change, :target_file, :tick_received_time, :tick_stored_in_db_time
         )`, tickData)
 
 	if err != nil {
@@ -306,81 +276,6 @@ func (d *DuckDB) WriteTick(tick *proto.TickData) error {
 	}
 
 	return nil
-}
-
-// WriteTicks writes multiple ticks in a transaction
-func (d *DuckDB) WriteTicks(tick *proto.TickData) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	tx, err := d.db.Begin()
-	if err != nil {
-		return err
-	}
-
-	// Use the same SQL as WriteTick
-	stmt, err := tx.Prepare(`
-        INSERT INTO ticks (
-            instrument_token, timestamp, is_tradable, is_index, mode,
-            last_price, last_traded_quantity, average_trade_price,
-            volume_traded, total_buy_quantity, total_sell_quantity,
-            total_buy, total_sell,
-            ohlc_open, ohlc_high, ohlc_low, ohlc_close,
-            depth_buy_price_1, depth_buy_quantity_1, depth_buy_orders_1,
-            depth_buy_price_2, depth_buy_quantity_2, depth_buy_orders_2,
-            depth_buy_price_3, depth_buy_quantity_3, depth_buy_orders_3,
-            depth_buy_price_4, depth_buy_quantity_4, depth_buy_orders_4,
-            depth_buy_price_5, depth_buy_quantity_5, depth_buy_orders_5,
-            depth_sell_price_1, depth_sell_quantity_1, depth_sell_orders_1,
-            depth_sell_price_2, depth_sell_quantity_2, depth_sell_orders_2,
-            depth_sell_price_3, depth_sell_quantity_3, depth_sell_orders_3,
-            depth_sell_price_4, depth_sell_quantity_4, depth_sell_orders_4,
-            depth_sell_price_5, depth_sell_quantity_5, depth_sell_orders_5,
-            change_percent, last_trade_time, oi, oi_day_high, oi_day_low,
-            net_change, target_file
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	defer stmt.Close()
-
-	result, err := stmt.Exec(
-		// Basic info
-		tick.InstrumentToken, tick.Timestamp, tick.IsTradable, tick.IsIndex, tick.Mode,
-		// Price info
-		tick.LastPrice, tick.LastTradedQuantity, tick.AverageTradePrice,
-		tick.VolumeTraded, tick.TotalBuyQuantity, tick.TotalSellQuantity,
-		tick.TotalBuy, tick.TotalSell,
-		// OHLC
-		tick.Ohlc.Open, tick.Ohlc.High, tick.Ohlc.Low, tick.Ohlc.Close,
-		// Market Depth - Buy
-		getDepthValue(tick.Depth.Buy, 0, "price"), getDepthValue(tick.Depth.Buy, 0, "quantity"), getDepthValue(tick.Depth.Buy, 0, "orders"),
-		getDepthValue(tick.Depth.Buy, 1, "price"), getDepthValue(tick.Depth.Buy, 1, "quantity"), getDepthValue(tick.Depth.Buy, 1, "orders"),
-		getDepthValue(tick.Depth.Buy, 2, "price"), getDepthValue(tick.Depth.Buy, 2, "quantity"), getDepthValue(tick.Depth.Buy, 2, "orders"),
-		getDepthValue(tick.Depth.Buy, 3, "price"), getDepthValue(tick.Depth.Buy, 3, "quantity"), getDepthValue(tick.Depth.Buy, 3, "orders"),
-		getDepthValue(tick.Depth.Buy, 4, "price"), getDepthValue(tick.Depth.Buy, 4, "quantity"), getDepthValue(tick.Depth.Buy, 4, "orders"),
-		// Market Depth - Sell
-		getDepthValue(tick.Depth.Sell, 0, "price"), getDepthValue(tick.Depth.Sell, 0, "quantity"), getDepthValue(tick.Depth.Sell, 0, "orders"),
-		getDepthValue(tick.Depth.Sell, 1, "price"), getDepthValue(tick.Depth.Sell, 1, "quantity"), getDepthValue(tick.Depth.Sell, 1, "orders"),
-		getDepthValue(tick.Depth.Sell, 2, "price"), getDepthValue(tick.Depth.Sell, 2, "quantity"), getDepthValue(tick.Depth.Sell, 2, "orders"),
-		getDepthValue(tick.Depth.Sell, 3, "price"), getDepthValue(tick.Depth.Sell, 3, "quantity"), getDepthValue(tick.Depth.Sell, 3, "orders"),
-		getDepthValue(tick.Depth.Sell, 4, "price"), getDepthValue(tick.Depth.Sell, 4, "quantity"), getDepthValue(tick.Depth.Sell, 4, "orders"),
-		// Additional fields
-		tick.ChangePercent, tick.LastTradeTime, tick.Oi, tick.OiDayHigh, tick.OiDayLow,
-		tick.NetChange, tick.TargetFile,
-	)
-	d.log.Debug("Inserted tick", map[string]interface{}{
-		"result": result,
-	})
-	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("failed to insert tick: %w", err)
-	}
-
-	return tx.Commit()
 }
 
 // Export functions
@@ -519,59 +414,53 @@ func getDepthValueWithError(depth []*proto.TickData_DepthItem, index int, field 
 }
 
 type TickData struct {
-	InstrumentToken    int64   `db:"instrument_token"`
-	Timestamp          int64   `db:"timestamp"`
-	IsTradable         bool    `db:"is_tradable"`
-	IsIndex            bool    `db:"is_index"`
-	Mode               string  `db:"mode"`
-	LastPrice          float64 `db:"last_price"`
-	LastTradedQuantity int64   `db:"last_traded_quantity"`
-	AverageTradePrice  float64 `db:"average_trade_price"`
-	VolumeTraded       int64   `db:"volume_traded"`
-	TotalBuyQuantity   int64   `db:"total_buy_quantity"`
-	TotalSellQuantity  int64   `db:"total_sell_quantity"`
-	TotalBuy           int64   `db:"total_buy"`
-	TotalSell          int64   `db:"total_sell"`
-	OhlcOpen           float64 `db:"ohlc_open"`
-	OhlcHigh           float64 `db:"ohlc_high"`
-	OhlcLow            float64 `db:"ohlc_low"`
-	OhlcClose          float64 `db:"ohlc_close"`
-	DepthBuyPrice1     float64 `db:"depth_buy_price_1"`
-	DepthBuyQuantity1  int64   `db:"depth_buy_quantity_1"`
-	DepthBuyOrders1    int64   `db:"depth_buy_orders_1"`
-	DepthBuyPrice2     float64 `db:"depth_buy_price_2"`
-	DepthBuyQuantity2  int64   `db:"depth_buy_quantity_2"`
-	DepthBuyOrders2    int64   `db:"depth_buy_orders_2"`
-	DepthBuyPrice3     float64 `db:"depth_buy_price_3"`
-	DepthBuyQuantity3  int64   `db:"depth_buy_quantity_3"`
-	DepthBuyOrders3    int64   `db:"depth_buy_orders_3"`
-	DepthBuyPrice4     float64 `db:"depth_buy_price_4"`
-	DepthBuyQuantity4  int64   `db:"depth_buy_quantity_4"`
-	DepthBuyOrders4    int64   `db:"depth_buy_orders_4"`
-	DepthBuyPrice5     float64 `db:"depth_buy_price_5"`
-	DepthBuyQuantity5  int64   `db:"depth_buy_quantity_5"`
-	DepthBuyOrders5    int64   `db:"depth_buy_orders_5"`
-	DepthSellPrice1    float64 `db:"depth_sell_price_1"`
-	DepthSellQuantity1 int64   `db:"depth_sell_quantity_1"`
-	DepthSellOrders1   int64   `db:"depth_sell_orders_1"`
-	DepthSellPrice2    float64 `db:"depth_sell_price_2"`
-	DepthSellQuantity2 int64   `db:"depth_sell_quantity_2"`
-	DepthSellOrders2   int64   `db:"depth_sell_orders_2"`
-	DepthSellPrice3    float64 `db:"depth_sell_price_3"`
-	DepthSellQuantity3 int64   `db:"depth_sell_quantity_3"`
-	DepthSellOrders3   int64   `db:"depth_sell_orders_3"`
-	DepthSellPrice4    float64 `db:"depth_sell_price_4"`
-	DepthSellQuantity4 int64   `db:"depth_sell_quantity_4"`
-	DepthSellOrders4   int64   `db:"depth_sell_orders_4"`
-	DepthSellPrice5    float64 `db:"depth_sell_price_5"`
-	DepthSellQuantity5 int64   `db:"depth_sell_quantity_5"`
-	DepthSellOrders5   int64   `db:"depth_sell_orders_5"`
-	ChangePercent      float64 `db:"change_percent"`
-	LastTradeTime      int64   `db:"last_trade_time"`
-	Oi                 int64   `db:"oi"`
-	OiDayHigh          int64   `db:"oi_day_high"`
-	OiDayLow           int64   `db:"oi_day_low"`
-	NetChange          float64 `db:"net_change"`
-	TargetFile         string  `db:"target_file"`
-	CreatedAt          string  `db:"created_at"` // Assuming this is a timestamp
+	InstrumentToken    uint32      `db:"instrument_token"`
+	IsTradable         bool        `db:"is_tradable"`
+	IsIndex            bool        `db:"is_index"`
+	Mode               string      `db:"mode"`
+	Timestamp          int64       `db:"timestamp"`
+	LastTradeTime      int64       `db:"last_trade_time"`
+	LastPrice          float64     `db:"last_price"`
+	LastTradedQuantity uint32      `db:"last_traded_quantity"`
+	TotalBuyQuantity   uint32      `db:"total_buy_quantity"`
+	TotalSellQuantity  uint32      `db:"total_sell_quantity"`
+	VolumeTraded       uint32      `db:"volume_traded"`
+	TotalBuy           uint32      `db:"total_buy"`
+	TotalSell          uint32      `db:"total_sell"`
+	AverageTradePrice  float64     `db:"average_trade_price"`
+	Oi                 uint32      `db:"oi"`
+	OiDayHigh          uint32      `db:"oi_day_high"`
+	OiDayLow           uint32      `db:"oi_day_low"`
+	NetChange          float64     `db:"net_change"`
+	Ohlc               OHLC        `db:"ohlc"`
+	Depth              MarketDepth `db:"depth"`
+	TargetFile         string      `db:"target_file"`
+	TickReceivedTime   int64       `db:"tick_received_time"`
+	TickStoredInDbTime int64       `db:"tick_stored_in_db_time"`
+}
+
+type OHLC struct {
+	Open  float64 `db:"ohlc_open"`
+	High  float64 `db:"ohlc_high"`
+	Low   float64 `db:"ohlc_low"`
+	Close float64 `db:"ohlc_close"`
+}
+
+type DepthItem struct {
+	Price    float64 `db:"price"`
+	Quantity uint32  `db:"quantity"`
+	Orders   uint32  `db:"orders"`
+}
+
+type MarketDepth struct {
+	Buy  []DepthItem `db:"buy"`
+	Sell []DepthItem `db:"sell"`
+}
+
+func convertDepthItems(depthItems []*proto.TickData_DepthItem) []DepthItem {
+	items := make([]DepthItem, len(depthItems))
+	for i, item := range depthItems {
+		items[i] = DepthItem{Price: item.Price, Quantity: item.Quantity, Orders: item.Orders}
+	}
+	return items
 }

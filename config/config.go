@@ -72,6 +72,7 @@ type IndicesConfig struct {
 type QueueConfig struct {
 	NumLists         int    `json:"num_lists"`
 	ListPrefix       string `json:"list_prefix"`
+	BatchSize        int    `json:"batch_size"`
 	PrimaryWorkers   int    `json:"primary_workers"`
 	SecondaryWorkers int    `json:"secondary_workers"`
 }

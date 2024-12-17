@@ -8,7 +8,6 @@ import (
 
 	"gohustle/config"
 	"gohustle/db"
-	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/proto"
 
@@ -45,7 +44,7 @@ type WorkerMetrics struct {
 	mu             sync.Mutex
 }
 
-func NewConsumer(writerPool *filestore.WriterPool) *Consumer {
+func NewConsumer() *Consumer {
 	cfg := config.GetConfig()
 	log := logger.GetLogger()
 	ctx, cancel := context.WithCancel(context.Background())

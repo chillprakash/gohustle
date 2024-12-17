@@ -13,6 +13,7 @@ message TickData {
     // Timestamps
     int64 timestamp = 5;
     int64 last_trade_time = 6;
+    
 
     // Price and quantity
     double last_price = 7;
@@ -61,6 +62,8 @@ message TickData {
 
     // File management
     string target_file = 26;  // The parquet file this tick should be written to
+    int64 tick_recieved_time = 27;
+    int64 tick_stored_in_db_time = 28;
 }
 
 message BatchMetadata {

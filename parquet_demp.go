@@ -41,17 +41,18 @@ func main() {
 	}
 
 	startTime := time.Now()
-	log.Info("Starting export process", map[string]interface{}{
+	log.Info("Starting Parquet export process", map[string]interface{}{
 		"tables": tables,
 		"time":   startTime,
 	})
 
 	for _, tableName := range tables {
+		tableStartTime := time.Now()
 		log.Info("Starting export for table", map[string]interface{}{
 			"table": tableName,
 		})
 
-		exportedFile, err := exporter.ExportTable(ctx, tableName)
+		exportedFile, err := exporter.ExportTableToProto(ctx, tableName)
 		if err != nil {
 			log.Error("Failed to export table", map[string]interface{}{
 				"error": err.Error(),
@@ -63,10 +64,10 @@ func main() {
 		// Get row count for verification
 		var count int64
 		countQuery := fmt.Sprintf(`
-			SELECT COUNT(*) 
-			FROM %s 
-			WHERE timestamp::date = CURRENT_DATE
-		`, tableName)
+				SELECT COUNT(*) 
+				FROM %s 
+				WHERE timestamp::date = CURRENT_DATE
+			`, tableName)
 
 		if err := timescale.GetPool().QueryRow(ctx, countQuery).Scan(&count); err != nil {
 			log.Error("Failed to get row count", map[string]interface{}{
@@ -76,12 +77,18 @@ func main() {
 			continue
 		}
 
-		log.Info("Table export successful", map[string]interface{}{
-			"table":     tableName,
-			"file":      exportedFile,
-			"row_count": count,
-			"duration":  time.Since(startTime),
-		})
+		// Get file size
+		fileInfo, err := os.Stat(exportedFile)
+		if err == nil {
+			log.Info("Table export successful", map[string]interface{}{
+				"table":      tableName,
+				"file":       exportedFile,
+				"row_count":  count,
+				"size_mb":    float64(fileInfo.Size()) / 1024 / 1024,
+				"duration":   time.Since(tableStartTime),
+				"rows_per_s": float64(count) / time.Since(tableStartTime).Seconds(),
+			})
+		}
 	}
 
 	log.Info("Export process completed", map[string]interface{}{

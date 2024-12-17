@@ -17,23 +17,23 @@ func DemoDuckDB() {
 	duckDB := db.GetDuckDB()
 	defer duckDB.Close()
 
-	// Create sample tick data
-	sampleTicks := createSampleTicks()
+	// // Create sample tick data
+	// sampleTicks := createSampleTicks()
 
-	// Write sample ticks
-	for i, tick := range sampleTicks {
-		if err := duckDB.WriteTick(tick); err != nil {
-			log.Error("Failed to write tick", map[string]interface{}{
-				"error": err.Error(),
-				"index": i,
-			})
-			continue
-		}
-		log.Info("Successfully wrote tick", map[string]interface{}{
-			"index":            i,
-			"instrument_token": tick.InstrumentToken,
-		})
-	}
+	// // Write sample ticks
+	// for i, tick := range sampleTicks {
+	// 	if err := duckDB.WriteTick(tick); err != nil {
+	// 		log.Error("Failed to write tick", map[string]interface{}{
+	// 			"error": err.Error(),
+	// 			"index": i,
+	// 		})
+	// 		continue
+	// 	}
+	// 	log.Info("Successfully wrote tick", map[string]interface{}{
+	// 		"index":            i,
+	// 		"instrument_token": tick.InstrumentToken,
+	// 	})
+	// }
 
 	// Run some demo queries
 	demoQueries(duckDB)
@@ -78,7 +78,6 @@ func createSampleTicks() []*proto.TickData {
 					{Price: 21500.75, Quantity: 300, Orders: 1},
 				},
 			},
-			ChangePercent: 0.5,
 			LastTradeTime: now.Unix(),
 			Oi:            10000,
 			OiDayHigh:     12000,
@@ -120,7 +119,6 @@ func createSampleTicks() []*proto.TickData {
 					{Price: 47500.75, Quantity: 150, Orders: 2},
 				},
 			},
-			ChangePercent: 0.75,
 			LastTradeTime: now.Unix(),
 			Oi:            5000,
 			OiDayHigh:     6000,
@@ -144,15 +142,15 @@ func demoQueries(duckDB *db.DuckDB) {
 		log.Info("NIFTY stats", stats)
 	}
 
-	// Get stats for BANKNIFTY
-	stats, err = duckDB.GetTickStats(260105)
-	if err != nil {
-		log.Error("Failed to get BANKNIFTY stats", map[string]interface{}{
-			"error": err.Error(),
-		})
-	} else {
-		log.Info("BANKNIFTY stats", stats)
-	}
+	// // Get stats for BANKNIFTY
+	// stats, err = duckDB.GetTickStats(260105)
+	// if err != nil {
+	// 	log.Error("Failed to get BANKNIFTY stats", map[string]interface{}{
+	// 		"error": err.Error(),
+	// 	})
+	// } else {
+	// 	log.Info("BANKNIFTY stats", stats)
+	// }
 
 	// Export to parquet
 	if err := duckDB.ExportToParquet(); err != nil {

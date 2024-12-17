@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"gohustle/config"
 	"gohustle/logger"
 	"gohustle/proto"
 
@@ -21,6 +23,8 @@ type DuckDB struct {
 	exportTicker *time.Ticker
 	log          *logger.Logger
 	mu           sync.RWMutex
+	tables       map[string]bool
+	tablesMu     sync.RWMutex
 }
 
 var (
@@ -42,46 +46,149 @@ func GetDuckDB() *DuckDB {
 
 func newDuckDB() (*DuckDB, error) {
 	log := logger.GetLogger()
+	cfg := config.GetConfig()
 
 	// Create data directory if not exists
-	dataDir := "data/db"
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
+	if err := os.MkdirAll(cfg.DuckDB.DataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create data directory: %w", err)
 	}
 
-	// Open DuckDB connection
-	db, err := sql.Open("duckdb", filepath.Join(dataDir, "ticks.duckdb"))
+	// Build connection string with DuckDB-specific settings
+	connStr := fmt.Sprintf("?threads=%d&memory_limit=%s&access_mode=%s",
+		cfg.DuckDB.Threads,
+		cfg.DuckDB.MemoryLimit,
+		cfg.DuckDB.AccessMode,
+	)
+
+	db, err := sql.Open("duckdb", connStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open duckdb: %w", err)
 	}
 
-	// Initialize tables
-	if err := initializeTables(db); err != nil {
+	// Set connection pool settings from config
+	db.SetMaxOpenConns(cfg.DuckDB.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.DuckDB.MaxIdleConns)
+
+	connLifetime, err := time.ParseDuration(cfg.DuckDB.ConnLifetime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid connection lifetime: %w", err)
+	}
+	db.SetConnMaxLifetime(connLifetime)
+
+	// Set DuckDB specific settings for better performance
+	if _, err := db.Exec("SET temp_directory='data/db/temp'"); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("failed to set temp directory: %w", err)
+	}
+
+	// Set memory settings
+	if _, err := db.Exec(fmt.Sprintf("SET memory_limit='%s'", cfg.DuckDB.MemoryLimit)); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set memory limit: %w", err)
+	}
+
+	// Set other optimizations
+	optimizations := []string{
+		"SET checkpoint_threshold='1GB'",
+		"SET threads TO " + fmt.Sprint(cfg.DuckDB.Threads),
+		"SET preserve_insertion_order=false",
+	}
+
+	for _, opt := range optimizations {
+		if _, err := db.Exec(opt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to set optimization %s: %w", opt, err)
+		}
 	}
 
 	duck := &DuckDB{
-		db:           sqlx.NewDb(db, "duckdb"),
-		exportPath:   "data/ticks",
+		db:         sqlx.NewDb(db, "duckdb"),
+		exportPath: filepath.Join(cfg.DuckDB.DataDir, "exports"),
+
 		exportTicker: time.NewTicker(1 * time.Hour),
 		log:          log,
+		tables:       make(map[string]bool),
+	}
+
+	// Initialize existing tables map
+	if err := duck.loadExistingTables(); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	// Start export routine
 	go duck.runExporter()
 
-	log.Info("DuckDB initialized successfully", nil)
+	log.Info("DuckDB initialized successfully", map[string]interface{}{
+		"data_dir":      cfg.DuckDB.DataDir,
+		"threads":       cfg.DuckDB.Threads,
+		"memory_limit":  cfg.DuckDB.MemoryLimit,
+		"access_mode":   cfg.DuckDB.AccessMode,
+		"max_open_conn": cfg.DuckDB.MaxOpenConns,
+	})
 	return duck, nil
 }
 
-func initializeTables(db *sql.DB) error {
-	log := logger.GetLogger()
-	log.Info("Creating table schema", nil)
+func (d *DuckDB) loadExistingTables() error {
+	d.tablesMu.Lock()
+	defer d.tablesMu.Unlock()
 
-	// Modified SQL to use DuckDB's supported syntax
-	_, err := db.Exec(`
-        CREATE TABLE IF NOT EXISTS ticks (
+	rows, err := d.db.Query(`
+        SELECT table_name 
+        FROM information_schema.tables 
+        WHERE table_schema = 'main'
+    `)
+	if err != nil {
+		return fmt.Errorf("failed to query existing tables: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			continue
+		}
+		d.tables[tableName] = true
+	}
+
+	return nil
+}
+
+func (d *DuckDB) ensureTableExists(tableName string) error {
+	d.tablesMu.RLock()
+	exists := d.tables[tableName]
+	d.tablesMu.RUnlock()
+
+	if exists {
+		return nil
+	}
+
+	d.tablesMu.Lock()
+	defer d.tablesMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if d.tables[tableName] {
+		return nil
+	}
+
+	// Create table using the standard schema
+	if err := d.createTable(tableName); err != nil {
+		return err
+	}
+
+	d.tables[tableName] = true
+	return nil
+}
+
+func (d *DuckDB) createTable(tableName string) error {
+	log := logger.GetLogger()
+	log.Info("Creating table schema", map[string]interface{}{
+		"table": tableName,
+	})
+
+	// Modified SQL to use dynamic table name
+	_, err := d.db.Exec(fmt.Sprintf(`
+        CREATE TABLE IF NOT EXISTS %s (
             -- Add a sequence for unique IDs
             id BIGINT,
             
@@ -153,48 +260,57 @@ func initializeTables(db *sql.DB) error {
             target_file VARCHAR,
             tick_received_time BIGINT,
             tick_stored_in_db_time BIGINT
-        );
-    `)
+        )
+    `, tableName))
+
 	if err != nil {
 		log.Error("Failed to create table", map[string]interface{}{
 			"error": err.Error(),
+			"table": tableName,
 		})
 		return err
 	}
 
-	// Create index in a separate statement
-	_, err = db.Exec(`
-        CREATE INDEX IF NOT EXISTS idx_token_time ON ticks (instrument_token, timestamp);
-    `)
+	// Create index with dynamic table name
+	_, err = d.db.Exec(fmt.Sprintf(`
+        CREATE INDEX IF NOT EXISTS idx_%s_token_time ON %s (instrument_token, timestamp)
+    `, tableName, tableName))
+
 	if err != nil {
 		log.Error("Failed to create index", map[string]interface{}{
 			"error": err.Error(),
+			"table": tableName,
 		})
 		return err
 	}
 
-	// Verify table creation
+	// Verify table creation with dynamic table name
 	var tableExists bool
-	err = db.QueryRow(`
+	err = d.db.QueryRow(fmt.Sprintf(`
         SELECT EXISTS (
             SELECT 1 
             FROM information_schema.tables 
-            WHERE table_name = 'ticks'
-        );
-    `).Scan(&tableExists)
+            WHERE table_name = '%s'
+        )
+    `, tableName)).Scan(&tableExists)
 
 	if err != nil {
 		log.Error("Failed to verify table creation", map[string]interface{}{
 			"error": err.Error(),
+			"table": tableName,
 		})
 		return err
 	}
 
 	if tableExists {
-		log.Info("Table 'ticks' created successfully", nil)
+		log.Info("Table created successfully", map[string]interface{}{
+			"table": tableName,
+		})
 	} else {
-		log.Error("Table 'ticks' was not created", nil)
-		return fmt.Errorf("table 'ticks' was not created")
+		log.Error("Table was not created", map[string]interface{}{
+			"table": tableName,
+		})
+		return fmt.Errorf("table '%s' was not created", tableName)
 	}
 
 	return nil
@@ -218,138 +334,189 @@ func (d *DuckDB) logColumnCount() {
 
 // WriteTick writes a single tick to DuckDB
 func (d *DuckDB) WriteTick(tick *proto.TickData) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	if tick.TargetFile == "" {
+		return fmt.Errorf("target file is empty")
+	}
 
-	d.log.Debug("Writing tick to DuckDB", map[string]interface{}{
-		"instrument_token": tick.InstrumentToken,
-		"timestamp":        tick.Timestamp,
-	})
+	// Generate table name from target file
+	tableName := strings.TrimSuffix(tick.TargetFile, ".parquet")
+	tableName = strings.ReplaceAll(tableName, "-", "_")
 
-	tickData := TickData{
-		InstrumentToken:    uint32(tick.InstrumentToken),
-		Timestamp:          tick.Timestamp * 1000,
+	// Ensure table exists (cached check)
+	if err := d.ensureTableExists(tableName); err != nil {
+		return fmt.Errorf("failed to ensure table exists: %w", err)
+	}
+
+	// Insert into specific table
+	query := fmt.Sprintf(`
+        INSERT INTO %s (
+            instrument_token, timestamp, is_tradable, is_index, mode,
+            last_price, last_traded_quantity, average_trade_price,
+            volume_traded, total_buy_quantity, total_sell_quantity,
+            total_buy, total_sell,
+            ohlc_open, ohlc_high, ohlc_low, ohlc_close,
+            depth_buy_price_1, depth_buy_quantity_1, depth_buy_orders_1,
+            depth_buy_price_2, depth_buy_quantity_2, depth_buy_orders_2,
+            depth_buy_price_3, depth_buy_quantity_3, depth_buy_orders_3,
+            depth_buy_price_4, depth_buy_quantity_4, depth_buy_orders_4,
+            depth_buy_price_5, depth_buy_quantity_5, depth_buy_orders_5,
+            depth_sell_price_1, depth_sell_quantity_1, depth_sell_orders_1,
+            depth_sell_price_2, depth_sell_quantity_2, depth_sell_orders_2,
+            depth_sell_price_3, depth_sell_quantity_3, depth_sell_orders_3,
+            depth_sell_price_4, depth_sell_quantity_4, depth_sell_orders_4,
+            depth_sell_price_5, depth_sell_quantity_5, depth_sell_orders_5,
+            last_trade_time, oi, oi_day_high, oi_day_low,
+            net_change, target_file, tick_received_time, tick_stored_in_db_time
+        ) VALUES (
+            :instrument_token, :timestamp, :is_tradable, :is_index, :mode,
+            :last_price, :last_traded_quantity, :average_trade_price,
+            :volume_traded, :total_buy_quantity, :total_sell_quantity,
+            :total_buy, :total_sell,
+            :ohlc_open, :ohlc_high, :ohlc_low, :ohlc_close,
+            :depth_buy_price_1, :depth_buy_quantity_1, :depth_buy_orders_1,
+            :depth_buy_price_2, :depth_buy_quantity_2, :depth_buy_orders_2,
+            :depth_buy_price_3, :depth_buy_quantity_3, :depth_buy_orders_3,
+            :depth_buy_price_4, :depth_buy_quantity_4, :depth_buy_orders_4,
+            :depth_buy_price_5, :depth_buy_quantity_5, :depth_buy_orders_5,
+            :depth_sell_price_1, :depth_sell_quantity_1, :depth_sell_orders_1,
+            :depth_sell_price_2, :depth_sell_quantity_2, :depth_sell_orders_2,
+            :depth_sell_price_3, :depth_sell_quantity_3, :depth_sell_orders_3,
+            :depth_sell_price_4, :depth_sell_quantity_4, :depth_sell_orders_4,
+            :depth_sell_price_5, :depth_sell_quantity_5, :depth_sell_orders_5,
+            :last_trade_time, :oi, :oi_day_high, :oi_day_low,
+            :net_change, :target_file, :tick_received_time, :tick_stored_in_db_time
+        )
+    `, tableName)
+
+	// Prepare the data for insertion
+	tickData := struct {
+		InstrumentToken    uint32  `db:"instrument_token"`
+		Timestamp          int64   `db:"timestamp"`
+		IsTradable         bool    `db:"is_tradable"`
+		IsIndex            bool    `db:"is_index"`
+		Mode               string  `db:"mode"`
+		LastPrice          float64 `db:"last_price"`
+		LastTradedQuantity uint32  `db:"last_traded_quantity"`
+		AverageTradePrice  float64 `db:"average_trade_price"`
+		VolumeTraded       uint32  `db:"volume_traded"`
+		TotalBuyQuantity   uint32  `db:"total_buy_quantity"`
+		TotalSellQuantity  uint32  `db:"total_sell_quantity"`
+		TotalBuy           uint32  `db:"total_buy"`
+		TotalSell          uint32  `db:"total_sell"`
+		OhlcOpen           float64 `db:"ohlc_open"`
+		OhlcHigh           float64 `db:"ohlc_high"`
+		OhlcLow            float64 `db:"ohlc_low"`
+		OhlcClose          float64 `db:"ohlc_close"`
+		// Buy depth
+		DepthBuyPrice1    float64 `db:"depth_buy_price_1"`
+		DepthBuyQuantity1 int64   `db:"depth_buy_quantity_1"`
+		DepthBuyOrders1   int64   `db:"depth_buy_orders_1"`
+		DepthBuyPrice2    float64 `db:"depth_buy_price_2"`
+		DepthBuyQuantity2 int64   `db:"depth_buy_quantity_2"`
+		DepthBuyOrders2   int64   `db:"depth_buy_orders_2"`
+		DepthBuyPrice3    float64 `db:"depth_buy_price_3"`
+		DepthBuyQuantity3 int64   `db:"depth_buy_quantity_3"`
+		DepthBuyOrders3   int64   `db:"depth_buy_orders_3"`
+		DepthBuyPrice4    float64 `db:"depth_buy_price_4"`
+		DepthBuyQuantity4 int64   `db:"depth_buy_quantity_4"`
+		DepthBuyOrders4   int64   `db:"depth_buy_orders_4"`
+		DepthBuyPrice5    float64 `db:"depth_buy_price_5"`
+		DepthBuyQuantity5 int64   `db:"depth_buy_quantity_5"`
+		DepthBuyOrders5   int64   `db:"depth_buy_orders_5"`
+		// Sell depth
+		DepthSellPrice1    float64 `db:"depth_sell_price_1"`
+		DepthSellQuantity1 int64   `db:"depth_sell_quantity_1"`
+		DepthSellOrders1   int64   `db:"depth_sell_orders_1"`
+		DepthSellPrice2    float64 `db:"depth_sell_price_2"`
+		DepthSellQuantity2 int64   `db:"depth_sell_quantity_2"`
+		DepthSellOrders2   int64   `db:"depth_sell_orders_2"`
+		DepthSellPrice3    float64 `db:"depth_sell_price_3"`
+		DepthSellQuantity3 int64   `db:"depth_sell_quantity_3"`
+		DepthSellOrders3   int64   `db:"depth_sell_orders_3"`
+		DepthSellPrice4    float64 `db:"depth_sell_price_4"`
+		DepthSellQuantity4 int64   `db:"depth_sell_quantity_4"`
+		DepthSellOrders4   int64   `db:"depth_sell_orders_4"`
+		DepthSellPrice5    float64 `db:"depth_sell_price_5"`
+		DepthSellQuantity5 int64   `db:"depth_sell_quantity_5"`
+		DepthSellOrders5   int64   `db:"depth_sell_orders_5"`
+		// Additional fields
+		LastTradeTime      int64   `db:"last_trade_time"`
+		Oi                 uint32  `db:"oi"`
+		OiDayHigh          uint32  `db:"oi_day_high"`
+		OiDayLow           uint32  `db:"oi_day_low"`
+		NetChange          float64 `db:"net_change"`
+		TargetFile         string  `db:"target_file"`
+		TickReceivedTime   int64   `db:"tick_received_time"`
+		TickStoredInDbTime int64   `db:"tick_stored_in_db_time"`
+	}{
+		InstrumentToken:    tick.InstrumentToken,
+		Timestamp:          tick.Timestamp * 1000, // Convert to milliseconds
 		IsTradable:         tick.IsTradable,
 		IsIndex:            tick.IsIndex,
 		Mode:               tick.Mode,
 		LastPrice:          tick.LastPrice,
-		LastTradedQuantity: uint32(tick.LastTradedQuantity),
+		LastTradedQuantity: tick.LastTradedQuantity,
 		AverageTradePrice:  tick.AverageTradePrice,
-		VolumeTraded:       uint32(tick.VolumeTraded),
-		TotalBuyQuantity:   uint32(tick.TotalBuyQuantity),
-		TotalSellQuantity:  uint32(tick.TotalSellQuantity),
-		TotalBuy:           uint32(tick.TotalBuy),
-		TotalSell:          uint32(tick.TotalSell),
-		OHLC:               OHLC{Open: tick.Ohlc.Open, High: tick.Ohlc.High, Low: tick.Ohlc.Low, Close: tick.Ohlc.Close},
-		LastTradeTime:      tick.LastTradeTime,
-		Oi:                 uint32(tick.Oi),
-		OiDayHigh:          uint32(tick.OiDayHigh),
-		OiDayLow:           uint32(tick.OiDayLow),
+		VolumeTraded:       tick.VolumeTraded,
+		TotalBuyQuantity:   tick.TotalBuyQuantity,
+		TotalSellQuantity:  tick.TotalSellQuantity,
+		TotalBuy:           tick.TotalBuy,
+		TotalSell:          tick.TotalSell,
+		OhlcOpen:           tick.Ohlc.Open,
+		OhlcHigh:           tick.Ohlc.High,
+		OhlcLow:            tick.Ohlc.Low,
+		OhlcClose:          tick.Ohlc.Close,
+		// Buy depth
+		DepthBuyPrice1:    getDepthValue(tick.Depth.Buy, 0, "price"),
+		DepthBuyQuantity1: int64(getDepthValue(tick.Depth.Buy, 0, "quantity")),
+		DepthBuyOrders1:   int64(getDepthValue(tick.Depth.Buy, 0, "orders")),
+		DepthBuyPrice2:    getDepthValue(tick.Depth.Buy, 1, "price"),
+		DepthBuyQuantity2: int64(getDepthValue(tick.Depth.Buy, 1, "quantity")),
+		DepthBuyOrders2:   int64(getDepthValue(tick.Depth.Buy, 1, "orders")),
+		DepthBuyPrice3:    getDepthValue(tick.Depth.Buy, 2, "price"),
+		DepthBuyQuantity3: int64(getDepthValue(tick.Depth.Buy, 2, "quantity")),
+		DepthBuyOrders3:   int64(getDepthValue(tick.Depth.Buy, 2, "orders")),
+		DepthBuyPrice4:    getDepthValue(tick.Depth.Buy, 3, "price"),
+		DepthBuyQuantity4: int64(getDepthValue(tick.Depth.Buy, 3, "quantity")),
+		DepthBuyOrders4:   int64(getDepthValue(tick.Depth.Buy, 3, "orders")),
+		DepthBuyPrice5:    getDepthValue(tick.Depth.Buy, 4, "price"),
+		DepthBuyQuantity5: int64(getDepthValue(tick.Depth.Buy, 4, "quantity")),
+		DepthBuyOrders5:   int64(getDepthValue(tick.Depth.Buy, 4, "orders")),
+		// Sell depth
+		DepthSellPrice1:    getDepthValue(tick.Depth.Sell, 0, "price"),
+		DepthSellQuantity1: int64(getDepthValue(tick.Depth.Sell, 0, "quantity")),
+		DepthSellOrders1:   int64(getDepthValue(tick.Depth.Sell, 0, "orders")),
+		DepthSellPrice2:    getDepthValue(tick.Depth.Sell, 1, "price"),
+		DepthSellQuantity2: int64(getDepthValue(tick.Depth.Sell, 1, "quantity")),
+		DepthSellOrders2:   int64(getDepthValue(tick.Depth.Sell, 1, "orders")),
+		DepthSellPrice3:    getDepthValue(tick.Depth.Sell, 2, "price"),
+		DepthSellQuantity3: int64(getDepthValue(tick.Depth.Sell, 2, "quantity")),
+		DepthSellOrders3:   int64(getDepthValue(tick.Depth.Sell, 2, "orders")),
+		DepthSellPrice4:    getDepthValue(tick.Depth.Sell, 3, "price"),
+		DepthSellQuantity4: int64(getDepthValue(tick.Depth.Sell, 3, "quantity")),
+		DepthSellOrders4:   int64(getDepthValue(tick.Depth.Sell, 3, "orders")),
+		DepthSellPrice5:    getDepthValue(tick.Depth.Sell, 4, "price"),
+		DepthSellQuantity5: int64(getDepthValue(tick.Depth.Sell, 4, "quantity")),
+		DepthSellOrders5:   int64(getDepthValue(tick.Depth.Sell, 4, "orders")),
+		// Additional fields
+		LastTradeTime:      tick.LastTradeTime * 1000, // Convert to milliseconds
+		Oi:                 tick.Oi,
+		OiDayHigh:          tick.OiDayHigh,
+		OiDayLow:           tick.OiDayLow,
 		NetChange:          tick.NetChange,
 		TargetFile:         tick.TargetFile,
-		TickStoredInDbTime: time.Now().Unix(),
+		TickReceivedTime:   time.Now().UnixMilli(),
+		TickStoredInDbTime: time.Now().UnixMilli(),
 	}
 
-	// Flatten Depth Buy
-	tickData.DepthBuy1 = PriceQuantityOrder{
-		Price:    tick.Depth.Buy[0].Price,
-		Quantity: tick.Depth.Buy[0].Quantity,
-		Orders:   tick.Depth.Buy[0].Orders,
-	}
-	tickData.DepthBuy2 = PriceQuantityOrder{
-		Price:    tick.Depth.Buy[1].Price,
-		Quantity: tick.Depth.Buy[1].Quantity,
-		Orders:   tick.Depth.Buy[1].Orders,
-	}
-	tickData.DepthBuy3 = PriceQuantityOrder{
-		Price:    tick.Depth.Buy[2].Price,
-		Quantity: tick.Depth.Buy[2].Quantity,
-		Orders:   tick.Depth.Buy[2].Orders,
-	}
-	tickData.DepthBuy4 = PriceQuantityOrder{
-		Price:    tick.Depth.Buy[3].Price,
-		Quantity: tick.Depth.Buy[3].Quantity,
-		Orders:   tick.Depth.Buy[3].Orders,
-	}
-	tickData.DepthBuy5 = PriceQuantityOrder{
-		Price:    tick.Depth.Buy[4].Price,
-		Quantity: tick.Depth.Buy[4].Quantity,
-		Orders:   tick.Depth.Buy[4].Orders,
-	}
-
-	// Flatten Depth Sell
-	tickData.DepthSell1 = PriceQuantityOrder{
-		Price:    tick.Depth.Sell[0].Price,
-		Quantity: tick.Depth.Sell[0].Quantity,
-		Orders:   tick.Depth.Sell[0].Orders,
-	}
-	tickData.DepthSell2 = PriceQuantityOrder{
-		Price:    tick.Depth.Sell[1].Price,
-		Quantity: tick.Depth.Sell[1].Quantity,
-		Orders:   tick.Depth.Sell[1].Orders,
-	}
-	tickData.DepthSell3 = PriceQuantityOrder{
-		Price:    tick.Depth.Sell[2].Price,
-		Quantity: tick.Depth.Sell[2].Quantity,
-		Orders:   tick.Depth.Sell[2].Orders,
-	}
-	tickData.DepthSell4 = PriceQuantityOrder{
-		Price:    tick.Depth.Sell[3].Price,
-		Quantity: tick.Depth.Sell[3].Quantity,
-		Orders:   tick.Depth.Sell[3].Orders,
-	}
-	tickData.DepthSell5 = PriceQuantityOrder{
-		Price:    tick.Depth.Sell[4].Price,
-		Quantity: tick.Depth.Sell[4].Quantity,
-		Orders:   tick.Depth.Sell[4].Orders,
-	}
-
-	// Use sqlx.NamedExec to insert using struct
-	_, err := d.db.NamedExec(`
-			INSERT INTO ticks (
-			instrument_token, timestamp, is_tradable, is_index, mode,
-			last_price, last_traded_quantity, average_trade_price,
-			volume_traded, total_buy_quantity, total_sell_quantity,
-			total_buy, total_sell,
-			ohlc_open, ohlc_high, ohlc_low, ohlc_close,
-			depth_buy_price_1, depth_buy_quantity_1, depth_buy_orders_1,
-			depth_buy_price_2, depth_buy_quantity_2, depth_buy_orders_2,
-			depth_buy_price_3, depth_buy_quantity_3, depth_buy_orders_3,
-			depth_buy_price_4, depth_buy_quantity_4, depth_buy_orders_4,
-			depth_buy_price_5, depth_buy_quantity_5, depth_buy_orders_5,
-			depth_sell_price_1, depth_sell_quantity_1, depth_sell_orders_1,
-			depth_sell_price_2, depth_sell_quantity_2, depth_sell_orders_2,
-			depth_sell_price_3, depth_sell_quantity_3, depth_sell_orders_3,
-			depth_sell_price_4, depth_sell_quantity_4, depth_sell_orders_4,
-			depth_sell_price_5, depth_sell_quantity_5, depth_sell_orders_5,
-			last_trade_time, oi, oi_day_high, oi_day_low,
-			net_change, target_file, tick_stored_in_db_time
-		) VALUES (
-			:instrument_token, :timestamp, :is_tradable, :is_index, :mode,
-			:last_price, :last_traded_quantity, :average_trade_price,
-			:volume_traded, :total_buy_quantity, :total_sell_quantity,
-			:total_buy, :total_sell,
-			:ohlc.ohlc_open, :ohlc.ohlc_high, :ohlc.ohlc_low, :ohlc.ohlc_close,
-			:depth_buy_1.price, :depth_buy_1.quantity, :depth_buy_1.orders,
-			:depth_buy_2.price, :depth_buy_2.quantity, :depth_buy_2.orders,
-			:depth_buy_3.price, :depth_buy_3.quantity, :depth_buy_3.orders,
-			:depth_buy_4.price, :depth_buy_4.quantity, :depth_buy_4.orders,
-			:depth_buy_5.price, :depth_buy_5.quantity, :depth_buy_5.orders,
-			:depth_sell_1.price, :depth_sell_1.quantity, :depth_sell_1.orders,
-			:depth_sell_2.price, :depth_sell_2.quantity, :depth_sell_2.orders,
-			:depth_sell_3.price, :depth_sell_3.quantity, :depth_sell_3.orders,
-			:depth_sell_4.price, :depth_sell_4.quantity, :depth_sell_4.orders,
-			:depth_sell_5.price, :depth_sell_5.quantity, :depth_sell_5.orders,
-			:last_trade_time, :oi, :oi_day_high, :oi_day_low,
-			:net_change, :target_file, :tick_stored_in_db_time
-		)`, tickData)
-
+	_, err := d.db.NamedExec(query, tickData)
 	if err != nil {
 		d.log.Error("Failed to insert tick", map[string]interface{}{
 			"error": err.Error(),
 			"token": tick.InstrumentToken,
+			"table": tableName,
 		})
-		return fmt.Errorf("failed to insert tick: %w", err)
+		return fmt.Errorf("failed to insert tick into %s: %w", tableName, err)
 	}
 
 	return nil
@@ -367,18 +534,35 @@ func (d *DuckDB) runExporter() {
 }
 
 func (d *DuckDB) ExportToParquet() error {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	d.tablesMu.RLock()
+	tables := make([]string, 0, len(d.tables))
+	for table := range d.tables {
+		tables = append(tables, table)
+	}
+	d.tablesMu.RUnlock()
 
-	filename := fmt.Sprintf("ticks_%s.parquet",
-		time.Now().Format("2006-01-02_15"))
+	for _, tableName := range tables {
+		filename := fmt.Sprintf("%s.parquet", tableName)
+		exportPath := filepath.Join(d.exportPath, filename)
 
+		if err := d.exportTable(tableName, exportPath); err != nil {
+			d.log.Error("Failed to export table", map[string]interface{}{
+				"table": tableName,
+				"error": err.Error(),
+			})
+			continue
+		}
+	}
+
+	return nil
+}
+
+func (d *DuckDB) exportTable(tableName, exportPath string) error {
 	_, err := d.db.Exec(fmt.Sprintf(`
         COPY (
-            SELECT * FROM ticks 
-        ) TO '%s' (FORMAT 'parquet')`,
-		filepath.Join(d.exportPath, filename)))
-
+            SELECT * FROM %s
+        ) TO '%s' (FORMAT 'parquet')
+    `, tableName, exportPath))
 	return err
 }
 
@@ -540,4 +724,35 @@ type OHLC struct {
 	High  float64 `db:"ohlc_high"`
 	Low   float64 `db:"ohlc_low"`
 	Close float64 `db:"ohlc_close"`
+}
+
+// Add a method to handle graceful shutdown
+func (d *DuckDB) Shutdown() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	// Stop the export ticker
+	d.exportTicker.Stop()
+
+	// Export any remaining data
+	if err := d.ExportToParquet(); err != nil {
+		d.log.Error("Failed to export data during shutdown", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Optimize tables before closing
+	d.tablesMu.RLock()
+	for tableName := range d.tables {
+		if _, err := d.db.Exec(fmt.Sprintf("ANALYZE %s", tableName)); err != nil {
+			d.log.Error("Failed to analyze table", map[string]interface{}{
+				"error": err.Error(),
+				"table": tableName,
+			})
+		}
+	}
+	d.tablesMu.RUnlock()
+
+	// Close database connection
+	return d.db.Close()
 }

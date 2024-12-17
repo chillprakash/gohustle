@@ -16,6 +16,7 @@ type Config struct {
 	Telegram TelegramConfig `json:"telegram"`
 	Indices  IndicesConfig  `json:"indices"`
 	Queue    QueueConfig    `json:"queue"`
+	DuckDB   DuckDBConfig   `json:"duckdb"`
 }
 
 type RedisConfig struct {
@@ -75,6 +76,17 @@ type QueueConfig struct {
 	BatchSize        int    `json:"batch_size"`
 	PrimaryWorkers   int    `json:"primary_workers"`
 	SecondaryWorkers int    `json:"secondary_workers"`
+}
+
+type DuckDBConfig struct {
+	DataDir      string `json:"data_dir"`
+	Threads      int    `json:"threads"`
+	MemoryLimit  string `json:"memory_limit"`
+	AccessMode   string `json:"access_mode"`
+	MaxOpenConns int    `json:"max_open_conns"`
+	MaxIdleConns int    `json:"max_idle_conns"`
+	ConnLifetime string `json:"conn_lifetime"`
+	WALEnabled   bool   `json:"wal_enabled"`
 }
 
 // GetConfig loads configuration and handles errors internally

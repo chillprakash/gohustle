@@ -49,5 +49,14 @@
         "batch_size": 1000,
         "primary_workers": 10,
         "secondary_workers": 10
+    },
+    "duckdb": {
+        "data_dir": "data/db",
+        "threads": 4,
+        "memory_limit": "4GB",
+        "access_mode": "read_write",
+        "max_open_conns": 10,
+        "max_idle_conns": 5,
+        "conn_lifetime": "1h"
     }
 } 

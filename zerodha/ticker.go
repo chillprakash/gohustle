@@ -148,6 +148,7 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	// Convert to protobuf and marshal
 	protoTick := &proto.TickData{
 		// Basic info
+		IndexName:       instrumentInfo.Index,
 		InstrumentToken: tick.InstrumentToken,
 		IsTradable:      tick.IsTradable,
 		IsIndex:         tick.IsIndex,

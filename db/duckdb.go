@@ -27,23 +27,6 @@ type DuckDB struct {
 	tablesMu     sync.RWMutex
 }
 
-var (
-	instance *DuckDB
-	once     sync.Once
-)
-
-// GetDuckDB returns singleton instance
-func GetDuckDB() *DuckDB {
-	once.Do(func() {
-		var err error
-		instance, err = newDuckDB()
-		if err != nil {
-			panic(fmt.Sprintf("Failed to initialize DuckDB: %v", err))
-		}
-	})
-	return instance
-}
-
 func newDuckDB() (*DuckDB, error) {
 	log := logger.GetLogger()
 	cfg := config.GetConfig()
@@ -485,37 +468,37 @@ func (d *DuckDB) WriteTick(tick *proto.TickData) error {
 		OhlcLow:            tick.Ohlc.Low,
 		OhlcClose:          tick.Ohlc.Close,
 		// Buy depth
-		DepthBuyPrice1:    getDepthValue(tick.Depth.Buy, 0, "price"),
-		DepthBuyQuantity1: int64(getDepthValue(tick.Depth.Buy, 0, "quantity")),
-		DepthBuyOrders1:   int64(getDepthValue(tick.Depth.Buy, 0, "orders")),
-		DepthBuyPrice2:    getDepthValue(tick.Depth.Buy, 1, "price"),
-		DepthBuyQuantity2: int64(getDepthValue(tick.Depth.Buy, 1, "quantity")),
-		DepthBuyOrders2:   int64(getDepthValue(tick.Depth.Buy, 1, "orders")),
-		DepthBuyPrice3:    getDepthValue(tick.Depth.Buy, 2, "price"),
-		DepthBuyQuantity3: int64(getDepthValue(tick.Depth.Buy, 2, "quantity")),
-		DepthBuyOrders3:   int64(getDepthValue(tick.Depth.Buy, 2, "orders")),
-		DepthBuyPrice4:    getDepthValue(tick.Depth.Buy, 3, "price"),
-		DepthBuyQuantity4: int64(getDepthValue(tick.Depth.Buy, 3, "quantity")),
-		DepthBuyOrders4:   int64(getDepthValue(tick.Depth.Buy, 3, "orders")),
-		DepthBuyPrice5:    getDepthValue(tick.Depth.Buy, 4, "price"),
-		DepthBuyQuantity5: int64(getDepthValue(tick.Depth.Buy, 4, "quantity")),
-		DepthBuyOrders5:   int64(getDepthValue(tick.Depth.Buy, 4, "orders")),
-		// Sell depth
-		DepthSellPrice1:    getDepthValue(tick.Depth.Sell, 0, "price"),
-		DepthSellQuantity1: int64(getDepthValue(tick.Depth.Sell, 0, "quantity")),
-		DepthSellOrders1:   int64(getDepthValue(tick.Depth.Sell, 0, "orders")),
-		DepthSellPrice2:    getDepthValue(tick.Depth.Sell, 1, "price"),
-		DepthSellQuantity2: int64(getDepthValue(tick.Depth.Sell, 1, "quantity")),
-		DepthSellOrders2:   int64(getDepthValue(tick.Depth.Sell, 1, "orders")),
-		DepthSellPrice3:    getDepthValue(tick.Depth.Sell, 2, "price"),
-		DepthSellQuantity3: int64(getDepthValue(tick.Depth.Sell, 2, "quantity")),
-		DepthSellOrders3:   int64(getDepthValue(tick.Depth.Sell, 2, "orders")),
-		DepthSellPrice4:    getDepthValue(tick.Depth.Sell, 3, "price"),
-		DepthSellQuantity4: int64(getDepthValue(tick.Depth.Sell, 3, "quantity")),
-		DepthSellOrders4:   int64(getDepthValue(tick.Depth.Sell, 3, "orders")),
-		DepthSellPrice5:    getDepthValue(tick.Depth.Sell, 4, "price"),
-		DepthSellQuantity5: int64(getDepthValue(tick.Depth.Sell, 4, "quantity")),
-		DepthSellOrders5:   int64(getDepthValue(tick.Depth.Sell, 4, "orders")),
+		// DepthBuyPrice1:    getDepthValue(tick.Depth.Buy, 0, "price"),
+		// DepthBuyQuantity1: int64(getDepthValue(tick.Depth.Buy, 0, "quantity")),
+		// DepthBuyOrders1:   int64(getDepthValue(tick.Depth.Buy, 0, "orders")),
+		// DepthBuyPrice2:    getDepthValue(tick.Depth.Buy, 1, "price"),
+		// DepthBuyQuantity2: int64(getDepthValue(tick.Depth.Buy, 1, "quantity")),
+		// DepthBuyOrders2:   int64(getDepthValue(tick.Depth.Buy, 1, "orders")),
+		// DepthBuyPrice3:    getDepthValue(tick.Depth.Buy, 2, "price"),
+		// DepthBuyQuantity3: int64(getDepthValue(tick.Depth.Buy, 2, "quantity")),
+		// DepthBuyOrders3:   int64(getDepthValue(tick.Depth.Buy, 2, "orders")),
+		// DepthBuyPrice4:    getDepthValue(tick.Depth.Buy, 3, "price"),
+		// DepthBuyQuantity4: int64(getDepthValue(tick.Depth.Buy, 3, "quantity")),
+		// DepthBuyOrders4:   int64(getDepthValue(tick.Depth.Buy, 3, "orders")),
+		// DepthBuyPrice5:    getDepthValue(tick.Depth.Buy, 4, "price"),
+		// DepthBuyQuantity5: int64(getDepthValue(tick.Depth.Buy, 4, "quantity")),
+		// DepthBuyOrders5:   int64(getDepthValue(tick.Depth.Buy, 4, "orders")),
+		// // Sell depth
+		// DepthSellPrice1:    getDepthValue(tick.Depth.Sell, 0, "price"),
+		// DepthSellQuantity1: int64(getDepthValue(tick.Depth.Sell, 0, "quantity")),
+		// DepthSellOrders1:   int64(getDepthValue(tick.Depth.Sell, 0, "orders")),
+		// DepthSellPrice2:    getDepthValue(tick.Depth.Sell, 1, "price"),
+		// DepthSellQuantity2: int64(getDepthValue(tick.Depth.Sell, 1, "quantity")),
+		// DepthSellOrders2:   int64(getDepthValue(tick.Depth.Sell, 1, "orders")),
+		// DepthSellPrice3:    getDepthValue(tick.Depth.Sell, 2, "price"),
+		// DepthSellQuantity3: int64(getDepthValue(tick.Depth.Sell, 2, "quantity")),
+		// DepthSellOrders3:   int64(getDepthValue(tick.Depth.Sell, 2, "orders")),
+		// DepthSellPrice4:    getDepthValue(tick.Depth.Sell, 3, "price"),
+		// DepthSellQuantity4: int64(getDepthValue(tick.Depth.Sell, 3, "quantity")),
+		// DepthSellOrders4:   int64(getDepthValue(tick.Depth.Sell, 3, "orders")),
+		// DepthSellPrice5:    getDepthValue(tick.Depth.Sell, 4, "price"),
+		// DepthSellQuantity5: int64(getDepthValue(tick.Depth.Sell, 4, "quantity")),
+		// DepthSellOrders5:   int64(getDepthValue(tick.Depth.Sell, 4, "orders")),
 		// Additional fields
 		LastTradeTime:      tick.LastTradeTime * 1000, // Convert to milliseconds
 		Oi:                 tick.Oi,
@@ -699,24 +682,24 @@ func (d *DuckDB) Close() error {
 }
 
 // Helper function to safely get depth values
-func getDepthValue(depth []*proto.TickData_DepthItem, index int, field string) float64 {
-	// Check for nil or out of bounds
-	if depth == nil || index >= len(depth) || depth[index] == nil {
-		return 0.0
-	}
+// func getDepthValue(depth []*proto.TickData_DepthItem, index int, field string) float64 {
+// 	// Check for nil or out of bounds
+// 	if depth == nil || index >= len(depth) || depth[index] == nil {
+// 		return 0.0
+// 	}
 
-	// Return appropriate field value
-	switch field {
-	case "price":
-		return depth[index].Price
-	case "quantity":
-		return float64(depth[index].Quantity)
-	case "orders":
-		return float64(depth[index].Orders)
-	default:
-		return 0.0
-	}
-}
+// 	// Return appropriate field value
+// 	switch field {
+// 	case "price":
+// 		return depth[index].Price
+// 	case "quantity":
+// 		return float64(depth[index].Quantity)
+// 	case "orders":
+// 		return float64(depth[index].Orders)
+// 	default:
+// 		return 0.0
+// 	}
+// }
 
 // Optional: Add a more detailed version with error handling
 func getDepthValueWithError(depth []*proto.TickData_DepthItem, index int, field string) (float64, error) {

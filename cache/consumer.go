@@ -90,11 +90,10 @@ func (w *Worker) processListItems(listKey string) error {
 		return fmt.Errorf("failed to unmarshal tick: %w", err)
 	}
 
-	// Get DuckDB instance
-	duckDB := db.GetDuckDB()
+	timescaleDB := db.GetTimescaleDB()
 
 	// Write to DuckDB
-	if err := duckDB.WriteTick(tick); err != nil {
+	if err := timescaleDB.WriteTick(tick); err != nil {
 		w.log.Error("Failed to write ticks to DuckDB", map[string]interface{}{
 			"error": err.Error(),
 		})

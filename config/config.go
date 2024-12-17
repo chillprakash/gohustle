@@ -11,12 +11,13 @@ import (
 )
 
 type Config struct {
-	Redis    RedisConfig    `json:"redis"`
-	Kite     KiteConfig     `json:"kite"`
-	Telegram TelegramConfig `json:"telegram"`
-	Indices  IndicesConfig  `json:"indices"`
-	Queue    QueueConfig    `json:"queue"`
-	DuckDB   DuckDBConfig   `json:"duckdb"`
+	Redis     RedisConfig     `json:"redis"`
+	Kite      KiteConfig      `json:"kite"`
+	Telegram  TelegramConfig  `json:"telegram"`
+	Indices   IndicesConfig   `json:"indices"`
+	Queue     QueueConfig     `json:"queue"`
+	DuckDB    DuckDBConfig    `json:"duckdb"`
+	Timescale TimescaleConfig `json:"timescale"`
 }
 
 type RedisConfig struct {

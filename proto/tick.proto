@@ -64,6 +64,7 @@ message TickData {
     string target_file = 26;  // The parquet file this tick should be written to
     int64 tick_recieved_time = 27;
     int64 tick_stored_in_db_time = 28;
+    string index_name = 29;
 }
 
 message BatchMetadata {

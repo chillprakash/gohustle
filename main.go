@@ -90,8 +90,7 @@ func main() {
 	}
 
 	// Combine both uint32 token lists for subscription
-	// allTokens := append(normalTokens, indexTokensUint32...)
-	allTokens := append(indexTokensUint32)
+	allTokens := append(normalTokens, indexTokensUint32...)
 
 	log.Info("Initializing tickers with tokens", map[string]interface{}{
 		"normal_tokens_count": len(normalTokens),

@@ -3,65 +3,14 @@ kind: ConfigMap
 metadata:
   name: gohustle-config
 data:
-  config.json: |
-    {
-      "timescale": {
-        "host": "dev-timescaledb",
-        "port": 5432,
-        "user": "postgres",
-        "password": "postgres",
-        "DBName": "hustledb",
-        "max_connections": 500,
-        "min_connections": 50,
-        "max_conn_lifetime": "1h",
-        "max_conn_idle_time": "30m"
-      },
-      "redis": {
-        "host": "dev-redis",
-        "port": "6379",
-        "password": "",
-        "max_connections": 600,
-        "min_connections": 50,
-        "connect_timeout": "5s",
-        "max_conn_lifetime": "30m",
-        "max_conn_idle_time": "5m"
-      },
-      "kite": {
-        "api_key": "mpztqt5n7hujwxhy",
-        "api_secret": "lokvoi4wl1dpyegm1j7g4svf46ckoell",
-        "user_id": "QUM025",
-        "user_password": "Test@1122",
-        "totp_key": "WGUKEQ5RS5TNUWHWCE65HZD6VGZACVF2",
-        "login_url": "https://kite.zerodha.com/api/login",
-        "twofa_url": "https://kite.zerodha.com/api/twofa",
-        "data_path": "/app/data",
-        "tick_workers": 700
-      },
-      "asynq": {
-        "host": "dev-redis",
-        "port": "6379",
-        "password": "",
-        "db": 0,
-        "concurrency": 5000,
-        "retry_limit": 3,
-        "max_connections": 1000,
-        "queues": {
-          "ticks_file": 100,
-          "ticks_timescale": 100
-        }
-      },
-      "indices": {
-        "derived_indices": [
-          "NIFTY",
-          "SENSEX"
-        ],
-        "spot_indices": [
-          "NIFTY",
-          "SENSEX",
-          "BANKEX",
-          "BANKNIFTY",
-          "MIDCPNIFTY",
-          "FINNIFTY"
-        ]
-      }
-    } 
+  config.yaml: |
+    redis:
+      host: "redis-service"
+      port: 6379
+      password: ""
+      max_conns: 600
+      min_idle_conns: 50
+    kite:
+      api_key: "your_api_key"
+      api_secret: "your_api_secret"
+      max_connections: 3

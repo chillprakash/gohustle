@@ -14,6 +14,7 @@ import (
 	"github.com/xitongsys/parquet-go-source/local"
 	"github.com/xitongsys/parquet-go/parquet"
 	"github.com/xitongsys/parquet-go/reader"
+	"github.com/xitongsys/parquet-go/source"
 	"github.com/xitongsys/parquet-go/writer"
 )
 
@@ -76,7 +77,7 @@ func (p *WriterPool) runWorker(w *WriterWorker) {
 			// Periodic flush
 			for targetFile := range w.buffer {
 				if len(w.buffer[targetFile]) > 0 {
-					w.log.Info("Periodic flush triggered", map[string]interface{}{
+					w.log.Error("Periodic flush triggered", map[string]interface{}{
 						"worker_id":   w.id,
 						"target_file": targetFile,
 						"buffer_size": len(w.buffer[targetFile]),
@@ -100,7 +101,7 @@ func (w *WriterWorker) processRequest(req *WriteRequest) {
 	// Add single tick to appropriate buffer
 	w.buffer[req.TargetFile] = append(w.buffer[req.TargetFile], req.Tick)
 
-	w.log.Debug("Added tick to buffer", map[string]interface{}{
+	w.log.Error("Added tick to buffer", map[string]interface{}{
 		"worker_id":    w.id,
 		"target_file":  req.TargetFile,
 		"buffer_size":  len(w.buffer[req.TargetFile]),
@@ -333,7 +334,86 @@ type TickParquetSchema struct {
 	TargetFile          string  `parquet:"name=target_file, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=REQUIRED"`
 }
 
-// Helper function to write ticks to parquet file
+// ensureParquetFile checks if file exists, creates if not, and returns a writer
+func ensureParquetFile(filePath string) (source.ParquetFile, error) {
+	log := logger.GetLogger()
+
+	// Check if directory exists, create if not
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Error("Failed to create directory", map[string]interface{}{
+			"error": err.Error(),
+			"dir":   dir,
+		})
+		return nil, fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Check if file exists
+	_, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Info("Creating new parquet file", map[string]interface{}{
+				"file_path": filePath,
+			})
+
+			// Create new file
+			fw, err := local.NewLocalFileWriter(filePath)
+			if err != nil {
+				log.Error("Failed to create new file", map[string]interface{}{
+					"error":     err.Error(),
+					"file_path": filePath,
+				})
+				return nil, fmt.Errorf("failed to create new file: %w", err)
+			}
+
+			// Initialize with schema
+			pw, err := writer.NewParquetWriter(fw, new(TickParquetSchema), 4)
+			if err != nil {
+				fw.Close()
+				log.Error("Failed to initialize parquet schema", map[string]interface{}{
+					"error":     err.Error(),
+					"file_path": filePath,
+				})
+				return nil, fmt.Errorf("failed to initialize parquet schema: %w", err)
+			}
+
+			// Write empty file with schema
+			if err := pw.WriteStop(); err != nil {
+				fw.Close()
+				log.Error("Failed to write initial schema", map[string]interface{}{
+					"error":     err.Error(),
+					"file_path": filePath,
+				})
+				return nil, fmt.Errorf("failed to write initial schema: %w", err)
+			}
+
+			fw.Close()
+			log.Info("Successfully created parquet file", map[string]interface{}{
+				"file_path": filePath,
+			})
+		} else {
+			log.Error("Failed to check file existence", map[string]interface{}{
+				"error":     err.Error(),
+				"file_path": filePath,
+			})
+			return nil, fmt.Errorf("failed to check file existence: %w", err)
+		}
+	}
+
+	// Open file for writing
+	fw, err := local.NewLocalFileWriter(filePath)
+	if err != nil {
+		log.Error("Failed to open file for writing", map[string]interface{}{
+			"error":     err.Error(),
+			"file_path": filePath,
+		})
+		return nil, fmt.Errorf("failed to open file for writing: %w", err)
+	}
+
+	return fw, nil
+}
+
+// Update writeTicksToParquet to use the new method
 func writeTicksToParquet(filePath string, ticks []*proto.TickData) error {
 	log := logger.GetLogger()
 
@@ -342,24 +422,56 @@ func writeTicksToParquet(filePath string, ticks []*proto.TickData) error {
 		"ticks_count": len(ticks),
 	})
 
-	// Create new file
-	fw, err := local.NewLocalFileWriter(filePath)
-	if err != nil {
-		log.Error("Failed to create file writer", map[string]interface{}{
-			"error":     err.Error(),
+	var existingTicks []*TickParquetSchema
+
+	// Read existing data if file exists
+	if _, err := os.Stat(filePath); err == nil {
+		log.Info("Reading existing parquet file", map[string]interface{}{
 			"file_path": filePath,
 		})
+
+		fr, err := local.NewLocalFileReader(filePath)
+		if err == nil {
+			defer fr.Close()
+
+			// Create schema pointer
+			schemaPtr := new(TickParquetSchema)
+			pr, err := reader.NewParquetReader(fr, schemaPtr, 4) // Pass schema pointer
+			if err == nil {
+				defer pr.ReadStop()
+
+				numRows := int(pr.GetNumRows())
+				existingTicks = make([]*TickParquetSchema, 0, numRows)
+
+				for i := 0; i < numRows; i++ {
+					row := new(TickParquetSchema) // Create new pointer for each row
+					if err := pr.Read(row); err == nil {
+						existingTicks = append(existingTicks, row)
+					}
+				}
+
+				log.Info("Read existing data", map[string]interface{}{
+					"existing_rows": len(existingTicks),
+				})
+			} else {
+				log.Error("Failed to create parquet reader", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
+		}
+	}
+
+	// Create new file for writing
+	fw, err := local.NewLocalFileWriter(filePath)
+	if err != nil {
 		return fmt.Errorf("failed to create file writer: %w", err)
 	}
 	defer fw.Close()
 
-	// Create parquet writer
-	pw, err := writer.NewParquetWriter(fw, new(TickParquetSchema), 4)
+	// Create schema pointer for writer
+	schemaPtr := new(TickParquetSchema)
+	pw, err := writer.NewParquetWriter(fw, schemaPtr, 4) // Pass schema pointer
 	if err != nil {
-		log.Error("Failed to create parquet writer", map[string]interface{}{
-			"error":     err.Error(),
-			"file_path": filePath,
-		})
 		return fmt.Errorf("failed to create parquet writer: %w", err)
 	}
 	defer pw.WriteStop()
@@ -368,7 +480,19 @@ func writeTicksToParquet(filePath string, ticks []*proto.TickData) error {
 	pw.RowGroupSize = 128 * 1024 * 1024
 	pw.CompressionType = parquet.CompressionCodec_SNAPPY
 
-	// Write ticks
+	// Write existing data first
+	for i, tick := range existingTicks {
+		if err := pw.Write(tick); err != nil {
+			log.Error("Failed to write existing tick", map[string]interface{}{
+				"error":     err.Error(),
+				"row":       i,
+				"file_path": filePath,
+			})
+			return fmt.Errorf("failed to write existing tick: %w", err)
+		}
+	}
+
+	// Write new ticks
 	for i, tick := range ticks {
 		row := convertTickToParquet(tick)
 		if row == nil {
@@ -379,14 +503,21 @@ func writeTicksToParquet(filePath string, ticks []*proto.TickData) error {
 		}
 
 		if err := pw.Write(row); err != nil {
-			log.Error("Failed to write tick", map[string]interface{}{
-				"error":      err.Error(),
-				"file_path":  filePath,
-				"tick_index": i,
+			log.Error("Failed to write new tick", map[string]interface{}{
+				"error":     err.Error(),
+				"row":       i,
+				"file_path": filePath,
 			})
-			return fmt.Errorf("failed to write tick: %w", err)
+			return fmt.Errorf("failed to write new tick: %w", err)
 		}
 	}
+
+	log.Info("Successfully wrote parquet file", map[string]interface{}{
+		"file_path":     filePath,
+		"existing_rows": len(existingTicks),
+		"new_rows":      len(ticks),
+		"total_rows":    len(existingTicks) + len(ticks),
+	})
 
 	return nil
 }
@@ -521,13 +652,19 @@ func convertTickToParquet(tick *proto.TickData) *TickParquetSchema {
 		TotalSell:          int64(tick.TotalSell),
 		AverageTradePrice:  tick.AverageTradePrice,
 
-		// OHLC
+		// OI related
+		Oi:        int64(tick.Oi),
+		OiDayHigh: int64(tick.OiDayHigh),
+		OiDayLow:  int64(tick.OiDayLow),
+		NetChange: tick.NetChange,
+
+		// OHLC data
 		OhlcOpen:  tick.Ohlc.Open,
 		OhlcHigh:  tick.Ohlc.High,
 		OhlcLow:   tick.Ohlc.Low,
 		OhlcClose: tick.Ohlc.Close,
 
-		// Buy Depth
+		// Market depth - Buy
 		DepthBuyPrice1:  getDepthItem(tick.Depth.Buy, 0).Price,
 		DepthBuyQty1:    int64(getDepthItem(tick.Depth.Buy, 0).Quantity),
 		DepthBuyOrders1: int64(getDepthItem(tick.Depth.Buy, 0).Orders),
@@ -536,7 +673,38 @@ func convertTickToParquet(tick *proto.TickData) *TickParquetSchema {
 		DepthBuyQty2:    int64(getDepthItem(tick.Depth.Buy, 1).Quantity),
 		DepthBuyOrders2: int64(getDepthItem(tick.Depth.Buy, 1).Orders),
 
-		// ... repeat for all depth levels ...
+		DepthBuyPrice3:  getDepthItem(tick.Depth.Buy, 2).Price,
+		DepthBuyQty3:    int64(getDepthItem(tick.Depth.Buy, 2).Quantity),
+		DepthBuyOrders3: int64(getDepthItem(tick.Depth.Buy, 2).Orders),
+
+		DepthBuyPrice4:  getDepthItem(tick.Depth.Buy, 3).Price,
+		DepthBuyQty4:    int64(getDepthItem(tick.Depth.Buy, 3).Quantity),
+		DepthBuyOrders4: int64(getDepthItem(tick.Depth.Buy, 3).Orders),
+
+		DepthBuyPrice5:  getDepthItem(tick.Depth.Buy, 4).Price,
+		DepthBuyQty5:    int64(getDepthItem(tick.Depth.Buy, 4).Quantity),
+		DepthBuyOrders5: int64(getDepthItem(tick.Depth.Buy, 4).Orders),
+
+		// Market depth - Sell
+		DepthSellPrice1:  getDepthItem(tick.Depth.Sell, 0).Price,
+		DepthSellQty1:    int64(getDepthItem(tick.Depth.Sell, 0).Quantity),
+		DepthSellOrders1: int64(getDepthItem(tick.Depth.Sell, 0).Orders),
+
+		DepthSellPrice2:  getDepthItem(tick.Depth.Sell, 1).Price,
+		DepthSellQty2:    int64(getDepthItem(tick.Depth.Sell, 1).Quantity),
+		DepthSellOrders2: int64(getDepthItem(tick.Depth.Sell, 1).Orders),
+
+		DepthSellPrice3:  getDepthItem(tick.Depth.Sell, 2).Price,
+		DepthSellQty3:    int64(getDepthItem(tick.Depth.Sell, 2).Quantity),
+		DepthSellOrders3: int64(getDepthItem(tick.Depth.Sell, 2).Orders),
+
+		DepthSellPrice4:  getDepthItem(tick.Depth.Sell, 3).Price,
+		DepthSellQty4:    int64(getDepthItem(tick.Depth.Sell, 3).Quantity),
+		DepthSellOrders4: int64(getDepthItem(tick.Depth.Sell, 3).Orders),
+
+		DepthSellPrice5:  getDepthItem(tick.Depth.Sell, 4).Price,
+		DepthSellQty5:    int64(getDepthItem(tick.Depth.Sell, 4).Quantity),
+		DepthSellOrders5: int64(getDepthItem(tick.Depth.Sell, 4).Orders),
 
 		// Additional metadata
 		ChangePercent:       tick.ChangePercent,
@@ -548,6 +716,24 @@ func convertTickToParquet(tick *proto.TickData) *TickParquetSchema {
 	}
 
 	return row
+}
+
+// Helper function to safely get depth values
+func getDepthValue(depth []*proto.TickData_DepthItem, index int, field string) float64 {
+	if depth == nil || index >= len(depth) || depth[index] == nil {
+		return 0.0
+	}
+
+	switch field {
+	case "price":
+		return depth[index].Price
+	case "quantity":
+		return float64(depth[index].Quantity)
+	case "orders":
+		return float64(depth[index].Orders)
+	default:
+		return 0.0
+	}
 }
 
 // ... rest of the implementation (getOrCreateWriter, Flush methods etc.)

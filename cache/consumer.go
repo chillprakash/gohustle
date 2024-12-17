@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gohustle/config"
+	"gohustle/db"
 	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/proto"
@@ -15,34 +16,25 @@ import (
 	googleproto "google.golang.org/protobuf/proto"
 )
 
-const (
-	defaultBatchSize = 1000
-	defaultTimeout   = 1 * time.Second
-	maxRetries       = 3
-)
-
 type Consumer struct {
 	numLists         int
 	primaryWorkers   []*Worker
 	secondaryWorkers []*Worker
-	redisCache       *RedisCache
 	log              *logger.Logger
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup
-	writerPool       *filestore.WriterPool
+	redisCache       *RedisCache
 }
 
 type Worker struct {
 	id           int
 	isPrimary    bool
 	assignedList int // -1 for secondary workers
-	redisCache   *RedisCache
 	log          *logger.Logger
 	ctx          context.Context
 	batchSize    int
-	metrics      *WorkerMetrics
-	writerPool   *filestore.WriterPool
+	redisCache   *RedisCache
 }
 
 type WorkerMetrics struct {
@@ -55,70 +47,25 @@ type WorkerMetrics struct {
 
 func NewConsumer(writerPool *filestore.WriterPool) *Consumer {
 	cfg := config.GetConfig()
-	redisCache, _ := NewRedisCache()
+	log := logger.GetLogger()
 	ctx, cancel := context.WithCancel(context.Background())
+	redisCache, err := NewRedisCache()
+	if err != nil {
+		log.Error("Failed to create Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil
+	}
 
 	return &Consumer{
 		numLists:         cfg.Queue.PrimaryWorkers,
 		primaryWorkers:   make([]*Worker, cfg.Queue.PrimaryWorkers),
 		secondaryWorkers: make([]*Worker, cfg.Queue.SecondaryWorkers),
-		redisCache:       redisCache,
 		log:              logger.GetLogger(),
 		ctx:              ctx,
 		cancel:           cancel,
-		writerPool:       writerPool,
+		redisCache:       redisCache,
 	}
-}
-
-func (w *Worker) processBatch(ticks []*proto.TickData) error {
-	if len(ticks) == 0 {
-		return nil
-	}
-
-	// Group ticks by target file
-	fileGroups := make(map[string][]*proto.TickData)
-	for _, tick := range ticks {
-		fileGroups[tick.TargetFile] = append(fileGroups[tick.TargetFile], tick)
-	}
-
-	// Process each file group
-	for targetFile, fileTicks := range fileGroups {
-		if err := w.writeTicksToFile(targetFile, fileTicks); err != nil {
-			w.metrics.mu.Lock()
-			w.metrics.FailedTicks += uint64(len(fileTicks))
-			w.metrics.mu.Unlock()
-
-			w.log.Error("Failed to write ticks to file", map[string]interface{}{
-				"error":       err.Error(),
-				"target_file": targetFile,
-				"tick_count":  len(fileTicks),
-			})
-			continue // Continue with next file group instead of returning error
-		}
-	}
-
-	return nil
-}
-
-func (w *Worker) writeTicksToFile(targetFile string, ticks []*proto.TickData) error {
-	// Create write request for each tick
-	for _, tick := range ticks {
-		req := &filestore.WriteRequest{
-			TargetFile: targetFile,
-			Tick:       tick,
-			ResultChan: make(chan error, 1),
-		}
-
-		if err := w.writerPool.Write(req); err != nil {
-			return fmt.Errorf("failed to queue write request: %w", err)
-		}
-
-		// Wait for result
-		if err := <-req.ResultChan; err != nil {
-			return fmt.Errorf("failed to write tick: %w", err)
-		}
-	}
-	return nil
 }
 
 func (w *Worker) processListItems(listKey string) error {
@@ -127,13 +74,10 @@ func (w *Worker) processListItems(listKey string) error {
 		"list_key":   listKey,
 		"is_primary": w.isPrimary,
 	})
-
+	defaultTimeout := 1 * time.Second
 	// Try to get batch of items from Redis list
 	result, err := w.redisCache.GetListDB2().BRPop(w.ctx, defaultTimeout, listKey).Result()
 	if err != nil {
-		if err == redis.Nil {
-			return nil
-		}
 		return fmt.Errorf("failed to pop items: %w", err)
 	}
 
@@ -144,49 +88,23 @@ func (w *Worker) processListItems(listKey string) error {
 	// Process the item
 	tick := &proto.TickData{}
 	if err := googleproto.Unmarshal([]byte(result[1]), tick); err != nil {
-		w.metrics.mu.Lock()
-		w.metrics.FailedTicks++
-		w.metrics.mu.Unlock()
 		return fmt.Errorf("failed to unmarshal tick: %w", err)
 	}
 
-	// Create write request
-	req := &filestore.WriteRequest{
-		TargetFile: tick.TargetFile,
-		Tick:       tick,
-		ResultChan: make(chan error, 1),
-	}
+	// Get DuckDB instance
+	duckDB := db.GetDuckDB()
 
-	// Send to writer pool
-	if err := w.writerPool.Write(req); err != nil {
-		w.log.Error("Failed to write tick", map[string]interface{}{
-			"error":       err.Error(),
-			"worker_id":   w.id,
-			"target_file": tick.TargetFile,
+	// Write to DuckDB
+	if err := duckDB.WriteTick(tick); err != nil {
+		w.log.Error("Failed to write ticks to DuckDB", map[string]interface{}{
+			"error": err.Error(),
 		})
-		return err
-	}
-
-	// Wait for write confirmation
-	if err := <-req.ResultChan; err != nil {
-		w.log.Error("Write failed", map[string]interface{}{
-			"error":       err.Error(),
-			"worker_id":   w.id,
-			"target_file": tick.TargetFile,
+		// Note: Not returning error here to continue with other operations
+	} else {
+		w.log.Info("Successfully wrote ticks to DuckDB", map[string]interface{}{
+			"ticks_count": 1,
 		})
-		return err
 	}
-
-	w.metrics.mu.Lock()
-	w.metrics.ProcessedTicks++
-	w.metrics.LastProcessed = time.Now()
-	w.metrics.mu.Unlock()
-
-	w.log.Info("Processed and wrote tick", map[string]interface{}{
-		"worker_id":   w.id,
-		"list_key":    listKey,
-		"target_file": tick.TargetFile,
-	})
 
 	return nil
 }
@@ -194,6 +112,7 @@ func (w *Worker) processListItems(listKey string) error {
 func (c *Consumer) runPrimaryWorker(w *Worker) {
 	defer c.wg.Done()
 	cfg := config.GetConfig()
+
 	listKey := fmt.Sprintf("%s%d", cfg.Queue.ListPrefix, w.assignedList)
 
 	for {
@@ -275,19 +194,17 @@ func (c *Consumer) Start() {
 		"primary_workers":   c.numLists,
 		"secondary_workers": len(c.secondaryWorkers),
 	})
-
+	defaultBatchSize := 1000
 	// Start primary workers
 	for i := 0; i < c.numLists; i++ {
 		worker := &Worker{
 			id:           i,
 			isPrimary:    true,
 			assignedList: i,
-			redisCache:   c.redisCache,
 			log:          c.log,
 			ctx:          c.ctx,
 			batchSize:    defaultBatchSize,
-			metrics:      &WorkerMetrics{},
-			writerPool:   c.writerPool,
+			redisCache:   c.redisCache,
 		}
 		c.primaryWorkers[i] = worker
 		c.wg.Add(1)
@@ -304,12 +221,10 @@ func (c *Consumer) Start() {
 			id:           i + c.numLists,
 			isPrimary:    false,
 			assignedList: -1,
-			redisCache:   c.redisCache,
 			log:          c.log,
 			ctx:          c.ctx,
 			batchSize:    defaultBatchSize,
-			metrics:      &WorkerMetrics{},
-			writerPool:   c.writerPool,
+			redisCache:   c.redisCache,
 		}
 		c.secondaryWorkers[i] = worker
 		c.wg.Add(1)
@@ -331,22 +246,14 @@ func (c *Consumer) Stop() {
 	// Log metrics before stopping
 	for _, w := range c.primaryWorkers {
 		c.log.Info("Primary worker metrics", map[string]interface{}{
-			"worker_id":       w.id,
-			"processed_ticks": w.metrics.ProcessedTicks,
-			"failed_ticks":    w.metrics.FailedTicks,
-			"batches_written": w.metrics.BatchesWritten,
-			"last_processed":  w.metrics.LastProcessed,
-			"assigned_list":   w.assignedList,
+			"worker_id":     w.id,
+			"assigned_list": w.assignedList,
 		})
 	}
 
 	for _, w := range c.secondaryWorkers {
 		c.log.Info("Secondary worker metrics", map[string]interface{}{
-			"worker_id":       w.id,
-			"processed_ticks": w.metrics.ProcessedTicks,
-			"failed_ticks":    w.metrics.FailedTicks,
-			"batches_written": w.metrics.BatchesWritten,
-			"last_processed":  w.metrics.LastProcessed,
+			"worker_id": w.id,
 		})
 	}
 

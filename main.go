@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -41,7 +42,7 @@ func main() {
 	defer writerPool.Stop()
 
 	// Initialize KiteConnect with writer pool
-	kiteConnect := zerodha.NewKiteConnect(true)
+	kiteConnect := zerodha.GetKiteConnect()
 	if kiteConnect == nil {
 		log.Fatal("Failed to initialize KiteConnect", nil)
 		return
@@ -75,23 +76,35 @@ func main() {
 		indexTokenSlice = append(indexTokenSlice, token)
 	}
 
-	// Combine both token lists for subscription
-	allTokens := append(tokens, indexTokenSlice...)
-
-	// Wait a bit for tickers to be fully connected
-	time.Sleep(2 * time.Second)
-
-	// Now subscribe to tokens
-	if err := kiteConnect.Subscribe(allTokens); err != nil {
-		log.Error("Failed to subscribe to tokens", map[string]interface{}{
-			"error": err.Error(),
+	// Convert both token slices to uint32
+	normalTokens, err := convertTokensToUint32(tokens)
+	if err != nil {
+		log.Error("Failed to convert normal tokens", map[string]interface{}{
+			"error":  err.Error(),
+			"tokens": tokens,
 		})
 		return
 	}
 
-	log.Info("Successfully subscribed to tokens", map[string]interface{}{
-		"total_tokens": len(allTokens),
+	indexTokensUint32, err := convertTokensToUint32(indexTokenSlice)
+	if err != nil {
+		log.Error("Failed to convert index tokens", map[string]interface{}{
+			"error":  err.Error(),
+			"tokens": indexTokenSlice,
+		})
+		return
+	}
+
+	// Combine both uint32 token lists for subscription
+	allTokens := append(normalTokens, indexTokensUint32...)
+
+	log.Info("Initializing tickers with tokens", map[string]interface{}{
+		"normal_tokens_count": len(normalTokens),
+		"index_tokens_count":  len(indexTokensUint32),
+		"total_tokens":        len(allTokens),
 	})
+
+	kiteConnect.InitializeTickersWithTokens(allTokens)
 
 	// // Initialize and start scheduler
 	// sched := scheduler.NewScheduler()
@@ -140,4 +153,19 @@ func main() {
 
 	// Force exit after logging
 	os.Exit(0)
+}
+
+// Helper function to convert string tokens to uint32
+func convertTokensToUint32(tokens []string) ([]uint32, error) {
+	result := make([]uint32, 0, len(tokens))
+
+	for _, token := range tokens {
+		val, err := strconv.ParseUint(token, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid token %s: %w", token, err)
+		}
+		result = append(result, uint32(val))
+	}
+
+	return result, nil
 }

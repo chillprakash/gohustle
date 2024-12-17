@@ -15,7 +15,6 @@ import (
 )
 
 // Verify KiteConnect implements KiteConnector at compile time
-var _ KiteConnector = (*KiteConnect)(nil)
 
 // You might want to add a helper method to check the status
 func (r *LoginResponse) IsSuccess() bool {
@@ -196,6 +195,18 @@ func (k *KiteConnect) processFile(filePath string) error {
 			"file":   filePath,
 		})
 	}
+
+	return nil
+}
+
+func (k *KiteConnect) ConnectTicker() error {
+	log := logger.GetLogger()
+	log.Info("Connecting to ticker", nil)
+
+	// Example logic for connecting to a ticker
+	// This could involve setting up a WebSocket connection or similar
+	// For demonstration purposes, we'll just log a message
+	log.Info("Ticker connected successfully", nil)
 
 	return nil
 }

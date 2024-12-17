@@ -3,6 +3,7 @@ kind: Deployment
 metadata:
   name: gohustle
 spec:
+  replicas: 1
   selector:
     matchLabels:
       app: gohustle
@@ -15,19 +16,10 @@ spec:
       - name: gohustle
         image: gohustle:latest
         imagePullPolicy: Never
-        ports:
-        - containerPort: 8080
         volumeMounts:
         - name: config-volume
           mountPath: /app/config
-        - name: data-volume
-          mountPath: /app/data
       volumes:
       - name: config-volume
         configMap:
           name: gohustle-config
-          items:
-          - key: config.json
-            path: config.json
-      - name: data-volume
-        emptyDir: {}

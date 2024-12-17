@@ -3,8 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+
+	"gohustle/filestore"
+
+	"github.com/xitongsys/parquet-go-source/local"
+	"github.com/xitongsys/parquet-go/reader"
 )
 
 func main() {
@@ -32,35 +36,54 @@ func main() {
 }
 
 func analyzeParquetFile(filePath string) {
-	// Get file info
-	fileInfo, err := os.Stat(filePath)
+	// Open parquet file
+	fr, err := local.NewLocalFileReader(filePath)
 	if err != nil {
-		fmt.Printf("Error getting file info: %v\n", err)
+		fmt.Printf("Error opening file: %v\n", err)
 		return
 	}
+	defer fr.Close()
 
-	fmt.Printf("\nFile Statistics:")
-	fmt.Printf("\nFile Size: %.2f MB", float64(fileInfo.Size())/1024/1024)
-
-	// Try using parquet-tools to inspect the file
-	cmd := exec.Command("parquet-tools", "schema", filePath)
-	output, err := cmd.CombinedOutput()
+	// Create parquet reader using the same schema as writer
+	pr, err := reader.NewParquetReader(fr, new(filestore.TickParquetSchema), 4)
 	if err != nil {
-		fmt.Printf("\nError reading schema with parquet-tools: %v\n", err)
-		fmt.Printf("Output: %s\n", string(output))
-	} else {
-		fmt.Printf("\n\nSchema from parquet-tools:\n%s", string(output))
+		fmt.Printf("Error creating parquet reader: %v\n", err)
+		return
+	}
+	defer pr.ReadStop()
+
+	// Print basic file info
+	fmt.Printf("\nFile Info:")
+	fmt.Printf("\nNum Rows: %d", pr.GetNumRows())
+
+	// Print schema info
+	fmt.Printf("\n\nSchema Info:")
+	fmt.Printf("\nNum Columns: %d", len(pr.SchemaHandler.SchemaElements))
+
+	// Read first row if available
+	if pr.GetNumRows() > 0 {
+		tick := new(filestore.TickParquetSchema)
+		if err := pr.Read(tick); err != nil {
+			fmt.Printf("\nError reading first row: %v", err)
+			return
+		}
+
+		fmt.Printf("\n\nSample Data:")
+		fmt.Printf("\nInstrument Token: %d", tick.InstrumentToken)
+		fmt.Printf("\nLast Price: %.2f", tick.LastPrice)
+		fmt.Printf("\nTimestamp: %d", tick.Timestamp)
+		fmt.Printf("\nIs Index: %v", tick.IsIndex)
+		fmt.Printf("\nMode: %s", tick.Mode)
 	}
 
-	// Try reading first few rows
-	cmd = exec.Command("parquet-tools", "head", "-n", "1", filePath)
-	output, err = cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("\nError reading data with parquet-tools: %v\n", err)
-		fmt.Printf("Output: %s\n", string(output))
-	} else {
-		fmt.Printf("\n\nSample Data:\n%s", string(output))
+	// Print file stats
+	fileInfo, err := os.Stat(filePath)
+	if err == nil {
+		fmt.Printf("\n\nFile Statistics:")
+		fmt.Printf("\nFile Size: %.2f MB", float64(fileInfo.Size())/1024/1024)
+		if pr.GetNumRows() > 0 {
+			fmt.Printf("\nAverage Row Size: %.2f bytes", float64(fileInfo.Size())/float64(pr.GetNumRows()))
+		}
 	}
-
 	fmt.Printf("\n")
 }

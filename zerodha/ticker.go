@@ -2,7 +2,6 @@ package zerodha
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -16,159 +15,104 @@ import (
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
 )
 
-func (k *KiteConnect) ConnectTicker() error {
+func (k *KiteConnect) ConnectTickers() error {
 	log := logger.GetLogger()
 	cfg := config.GetConfig()
 
-	// Get valid token first
-	token, err := k.GetValidToken(context.Background())
-	if err != nil {
-		return fmt.Errorf("failed to get valid token: %w", err)
+	if len(k.tokens) == 0 {
+		return fmt.Errorf("no tokens provided for subscription")
 	}
 
-	// Channel to track connection status
-	connectedChan := make(chan bool, len(k.Tickers))
-	errorChan := make(chan error, len(k.Tickers))
+	// Calculate tokens per connection
+	tokensPerConnection := (len(k.tokens) + MaxConnections - 1) / MaxConnections
 
-	// Initialize tickers with token
-	for i := range k.Tickers {
-		// Create new ticker instance
-		k.Tickers[i] = kiteticker.New(cfg.Kite.APIKey, token)
-		if k.Tickers[i] == nil {
-			log.Error("Ticker not initialized", map[string]interface{}{
-				"connection": i + 1,
-			})
-			return fmt.Errorf("ticker not initialized")
-		}
-
-		// Create closure to capture connection ID
-		connectionID := i
-
-		// Set up callbacks for each ticker
-		k.Tickers[i].OnError(k.onError)
-		k.Tickers[i].OnClose(k.onClose)
-		k.Tickers[i].OnConnect(func() {
-			log.Info("Ticker connected", map[string]interface{}{
-				"connection": connectionID + 1,
-			})
-			connectedChan <- true
-		})
-		k.Tickers[i].OnReconnect(k.onReconnect)
-		k.Tickers[i].OnNoReconnect(k.onNoReconnect)
-		k.Tickers[i].OnTick(func(tick models.Tick) {
-			k.handleTick(tick, connectionID)
-		})
-
-		log.Info("Setting up ticker callbacks", map[string]interface{}{
-			"connection": i + 1,
-			"api_key":    cfg.Kite.APIKey,
-			"token":      token,
-		})
-
-		// Start each connection in a goroutine
-		go func(ticker *kiteticker.Ticker, connID int) {
-			log.Info("Starting ticker connection", map[string]interface{}{
-				"connection": connID + 1,
-			})
-			ticker.Serve()
-		}(k.Tickers[i], i)
-	}
-
-	// Wait for all tickers to connect or timeout
-	timeout := time.After(10 * time.Second)
-	connectedCount := 0
-	expectedConnections := len(k.Tickers)
-
-	for connectedCount < expectedConnections {
-		select {
-		case <-connectedChan:
-			connectedCount++
-			log.Info("Ticker connection established", map[string]interface{}{
-				"connected": connectedCount,
-				"total":     expectedConnections,
-				"remaining": expectedConnections - connectedCount,
-			})
-
-		case err := <-errorChan:
-			log.Error("Ticker connection failed", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return err
-
-		case <-timeout:
-			return fmt.Errorf("timeout waiting for ticker connections, only %d/%d connected",
-				connectedCount, expectedConnections)
-		}
-	}
-
-	log.Info("All tickers connected successfully", map[string]interface{}{
-		"connections": len(k.Tickers),
+	log.Info("Starting ticker connections", map[string]interface{}{
+		"total_tokens":          len(k.tokens),
+		"max_connections":       MaxConnections,
+		"tokens_per_connection": tokensPerConnection,
 	})
 
-	return nil
-}
-
-func (k *KiteConnect) Subscribe(tokens []string) error {
-	log := logger.GetLogger()
-
-	// Convert all tokens to uint32
-	uint32Tokens := make([]uint32, 0, len(tokens))
-	for _, token := range tokens {
-		if tokenInt, err := strconv.ParseUint(token, 10, 32); err == nil {
-			uint32Tokens = append(uint32Tokens, uint32(tokenInt))
-		}
-	}
-
-	// Distribute tokens across connections
-	tokensPerConnection := (len(uint32Tokens) + len(k.Tickers) - 1) / len(k.Tickers)
-	if tokensPerConnection > MaxTokensPerConnection {
-		log.Error("Too many tokens to subscribe", map[string]interface{}{
-			"tokens":       len(uint32Tokens),
-			"max_per_conn": MaxTokensPerConnection,
-			"connections":  len(k.Tickers),
-		})
-		return errors.New("too many tokens to subscribe")
-	}
-
-	for i, ticker := range k.Tickers {
-		start := i * tokensPerConnection
-		if start >= len(uint32Tokens) {
+	// Create and connect tickers
+	for i := 0; i < MaxConnections; i++ {
+		// Calculate token range for this connection
+		startIdx := i * tokensPerConnection
+		if startIdx >= len(k.tokens) {
 			break
 		}
 
-		end := start + tokensPerConnection
-		if end > len(uint32Tokens) {
-			end = len(uint32Tokens)
+		endIdx := startIdx + tokensPerConnection
+		if endIdx > len(k.tokens) {
+			endIdx = len(k.tokens)
 		}
 
-		connectionTokens := uint32Tokens[start:end]
+		connectionTokens := k.tokens[startIdx:endIdx]
 
-		log.Info("Subscribing tokens to connection", map[string]interface{}{
+		log.Info("Creating ticker connection", map[string]interface{}{
 			"connection":   i + 1,
 			"tokens_count": len(connectionTokens),
+			"start_token":  connectionTokens[0],
+			"end_token":    connectionTokens[len(connectionTokens)-1],
 		})
 
-		if err := ticker.Subscribe(connectionTokens); err != nil {
-			log.Error("Failed to subscribe on connection", map[string]interface{}{
-				"connection": i + 1,
-				"error":      err.Error(),
-			})
-			return err
-		}
+		// Create new ticker
+		ticker := kiteticker.New(cfg.Kite.APIKey, k.accessToken)
+		k.Tickers[i] = ticker
 
-		if err := ticker.SetMode(kiteticker.ModeFull, connectionTokens); err != nil {
-			log.Error("Failed to set mode on connection", map[string]interface{}{
-				"connection": i + 1,
-				"error":      err.Error(),
+		// Set callbacks
+		ticker.OnConnect(func(connectionID int, tokens []uint32) func() {
+			return func() {
+				log.Info("Ticker connected, subscribing tokens", map[string]interface{}{
+					"connection":   connectionID + 1,
+					"tokens_count": len(tokens),
+				})
+
+				// Subscribe tokens
+				if err := ticker.Subscribe(tokens); err != nil {
+					log.Error("Failed to subscribe tokens", map[string]interface{}{
+						"connection": connectionID + 1,
+						"error":      err.Error(),
+					})
+					return
+				}
+
+				// Set mode to full
+				if err := ticker.SetMode(kiteticker.ModeFull, tokens); err != nil {
+					log.Error("Failed to set mode", map[string]interface{}{
+						"connection": connectionID + 1,
+						"error":      err.Error(),
+					})
+					return
+				}
+
+				log.Info("Successfully subscribed tokens", map[string]interface{}{
+					"connection":   connectionID + 1,
+					"tokens_count": len(tokens),
+				})
+			}
+		}(i, connectionTokens))
+
+		// Set other callbacks...
+		ticker.OnError(k.onError)
+		ticker.OnClose(k.onClose)
+		ticker.OnReconnect(k.onReconnect)
+		ticker.OnNoReconnect(k.onNoReconnect)
+		ticker.OnTick(k.handleTick)
+		// ticker.OnOrderUpdate(k.handleOrder)
+
+		// Connect in goroutine
+		go func(connectionID int) {
+			log.Info("Starting ticker service", map[string]interface{}{
+				"connection": connectionID + 1,
 			})
-			return err
-		}
+
+			// Serve the ticker
+			ticker.Serve()
+
+			log.Info("Ticker service started", map[string]interface{}{
+				"connection": connectionID + 1,
+			})
+		}(i)
 	}
-
-	log.Info("Successfully subscribed all tokens", map[string]interface{}{
-		"total_tokens": len(uint32Tokens),
-		"connections":  len(k.Tickers),
-	})
 
 	return nil
 }
@@ -189,7 +133,7 @@ func (k *KiteConnect) CloseTicker() error {
 }
 
 // Internal handlers
-func (k *KiteConnect) handleTick(tick models.Tick, connectionID int) {
+func (k *KiteConnect) handleTick(tick models.Tick) {
 	log := logger.GetLogger()
 	distributor := cache.NewTickDistributor()
 	redisCache, _ := cache.NewRedisCache()
@@ -321,4 +265,21 @@ func convertDepthItems(items []models.DepthItem) []*proto.TickData_DepthItem {
 		}
 	}
 	return result
+}
+
+// Helper function to convert string tokens to uint32
+func convertTokensToUint32(tokens []string) ([]uint32, error) {
+	result := make([]uint32, 0, len(tokens))
+
+	for _, token := range tokens {
+		// Parse string to uint64 first
+		val, err := strconv.ParseUint(token, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid token %s: %w", token, err)
+		}
+		// Convert to uint32
+		result = append(result, uint32(val))
+	}
+
+	return result, nil
 }

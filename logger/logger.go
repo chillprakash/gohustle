@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// ANSI color codes
+const (
+	colorRed   = "\033[31m"
+	colorReset = "\033[0m"
+)
+
 type Logger struct {
 	*log.Logger
 	mu    sync.Mutex
@@ -87,9 +93,15 @@ func (l *Logger) formatMessage(level, msg string, props map[string]interface{}) 
 		Properties: props,
 	}
 
+	// Add color for ERROR level
+	levelStr := entry.Level
+	if level == "ERROR" {
+		levelStr = colorRed + level + colorReset
+	}
+
 	logMsg := fmt.Sprintf("%s | %s | %s | %s | %s | %s",
 		entry.Timestamp,
-		entry.Level,
+		levelStr,
 		entry.Location,
 		entry.Package,
 		entry.Function,
@@ -99,7 +111,11 @@ func (l *Logger) formatMessage(level, msg string, props map[string]interface{}) 
 	if len(props) > 0 {
 		propStr := ""
 		for k, v := range props {
-			propStr += fmt.Sprintf(" %s=%v", k, v)
+			if level == "ERROR" {
+				propStr += fmt.Sprintf(" %s=%s%v%s", k, colorRed, v, colorReset)
+			} else {
+				propStr += fmt.Sprintf(" %s=%v", k, v)
+			}
 		}
 		logMsg += " |" + propStr
 	}

@@ -44,8 +44,9 @@
         ]
     },
     "queue": {
-        "primary_workers": 10,
+        "num_lists": 10,
         "list_prefix": "tick_queue:",
+        "primary_workers": 10,
         "secondary_workers": 10
     }
 } 

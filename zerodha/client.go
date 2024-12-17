@@ -4,6 +4,7 @@ import (
 	"context"
 	"gohustle/config"
 	"gohustle/logger"
+	"sync"
 
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
@@ -15,24 +16,63 @@ const (
 )
 
 type KiteConnect struct {
-	Kite    *kiteconnect.Client
-	Tickers []*kiteticker.Ticker
+	Kite        *kiteconnect.Client
+	Tickers     []*kiteticker.Ticker
+	tokens      []uint32
+	accessToken string
 }
 
-func NewKiteConnect(connectTicker bool) *KiteConnect {
+var (
+	instance *KiteConnect
+	initOnce sync.Once
+	mu       sync.RWMutex
+)
+
+// GetKiteConnect returns the singleton instance of KiteConnect
+func GetKiteConnect() *KiteConnect {
+	mu.RLock()
+	if instance != nil {
+		mu.RUnlock()
+		return instance
+	}
+	mu.RUnlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if instance != nil {
+		return instance
+	}
+
+	// Initialize only once
+	initOnce.Do(func() {
+		instance = initializeKiteConnect()
+	})
+
+	return instance
+}
+
+// initializeKiteConnect creates a new KiteConnect instance
+func initializeKiteConnect() *KiteConnect {
 	log := logger.GetLogger()
 
-	// Get config directly
+	log.Info("Starting KiteConnect initialization", map[string]interface{}{
+		"max_connections":           MaxConnections,
+		"max_tokens_per_connection": MaxTokensPerConnection,
+	})
+
+	// Get config
 	cfg := config.GetConfig()
+	log.Info("Loaded configuration", map[string]interface{}{
+		"api_key": cfg.Kite.APIKey,
+	})
 
 	kite := &KiteConnect{
 		Tickers: make([]*kiteticker.Ticker, MaxConnections),
 	}
 
-	log.Info("Initializing KiteConnect client", map[string]interface{}{
-		"api_key": cfg.Kite.APIKey,
-	})
-
+	// Create new Kite client
 	kite.Kite = kiteconnect.New(cfg.Kite.APIKey)
 	if kite.Kite == nil {
 		log.Error("Failed to create KiteConnect instance", nil)
@@ -46,41 +86,60 @@ func NewKiteConnect(connectTicker bool) *KiteConnect {
 			"error": err.Error(),
 		})
 	} else {
-		log.Info("Setting access token", map[string]interface{}{
-			"token": token,
-		})
+		kite.accessToken = token
 		kite.Kite.SetAccessToken(token)
 	}
 
-	// Connect ticker if requested
-	if connectTicker {
-		if err := kite.ConnectTicker(); err != nil {
-			log.Error("Failed to connect ticker", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil
-		}
-	}
-
-	log.Info("Successfully initialized KiteConnect", map[string]interface{}{
-		"connect_ticker": connectTicker,
-		"api_key":        cfg.Kite.APIKey,
-		"connections":    len(kite.Tickers),
+	log.Info("Successfully initialized KiteConnect singleton", map[string]interface{}{
+		"api_key":     cfg.Kite.APIKey,
+		"connections": len(kite.Tickers),
+		"status":      "ready",
 	})
+
 	return kite
+}
+
+func (k *KiteConnect) InitializeTickersWithTokens(tokens []uint32) error {
+	log := logger.GetLogger()
+
+	log.Info("Initializing tickers with tokens", map[string]interface{}{
+		"tokens_count": len(tokens),
+	})
+
+	// Store tokens for subscription
+	k.tokens = tokens
+
+	// Connect tickers
+	return k.ConnectTickers()
 }
 
 // Close closes all connections
 func (k *KiteConnect) Close() {
 	log := logger.GetLogger()
 
+	log.Info("Starting KiteConnect shutdown", map[string]interface{}{
+		"total_tickers": len(k.Tickers),
+	})
+
 	// Close all tickers
 	for i, ticker := range k.Tickers {
 		if ticker != nil {
+			log.Info("Closing ticker connection", map[string]interface{}{
+				"connection_index": i,
+			})
 			ticker.Close()
-			log.Info("Ticker closed", map[string]interface{}{
+			log.Info("Successfully closed ticker", map[string]interface{}{
 				"connection": i + 1,
+				"status":     "closed",
+			})
+		} else {
+			log.Info("Skipping nil ticker", map[string]interface{}{
+				"connection_index": i,
 			})
 		}
 	}
+
+	log.Info("Completed KiteConnect shutdown", map[string]interface{}{
+		"status": "closed",
+	})
 }

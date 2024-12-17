@@ -70,8 +70,9 @@ type IndicesConfig struct {
 }
 
 type QueueConfig struct {
-	PrimaryWorkers   int    `json:"primary_workers"`
+	NumLists         int    `json:"num_lists"`
 	ListPrefix       string `json:"list_prefix"`
+	PrimaryWorkers   int    `json:"primary_workers"`
 	SecondaryWorkers int    `json:"secondary_workers"`
 }
 

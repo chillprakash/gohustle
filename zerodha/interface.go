@@ -29,11 +29,14 @@ type KiteOperations interface {
 	GetCurrentSpotPriceOfAllIndices(ctx context.Context) (map[string]float64, error)
 }
 
-// KiteOperations combines all operations
+// KiteConnector defines the interface for Kite operations
 type KiteConnector interface {
 	TokenOperations
 	InstrumentOperations
 	KiteOperations
+	GetValidToken(ctx context.Context) (string, error)
+	ConnectTicker() error
+	Close()
 }
 
 type TickWriterOperations interface {
@@ -45,4 +48,5 @@ var (
 	_ TokenOperations      = (*KiteConnect)(nil)
 	_ InstrumentOperations = (*KiteConnect)(nil)
 	_ KiteOperations       = (*KiteConnect)(nil)
+	_ KiteConnector        = (*KiteConnect)(nil)
 )

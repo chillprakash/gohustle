@@ -157,3 +157,56 @@ CREATE OR REPLACE VIEW latest_sensex_ticks AS
         last_trade_time
     FROM sensex_ticks
     ORDER BY instrument_token, timestamp DESC;
+
+-- Create derived data summary table for Nifty
+CREATE TABLE derived_data_summary_nifty (
+    id BIGSERIAL,
+    added_time TIMESTAMPTZ NOT NULL,
+    spot DOUBLE PRECISION NOT NULL,
+    synthetic_future DOUBLE PRECISION NOT NULL,
+    atm_strike DOUBLE PRECISION NOT NULL,
+    
+    -- Primary key must include the partitioning column
+    PRIMARY KEY (id, added_time)
+);
+
+-- Create derived data summary table for Sensex
+CREATE TABLE derived_data_summary_sensex (
+    id BIGSERIAL,
+    added_time TIMESTAMPTZ NOT NULL,
+    spot DOUBLE PRECISION NOT NULL,
+    synthetic_future DOUBLE PRECISION NOT NULL,
+    atm_strike DOUBLE PRECISION NOT NULL,
+    
+    -- Primary key must include the partitioning column
+    PRIMARY KEY (id, added_time)
+);
+
+-- Convert tables to hypertables
+SELECT create_hypertable('derived_data_summary_nifty', 'added_time', chunk_time_interval => INTERVAL '1 day');
+SELECT create_hypertable('derived_data_summary_sensex', 'added_time', chunk_time_interval => INTERVAL '1 day');
+
+-- Create indexes for better query performance
+CREATE INDEX ON derived_data_summary_nifty (added_time DESC);
+CREATE INDEX ON derived_data_summary_sensex (added_time DESC);
+
+-- Enable compression with TimescaleDB
+ALTER TABLE derived_data_summary_nifty SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'id',
+    timescaledb.compress_orderby = 'added_time DESC'
+);
+
+ALTER TABLE derived_data_summary_sensex SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'id',
+    timescaledb.compress_orderby = 'added_time DESC'
+);
+
+-- Add compression policies (compress chunks older than 7 days)
+SELECT add_compression_policy('derived_data_summary_nifty', INTERVAL '7 days');
+SELECT add_compression_policy('derived_data_summary_sensex', INTERVAL '7 days');
+
+-- Add retention policy (keep 1 year of data)
+SELECT add_retention_policy('derived_data_summary_nifty', INTERVAL '1 year');
+SELECT add_retention_policy('derived_data_summary_sensex', INTERVAL '1 year');

@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gohustle
+  namespace: gohustle
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gohustle
+  template:
+    metadata:
+      labels:
+        app: gohustle
+    spec:
+      imagePullSecrets:
+        - name: registry-digitalocean-com
+      containers:
+      - name: gohustle
+        image: registry.digitalocean.com/gohustle-registry/gohustle:latest
+        imagePullPolicy: Always
+        env:
+        - name: TZ
+          value: "Asia/Kolkata"
+        - name: POSTGRES_HOST
+          value: "timescaledb"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: gohustle-secrets
+              key: postgres-user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gohustle-secrets
+              key: postgres-password
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: gohustle-secrets
+              key: postgres-db
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: gohustle-secrets
+              key: telegram-bot-token
+        - name: TELEGRAM_CHAT_ID
+          valueFrom:
+            secretKeyRef:
+              name: gohustle-secrets
+              key: telegram-chat-id
+        volumeMounts:
+        - name: exports
+          mountPath: /data/exports
+      volumes:
+      - name: exports
+        persistentVolumeClaim:
+          claimName: exports-pvc 

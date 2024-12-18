@@ -13,11 +13,9 @@ spec:
       labels:
         app: gohustle
     spec:
-      imagePullSecrets:
-        - name: registry-digitalocean-com
       containers:
       - name: gohustle
-        image: registry.digitalocean.com/gohustle-registry/gohustle:latest
+        image: your-registry/gohustle:latest
         imagePullPolicy: Always
         env:
         - name: TZ

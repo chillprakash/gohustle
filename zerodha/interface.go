@@ -20,6 +20,10 @@ type InstrumentOperations interface {
 	GetIndexTokens() map[string]string
 }
 
+type LTPOperations interface {
+	GetIndexLTPFromRedis(ctx context.Context, index string) (float64, error)
+}
+
 type ExpiryOperations interface {
 	GetIndexVsExpiryMap(ctx context.Context) (map[string][]time.Time, error)
 }

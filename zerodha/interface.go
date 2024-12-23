@@ -14,10 +14,11 @@ type TokenOperations interface {
 type InstrumentOperations interface {
 	DownloadInstrumentData(ctx context.Context) error
 	GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error)
-	CreateLookupMapWithExpiryVSTokenMap(instrumentMap *InstrumentExpiryMap) (map[string]string, map[string]TokenInfo)
+	CreateLookupMapWithExpiryVSTokenMap(ctx context.Context) (map[string]string, map[string]TokenInfo, map[string]string)
 	GetUpcomingExpiryTokens(ctx context.Context, instruments []string) ([]string, error)
 	GetInstrumentInfo(token string) (TokenInfo, bool)
 	GetIndexTokens() map[string]string
+	GetInstrumentInfoWithStrike(strikes []string) map[string]string
 }
 
 type LTPOperations interface {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"gohustle/cache"
@@ -280,4 +281,23 @@ func convertTokensToUint32(tokens []string) ([]uint32, error) {
 	}
 
 	return result, nil
+}
+
+func extractStrikeAndType(tradingSymbol string, strike string) string {
+	// Split by decimal point and take only the whole number part
+	cleanStrike := strings.Split(strike, ".")[0]
+
+	// Find the position of strike in trading symbol
+	strikePos := strings.Index(tradingSymbol, cleanStrike)
+	if strikePos == -1 {
+		return "" // Strike not found in trading symbol
+	}
+
+	// Extract strike with option type (last 2 characters are CE or PE)
+	result := tradingSymbol[strikePos:]
+	if len(result) >= 2 {
+		return result
+	}
+
+	return ""
 }

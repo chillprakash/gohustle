@@ -53,6 +53,7 @@ func main() {
 	}
 
 	kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
+	kiteConnect.CreateLookupMapWithExpiryVSTokenMap(ctx)
 
 	// Get upcoming expiry tokens for configured indices
 	tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, cfg.Indices.DerivedIndices)

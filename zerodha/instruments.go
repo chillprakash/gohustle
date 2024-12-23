@@ -21,6 +21,7 @@ import (
 type OptionTokenPair struct {
 	Symbol          string
 	InstrumentToken string
+	Strike          string
 }
 
 // ExpiryOptions contains calls and puts for a specific expiry
@@ -35,19 +36,20 @@ type InstrumentExpiryMap struct {
 }
 
 type TokenInfo struct {
-	Expiry     time.Time
-	Symbol     string
-	Index      string
-	IsIndex    bool
-	TargetFile string
+	Expiry                 time.Time
+	Symbol                 string
+	Index                  string
+	IsIndex                bool
+	TargetFile             string
+	StrikeWithAbbreviation string
 }
 
 var (
-	tokensCache        map[string]string
-	reverseLookupCache map[string]TokenInfo
-	once               sync.Once
-	instrumentMutex    sync.RWMutex // Package-level mutex
-
+	tokensCache                  map[string]string
+	reverseLookupCacheWithStrike map[string]string
+	reverseLookupCache           map[string]TokenInfo
+	instrumentMutex              sync.RWMutex // Package-level mutex
+	once                         sync.Once
 )
 
 func (k *KiteConnect) GetInstrumentInfo(token string) (TokenInfo, bool) {
@@ -56,6 +58,59 @@ func (k *KiteConnect) GetInstrumentInfo(token string) (TokenInfo, bool) {
 
 	info, exists := reverseLookupCache[token]
 	return info, exists
+}
+
+func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]string {
+	log := logger.GetLogger()
+
+	instrumentMutex.RLock()
+	defer instrumentMutex.RUnlock()
+
+	result := make(map[string]string)
+
+	// Debug print the cache contents
+	log.Info("Current strike cache contents", map[string]interface{}{
+		"cache_size": len(reverseLookupCacheWithStrike),
+	})
+
+	for _, strike := range strikes {
+		// Check for CE
+		ceStrike := fmt.Sprintf("%sCE", strike)
+		if token, exists := reverseLookupCacheWithStrike[ceStrike]; exists {
+			result[ceStrike] = token
+			log.Info("Found CE strike", map[string]interface{}{
+				"strike": ceStrike,
+				"token":  token,
+			})
+		} else {
+			log.Info("CE strike not found", map[string]interface{}{
+				"strike": ceStrike,
+			})
+		}
+
+		// Check for PE
+		peStrike := fmt.Sprintf("%sPE", strike)
+		if token, exists := reverseLookupCacheWithStrike[peStrike]; exists {
+			result[peStrike] = token
+			log.Debug("Found PE strike", map[string]interface{}{
+				"strike": peStrike,
+				"token":  token,
+			})
+		} else {
+			log.Debug("PE strike not found", map[string]interface{}{
+				"strike": peStrike,
+			})
+		}
+	}
+
+	// Print what we found
+	log.Info("Strike lookup results", map[string]interface{}{
+		"input_strikes": strikes,
+		"found_strikes": len(result),
+		"results":       result,
+	})
+
+	return result
 }
 
 // DownloadInstrumentData downloads and saves instrument data
@@ -187,10 +242,22 @@ func formatExpiryMapForLog(m map[string][]time.Time) map[string][]string {
 }
 
 // CreateLookupMapWithExpiryVSTokenMap extracts instrument tokens and creates a reverse lookup map
-func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *InstrumentExpiryMap) (map[string]string, map[string]TokenInfo) {
+func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(ctx context.Context) (map[string]string, map[string]TokenInfo, map[string]string) {
 	once.Do(func() {
+		log := logger.GetLogger()
+		log.Info("Initializing lookup maps", nil)
+		// Get the full instrument map
+		instrumentMap, err := k.GetInstrumentExpirySymbolMap(ctx)
+		if err != nil {
+			log.Error("Failed to get instrument map", map[string]interface{}{
+				"error": err.Error(),
+			})
+
+		}
+		// Initialize maps
 		tokensCache = make(map[string]string)
 		reverseLookupCache = make(map[string]TokenInfo)
+		reverseLookupCacheWithStrike = make(map[string]string)
 
 		// Add options (IsIndex = false)
 		for _, expiryMap := range instrumentMap.Data {
@@ -199,45 +266,61 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(instrumentMap *Instrum
 					index := extractIndex(call.Symbol)
 					targetFile := generateTargetFileName(expiry, index)
 					tokensCache[call.InstrumentToken] = call.Symbol
+					strikeWithAbbreviation := extractStrikeAndType(call.Symbol, call.Strike)
 					reverseLookupCache[call.InstrumentToken] = TokenInfo{
-						Expiry:     expiry,
-						Symbol:     call.Symbol,
-						Index:      index,
-						IsIndex:    false,
-						TargetFile: targetFile,
+						Expiry:                 expiry,
+						Symbol:                 call.Symbol,
+						Index:                  index,
+						IsIndex:                false,
+						TargetFile:             targetFile,
+						StrikeWithAbbreviation: strikeWithAbbreviation,
 					}
+					reverseLookupCacheWithStrike[strikeWithAbbreviation] = call.InstrumentToken
 				}
 				for _, put := range options.Puts {
 					index := extractIndex(put.Symbol)
 					targetFile := generateTargetFileName(expiry, index)
 					tokensCache[put.InstrumentToken] = put.Symbol
+					strikeWithAbbreviation := extractStrikeAndType(put.Symbol, put.Strike)
 					reverseLookupCache[put.InstrumentToken] = TokenInfo{
-						Expiry:     expiry,
-						Symbol:     put.Symbol,
-						Index:      index,
-						IsIndex:    false,
-						TargetFile: targetFile,
+						Expiry:                 expiry,
+						Symbol:                 put.Symbol,
+						Index:                  index,
+						IsIndex:                false,
+						TargetFile:             targetFile,
+						StrikeWithAbbreviation: strikeWithAbbreviation,
 					}
+					reverseLookupCacheWithStrike[strikeWithAbbreviation] = put.InstrumentToken
 				}
 			}
 		}
 
-		// Add indices (IsIndex = true)
+		// Add indices
 		indexTokens := k.GetIndexTokens()
 		for name, token := range indexTokens {
-			targetFile := generateTargetFileName(time.Time{}, name) // zero time for indices
+			targetFile := generateTargetFileName(time.Time{}, name)
 			tokensCache[token] = name
 			reverseLookupCache[token] = TokenInfo{
-				Expiry:     time.Time{}, // zero time for indices
+				Expiry:     time.Time{},
 				Symbol:     name,
 				Index:      name,
 				IsIndex:    true,
 				TargetFile: targetFile,
 			}
 		}
-	})
 
-	return tokensCache, reverseLookupCache
+		log.Info("Lookup maps initialized", map[string]interface{}{
+			"tokens_cache_size":   len(tokensCache),
+			"reverse_lookup_size": len(reverseLookupCache),
+			"strike_lookup_size":  len(reverseLookupCacheWithStrike),
+		})
+
+		for strike, token := range reverseLookupCacheWithStrike {
+			fmt.Println(strike, token)
+		}
+	})
+	k.PrintStrikeCache()
+	return tokensCache, reverseLookupCache, reverseLookupCacheWithStrike
 }
 
 func generateTargetFileName(expiry time.Time, index string) string {
@@ -405,6 +488,7 @@ func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*Instru
 		pair := OptionTokenPair{
 			Symbol:          inst.Tradingsymbol,
 			InstrumentToken: inst.InstrumentToken,
+			Strike:          inst.StrikePrice,
 		}
 
 		// Add to appropriate slice based on option type
@@ -508,8 +592,8 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, indices []str
 		return nil, err
 	}
 
-	// Get token lookup maps (using cached version)
-	_, tokenInfo := k.CreateLookupMapWithExpiryVSTokenMap(symbolMap)
+	// // Get token lookup maps (using cached version)
+	// _, _, _ = k.CreateLookupMapWithExpiryVSTokenMap(ctx)
 
 	// Find upcoming expiry
 	now := time.Now().Truncate(24 * time.Hour)
@@ -534,7 +618,7 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, indices []str
 
 	// Collect tokens for upcoming expiry
 	tokens := make([]string, 0)
-	for token, info := range tokenInfo {
+	for token, info := range reverseLookupCache {
 		for _, index := range indices {
 			if expiry, exists := upcomingExpiry[index]; exists {
 				if info.Expiry.Equal(expiry) {
@@ -701,4 +785,32 @@ func (k *KiteConnect) saveExpiriesToRedis(ctx context.Context, expiries map[stri
 	})
 
 	return nil
+}
+
+// PrintStrikeCache prints the contents of reverseLookupCacheWithStrike
+func (k *KiteConnect) PrintStrikeCache() {
+	log := logger.GetLogger()
+
+	instrumentMutex.RLock()
+	defer instrumentMutex.RUnlock()
+
+	log.Info("Strike Cache Contents", map[string]interface{}{
+		"total_entries": len(reverseLookupCacheWithStrike),
+	})
+
+	// Sort the keys for better readability
+	keys := make([]string, 0, len(reverseLookupCacheWithStrike))
+	for k := range reverseLookupCacheWithStrike {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// Print each entry
+	for _, strike := range keys {
+		token := reverseLookupCacheWithStrike[strike]
+		log.Info("Strike Entry", map[string]interface{}{
+			"strike": strike,
+			"token":  token,
+		})
+	}
 }

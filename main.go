@@ -9,7 +9,6 @@ import (
 	"syscall"
 	"time"
 
-	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/logger"
 	"gohustle/scheduler"

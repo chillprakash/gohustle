@@ -108,11 +108,9 @@ type TimescaleConfig struct {
 
 // GetConfig loads configuration and handles errors internally
 func GetConfig() *Config {
-	log := logger.GetLogger()
-
 	workDir, err := os.Getwd()
 	if err != nil {
-		log.Error("Failed to get working directory", map[string]interface{}{
+		logger.L().Error("Failed to get working directory", map[string]interface{}{
 			"error": err.Error(),
 		})
 		os.Exit(1)
@@ -122,14 +120,14 @@ func GetConfig() *Config {
 
 	fileInfo, err := os.Stat(configPath)
 	if err != nil {
-		log.Error("Config file not found", map[string]interface{}{
+		logger.L().Error("Config file not found", map[string]interface{}{
 			"error": err.Error(),
 			"path":  configPath,
 		})
 		os.Exit(1)
 	}
 
-	log.Debug("Loading configuration", map[string]interface{}{
+	logger.L().Debug("Loading configuration", map[string]interface{}{
 		"working_dir":    workDir,
 		"config_path":    configPath,
 		"file_exists":    true,
@@ -141,7 +139,7 @@ func GetConfig() *Config {
 
 	configFile, err := os.ReadFile(configPath)
 	if err != nil {
-		log.Error("Failed to read config file", map[string]interface{}{
+		logger.L().Error("Failed to read config file", map[string]interface{}{
 			"error": err.Error(),
 		})
 		os.Exit(1)
@@ -149,7 +147,7 @@ func GetConfig() *Config {
 
 	var config Config
 	if err := json.Unmarshal(configFile, &config); err != nil {
-		log.Error("Failed to parse config file", map[string]interface{}{
+		logger.L().Error("Failed to parse config file", map[string]interface{}{
 			"error": err.Error(),
 		})
 		os.Exit(1)
@@ -157,13 +155,13 @@ func GetConfig() *Config {
 
 	// Simple validation
 	if config.Kite.APIKey == "" {
-		log.Error("Invalid configuration", map[string]interface{}{
+		logger.L().Error("Invalid configuration", map[string]interface{}{
 			"error": "kite API key is required",
 		})
 		os.Exit(1)
 	}
 
-	log.Debug("Successfully loaded config", map[string]interface{}{
+	logger.L().Debug("Successfully loaded config", map[string]interface{}{
 		"path": configPath,
 	})
 

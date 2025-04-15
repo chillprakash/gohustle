@@ -15,40 +15,16 @@ import (
 	"gohustle/zerodha"
 )
 
-func main() {
-	log := logger.GetLogger()
-	log.Info("Application starting...", nil)
-
-	// Write PID to file at the start
-	pid := os.Getpid()
-	if err := os.WriteFile("app.pid", []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
-		log.Fatal("Failed to write PID file", map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-	defer os.Remove("app.pid")
-
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	// Initialize KiteConnect with writer pool
 	kiteConnect := zerodha.GetKiteConnect()
 	if kiteConnect == nil {
-		log.Fatal("Failed to initialize KiteConnect", nil)
-		return
+		return fmt.Errorf("failed to initialize KiteConnect")
 	}
 
-	cfg := config.GetConfig()
-
 	// Download instrument data
-	if err := kiteConnect.DownloadInstrumentData(context.Background()); err != nil {
-		log.Fatal("Failed to download instrument data", map[string]interface{}{
-			"error": err.Error(),
-		})
+	if err := kiteConnect.DownloadInstrumentData(ctx); err != nil {
+		return fmt.Errorf("failed to download instrument data: %w", err)
 	}
 
 	kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
@@ -57,11 +33,7 @@ func main() {
 	// Get upcoming expiry tokens for configured indices
 	tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, cfg.Indices.DerivedIndices)
 	if err != nil {
-		log.Error("Failed to get upcoming expiry tokens", map[string]interface{}{
-			"error":   err.Error(),
-			"indices": cfg.Indices.DerivedIndices,
-		})
-		return
+		return fmt.Errorf("failed to get upcoming expiry tokens: %w", err)
 	}
 
 	// Add index tokens for spot indices
@@ -74,26 +46,18 @@ func main() {
 	// Convert both token slices to uint32
 	normalTokens, err := convertTokensToUint32(tokens)
 	if err != nil {
-		log.Error("Failed to convert normal tokens", map[string]interface{}{
-			"error":  err.Error(),
-			"tokens": tokens,
-		})
-		return
+		return fmt.Errorf("failed to convert normal tokens: %w", err)
 	}
 
 	indexTokensUint32, err := convertTokensToUint32(indexTokenSlice)
 	if err != nil {
-		log.Error("Failed to convert index tokens", map[string]interface{}{
-			"error":  err.Error(),
-			"tokens": indexTokenSlice,
-		})
-		return
+		return fmt.Errorf("failed to convert index tokens: %w", err)
 	}
 
 	// Combine both uint32 token lists for subscription
 	allTokens := append(normalTokens, indexTokensUint32...)
 
-	log.Info("Initializing tickers with tokens", map[string]interface{}{
+	logger.L().Info("Initializing tickers with tokens", map[string]interface{}{
 		"normal_tokens_count": len(normalTokens),
 		"index_tokens_count":  len(indexTokensUint32),
 		"total_tokens":        len(allTokens),
@@ -109,15 +73,59 @@ func main() {
 	)
 	scheduler.Start()
 
-	// Initialize consumer with writer pool
-	consumer := cache.NewConsumer()
-	consumer.Start()
+	// Block until context is cancelled
+	<-ctx.Done()
+	return nil
+}
 
-	// Block until we receive a signal
-	sig := <-sigChan
-	log.Info("Received shutdown signal", map[string]interface{}{
-		"signal": sig.String(),
-	})
+func initializeProcess() (context.Context, context.CancelFunc, chan os.Signal, error) {
+	// No need to pass logger anymore
+	pid := os.Getpid()
+	if err := os.WriteFile("app.pid", []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to write PID file: %w", err)
+	}
+
+	// Set up signal handling
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	return ctx, cancel, sigChan, nil
+}
+
+func main() {
+	logger.L().Info("Application starting...", nil)
+
+	ctx, cancel, sigChan, err := initializeProcess()
+	if err != nil {
+		logger.L().Fatal("Failed to initialize process", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+	defer cancel()
+	defer os.Remove("app.pid")
+
+	cfg := config.GetConfig()
+
+	// Start data processing in a goroutine
+	errChan := make(chan error, 1)
+	go func() {
+		if err := startDataProcessing(ctx, cfg); err != nil {
+			errChan <- err
+		}
+	}()
+
+	// Wait for either error or shutdown signal
+	select {
+	case err := <-errChan:
+		logger.L().Error("Data processing error", map[string]interface{}{
+			"error": err.Error(),
+		})
+	case sig := <-sigChan:
+		logger.L().Info("Received shutdown signal", map[string]interface{}{
+			"signal": sig.String(),
+		})
+	}
 
 	// Start graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -129,28 +137,17 @@ func main() {
 	go func() {
 		// Cancel the main context
 		cancel()
-
-		// Stop components in reverse order
-		log.Info("Stopping consumer...", nil)
-		// consumer.Stop()
-
-		log.Info("Closing KiteConnect...", nil)
-		if kiteConnect != nil {
-			kiteConnect.Close()
-		}
-
 		close(shutdownComplete)
 	}()
 
 	// Wait for shutdown to complete or timeout
 	select {
 	case <-shutdownComplete:
-		log.Info("Clean shutdown successful", nil)
+		logger.L().Info("Clean shutdown successful", nil)
 	case <-shutdownCtx.Done():
-		log.Error("Shutdown timed out, forcing exit", nil)
+		logger.L().Error("Shutdown timed out, forcing exit", nil)
 	}
 
-	// Force exit after logging
 	os.Exit(0)
 }
 

@@ -23,8 +23,8 @@ type Logger struct {
 }
 
 var (
-	instance *Logger
-	once     sync.Once
+	globalLogger *Logger
+	once         sync.Once
 )
 
 func init() {
@@ -32,6 +32,7 @@ func init() {
 	if err != nil {
 		// Fallback to UTC if IST loading fails
 	}
+	Initialize() // Initialize the logger when the package is imported
 }
 
 type LogEntry struct {
@@ -44,12 +45,20 @@ type LogEntry struct {
 	Properties map[string]interface{}
 }
 
-// GetLogger returns a singleton logger instance
-func GetLogger() *Logger {
+// Initialize sets up the global logger instance
+func Initialize() {
 	once.Do(func() {
-		instance = setupLogger()
+		globalLogger = setupLogger()
 	})
-	return instance
+}
+
+// L returns the global logger instance
+// This provides a shorter, cleaner way to access the logger
+func L() *Logger {
+	if globalLogger == nil {
+		Initialize()
+	}
+	return globalLogger
 }
 
 func setupLogger() *Logger {
@@ -184,6 +193,10 @@ type WithLogger struct {
 
 func NewWithLogger() *WithLogger {
 	return &WithLogger{
-		Logger: GetLogger(),
+		Logger: L(),
 	}
+}
+
+func (l *Logger) Fatal(msg string, fields map[string]interface{}) {
+	// ... existing implementation ...
 }

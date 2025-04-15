@@ -3,8 +3,8 @@ package zerodha
 import (
 	"context"
 	"gohustle/config"
-	"gohustle/logger"
 	"sync"
+	"time"
 
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
@@ -55,8 +55,6 @@ func GetKiteConnect() *KiteConnect {
 
 // initializeKiteConnect creates a new KiteConnect instance
 func initializeKiteConnect() *KiteConnect {
-	log := logger.GetLogger()
-
 	log.Info("Starting KiteConnect initialization", map[string]interface{}{
 		"max_connections":           MaxConnections,
 		"max_tokens_per_connection": MaxTokensPerConnection,
@@ -100,8 +98,6 @@ func initializeKiteConnect() *KiteConnect {
 }
 
 func (k *KiteConnect) InitializeTickersWithTokens(tokens []uint32) error {
-	log := logger.GetLogger()
-
 	log.Info("Initializing tickers with tokens", map[string]interface{}{
 		"tokens_count": len(tokens),
 	})
@@ -115,8 +111,6 @@ func (k *KiteConnect) InitializeTickersWithTokens(tokens []uint32) error {
 
 // Close closes all connections
 func (k *KiteConnect) Close() {
-	log := logger.GetLogger()
-
 	log.Info("Starting KiteConnect shutdown", map[string]interface{}{
 		"total_tickers": len(k.Tickers),
 	})
@@ -142,4 +136,25 @@ func (k *KiteConnect) Close() {
 	log.Info("Completed KiteConnect shutdown", map[string]interface{}{
 		"status": "closed",
 	})
+}
+
+func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
+	log.Info("Starting instrument download", nil)
+
+	// Add request ID to context
+	ctx = context.WithValue(ctx, logger.RequestIDKey, "download-"+time.Now().String())
+
+	log.Info("Starting instrument download", map[string]interface{}{
+		"operation": "download",
+	})
+
+	// If there's an error
+	if err != nil {
+		log.Error("Download failed", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	return nil
 }

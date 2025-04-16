@@ -1,6 +1,9 @@
-Simple stock market data collector, written in GO.
+16th April:
 
-Tech stack used:
-Go -> Application to collect data.
-Redis
-TimeScaleDB -> Extension of Postgres.
+will have 2 separate tools.
+
+Data collector:
+Go+Nats
+
+Execution tool:
+Go+Redis

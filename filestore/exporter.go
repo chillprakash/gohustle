@@ -25,7 +25,7 @@ type Exporter struct {
 func NewExporter(pool *pgxpool.Pool, baseDir string) *Exporter {
 	return &Exporter{
 		pool:    pool,
-		logger:  logger.GetLogger(),
+		logger:  logger.L(),
 		baseDir: baseDir,
 	}
 }

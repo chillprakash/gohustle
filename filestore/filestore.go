@@ -19,10 +19,14 @@ type FileStore interface {
 	ReadGzippedProto(prefix, date string) ([]byte, error)
 }
 
-type DiskFileStore struct{}
+type DiskFileStore struct {
+	logger *logger.Logger
+}
 
-func NewDiskFileStore() *DiskFileStore {
-	return &DiskFileStore{}
+func NewDiskFileStore(logger *logger.Logger) *DiskFileStore {
+	return &DiskFileStore{
+		logger: logger,
+	}
 }
 
 func (fs *DiskFileStore) getPath(prefix, date string) string {
@@ -30,11 +34,10 @@ func (fs *DiskFileStore) getPath(prefix, date string) string {
 }
 
 func (fs *DiskFileStore) ensureDir(filePath string) error {
-	log := logger.GetLogger()
 	dir := filepath.Dir(filePath)
 
 	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
-		log.Error("Failed to create directory", map[string]interface{}{
+		fs.logger.Error("Failed to create directory", map[string]interface{}{
 			"error": err.Error(),
 			"dir":   dir,
 		})
@@ -44,7 +47,6 @@ func (fs *DiskFileStore) ensureDir(filePath string) error {
 }
 
 func (fs *DiskFileStore) SaveGzippedProto(prefix, date string, data []byte) error {
-	log := logger.GetLogger()
 	filePath := fs.getPath(prefix, date)
 
 	if err := fs.ensureDir(filePath); err != nil {
@@ -53,7 +55,7 @@ func (fs *DiskFileStore) SaveGzippedProto(prefix, date string, data []byte) erro
 
 	file, err := os.Create(filePath)
 	if err != nil {
-		log.Error("Failed to create file", map[string]interface{}{
+		fs.logger.Error("Failed to create file", map[string]interface{}{
 			"error":    err.Error(),
 			"filePath": filePath,
 		})
@@ -65,14 +67,14 @@ func (fs *DiskFileStore) SaveGzippedProto(prefix, date string, data []byte) erro
 	defer gzWriter.Close()
 
 	if _, err := gzWriter.Write(data); err != nil {
-		log.Error("Failed to write gzipped data", map[string]interface{}{
+		fs.logger.Error("Failed to write gzipped data", map[string]interface{}{
 			"error":    err.Error(),
 			"filePath": filePath,
 		})
 		return err
 	}
 
-	log.Info("Successfully saved gzipped protobuf data", map[string]interface{}{
+	fs.logger.Info("Successfully saved gzipped protobuf data", map[string]interface{}{
 		"filePath": filePath,
 	})
 	return nil
@@ -80,12 +82,10 @@ func (fs *DiskFileStore) SaveGzippedProto(prefix, date string, data []byte) erro
 
 // ReadGzippedProto reads a gzipped protobuf file
 func (fs *DiskFileStore) ReadGzippedProto(prefix, date string) ([]byte, error) {
-	log := logger.GetLogger()
-
 	filePath := fs.getPath(prefix, date)
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Error("Failed to open file", map[string]interface{}{
+		fs.logger.Error("Failed to open file", map[string]interface{}{
 			"error":    err.Error(),
 			"filePath": filePath,
 		})
@@ -95,7 +95,7 @@ func (fs *DiskFileStore) ReadGzippedProto(prefix, date string) ([]byte, error) {
 
 	gzReader, err := gzip.NewReader(file)
 	if err != nil {
-		log.Error("Failed to create gzip reader", map[string]interface{}{
+		fs.logger.Error("Failed to create gzip reader", map[string]interface{}{
 			"error":    err.Error(),
 			"filePath": filePath,
 		})
@@ -105,14 +105,14 @@ func (fs *DiskFileStore) ReadGzippedProto(prefix, date string) ([]byte, error) {
 
 	data, err := io.ReadAll(gzReader)
 	if err != nil {
-		log.Error("Failed to read data", map[string]interface{}{
+		fs.logger.Error("Failed to read data", map[string]interface{}{
 			"error":    err.Error(),
 			"filePath": filePath,
 		})
 		return nil, err
 	}
 
-	log.Info("Successfully read gzipped protobuf data", map[string]interface{}{
+	fs.logger.Info("Successfully read gzipped protobuf data", map[string]interface{}{
 		"filePath": filePath,
 	})
 	return data, nil

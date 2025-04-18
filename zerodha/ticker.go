@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"gohustle/cache"
-	"gohustle/config"
 	"gohustle/logger"
 	"gohustle/proto"
 
@@ -16,9 +15,9 @@ import (
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
 )
 
-func (k *KiteConnect) ConnectTickers() error {
+// ConnectTicker establishes connections to Kite's ticker service
+func (k *KiteConnect) ConnectTicker() error {
 	log := logger.L()
-	cfg := config.GetConfig()
 
 	if len(k.tokens) == 0 {
 		return fmt.Errorf("no tokens provided for subscription")
@@ -55,9 +54,14 @@ func (k *KiteConnect) ConnectTickers() error {
 			"end_token":    connectionTokens[len(connectionTokens)-1],
 		})
 
-		// Create new ticker
-		ticker := kiteticker.New(cfg.Kite.APIKey, k.accessToken)
-		k.Tickers[i] = ticker
+		if k.Tickers[i] == nil {
+			log.Error("Ticker not initialized", map[string]interface{}{
+				"connection": i + 1,
+			})
+			return fmt.Errorf("ticker not initialized for connection %d", i+1)
+		}
+
+		ticker := k.Tickers[i]
 
 		// Set callbacks
 		ticker.OnConnect(func(connectionID int, tokens []uint32) func() {
@@ -92,27 +96,26 @@ func (k *KiteConnect) ConnectTickers() error {
 			}
 		}(i, connectionTokens))
 
-		// Set other callbacks...
+		// Set other callbacks
 		ticker.OnError(k.onError)
 		ticker.OnClose(k.onClose)
 		ticker.OnReconnect(k.onReconnect)
 		ticker.OnNoReconnect(k.onNoReconnect)
 		ticker.OnTick(k.handleTick)
-		// ticker.OnOrderUpdate(k.handleOrder)
 
 		// Connect in goroutine
-		go func(connectionID int) {
+		go func(connectionID int, t *kiteticker.Ticker) {
 			log.Info("Starting ticker service", map[string]interface{}{
 				"connection": connectionID + 1,
 			})
 
 			// Serve the ticker
-			ticker.Serve()
+			t.Serve()
 
 			log.Info("Ticker service started", map[string]interface{}{
 				"connection": connectionID + 1,
 			})
-		}(i)
+		}(i, ticker)
 	}
 
 	return nil

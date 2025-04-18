@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"gohustle/cache"
+	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
 	"sort"
@@ -11,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 	"google.golang.org/protobuf/proto"
 )
@@ -48,9 +48,14 @@ var (
 	tokensCache                  map[string]string
 	reverseLookupCacheWithStrike map[string]string
 	reverseLookupCache           map[string]TokenInfo
-	instrumentMutex              sync.RWMutex // Package-level mutex
+	instrumentMutex              sync.RWMutex
 	once                         sync.Once
+	expiryCache                  *cache.InMemoryCache
 )
+
+func init() {
+	expiryCache = cache.GetInMemoryCacheInstance()
+}
 
 func (k *KiteConnect) GetInstrumentInfo(token string) (TokenInfo, bool) {
 	instrumentMutex.RLock()
@@ -114,12 +119,19 @@ func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]s
 }
 
 // DownloadInstrumentData downloads and saves instrument data
-func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
+func (k *KiteConnect) DownloadInstrumentData(ctx context.Context, instrumentNames []core.Index) error {
 	log := logger.L()
+	currentDate := time.Now().Format("02-01-2006")
+	fileStore := filestore.NewDiskFileStore(log)
 
-	// Define instrument names we're interested in
-	instrumentNames := []string{"NIFTY", "SENSEX"}
-
+	// Check if file already exists for today
+	exists := fileStore.FileExists("instruments", currentDate)
+	if exists {
+		log.Info("Instruments file already exists for today, skipping download", map[string]interface{}{
+			"date": currentDate,
+		})
+		return nil
+	}
 	// Get all instruments
 	allInstruments, err := k.Kite.GetInstruments()
 	if err != nil {
@@ -154,19 +166,50 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 		return err
 	}
 
-	// Save to Redis
-	if err := k.saveExpiriesToRedis(ctx, expiries); err != nil {
-		log.Error("Failed to save expiries to Redis", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return err
+	// Store expiries in memory cache
+	for instrument, dates := range expiries {
+		// Key for instrument expiries
+		key := fmt.Sprintf("instrument:expiries:%s", instrument)
+
+		// Store dates as a slice
+		expiryCache.Set(key, dates, 7*24*time.Hour) // Cache for 7 days
 	}
 
-	log.Info("Successfully synced expiries from file to Redis", map[string]interface{}{
+	// Store list of instruments
+	instrumentsKey := "instrument:expiries:list"
+	instruments := make([]string, 0, len(expiries))
+	for instrument := range expiries {
+		instruments = append(instruments, instrument)
+	}
+	expiryCache.Set(instrumentsKey, instruments, 7*24*time.Hour)
+
+	log.Info("Successfully stored expiries in memory cache", map[string]interface{}{
 		"instruments_count": len(expiries),
+		"expiries":          formatExpiryMapForLog(expiries),
 	})
 
 	return nil
+}
+
+// GetCachedExpiries retrieves expiries for an instrument from the cache
+func (k *KiteConnect) GetCachedExpiries(instrument string) ([]time.Time, bool) {
+	key := fmt.Sprintf("instrument:expiries:%s", instrument)
+	if value, exists := expiryCache.Get(key); exists {
+		if dates, ok := value.([]time.Time); ok {
+			return dates, true
+		}
+	}
+	return nil, false
+}
+
+// GetCachedInstruments retrieves the list of instruments from the cache
+func (k *KiteConnect) GetCachedInstruments() ([]string, bool) {
+	if value, exists := expiryCache.Get("instrument:expiries:list"); exists {
+		if instruments, ok := value.([]string); ok {
+			return instruments, true
+		}
+	}
+	return nil, false
 }
 
 // GetInstrumentExpiries reads the gzipped instrument data and returns expiry dates
@@ -197,8 +240,20 @@ func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[s
 	// Map to store unique expiries for each instrument
 	expiryMap := make(map[string]map[time.Time]bool)
 
+	// Get allowed indices from core package
+	indices := core.GetIndices()
+	allowedIndices := make(map[string]bool)
+	for _, name := range indices.GetAllNames() {
+		allowedIndices[name] = true
+	}
+
 	// Process each instrument
 	for _, inst := range instrumentList.Instruments {
+		// Skip if not in allowed indices
+		if !allowedIndices[inst.Name] {
+			continue
+		}
+
 		// Parse expiry date
 		expiry, err := time.Parse("02-01-2006", inst.Expiry)
 		if err != nil {
@@ -208,6 +263,11 @@ func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[s
 				"tradingsymbol": inst.Tradingsymbol,
 				"expiry":        inst.Expiry,
 			})
+			continue
+		}
+
+		// Skip invalid dates (year before 2024)
+		if expiry.Year() < 2024 {
 			continue
 		}
 
@@ -365,11 +425,11 @@ func formatExpiries(expiries []time.Time) []string {
 	return formatted
 }
 
-func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []string) []kiteconnect.Instrument {
+func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []core.Index) []kiteconnect.Instrument {
 	filtered := make([]kiteconnect.Instrument, 0)
 	for _, inst := range allInstruments {
 		for _, name := range targetNames {
-			if inst.Name == name {
+			if inst.Name == name.NameInOptions || inst.Name == name.NameInIndices {
 				filtered = append(filtered, inst)
 				break
 			}
@@ -650,10 +710,12 @@ func extractIndex(symbol string) string {
 
 // GetIndexTokens returns a map of index names to their instrument tokens
 func (k *KiteConnect) GetIndexTokens() map[string]string {
-	indices := GetIndices()
+	indices := core.GetIndices()
 	tokens := make(map[string]string)
+
+	// Use NameInIndices as key since that's what Zerodha API uses
 	for _, index := range indices.GetAllIndices() {
-		tokens[index.ExchangeName] = index.InstrumentToken
+		tokens[index.NameInIndices] = index.InstrumentToken
 	}
 	return tokens
 }
@@ -714,75 +776,6 @@ func formatExpiryMap(m map[string][]time.Time) map[string][]string {
 		}
 	}
 	return formatted
-}
-
-func (k *KiteConnect) saveExpiriesToRedis(ctx context.Context, expiries map[string][]time.Time) error {
-	log := logger.L()
-
-	// Get Redis cache instance
-	redisCache, err := cache.NewRedisCache()
-	if err != nil {
-		return fmt.Errorf("failed to get Redis cache: %w", err)
-	}
-
-	client := redisCache.GetRelationalDB1()
-	pipe := client.Pipeline()
-
-	// Key prefix for instrument expiries
-	const keyPrefix = "instrument:expiries:"
-
-	// Store expiries for each instrument
-	for instrument, dates := range expiries {
-		// Create sorted set key
-		setKey := fmt.Sprintf("%s%s", keyPrefix, instrument)
-
-		// Delete existing set
-		pipe.Del(ctx, setKey)
-
-		// Add all expiry dates to sorted set with score as Unix timestamp
-		for _, date := range dates {
-			// Skip invalid dates (like 0001-01-01)
-			if date.Year() < 2000 {
-				continue
-			}
-
-			// Use timestamp as score for natural date ordering
-			score := float64(date.Unix())
-			member := date.Format("2006-01-02")
-			pipe.ZAdd(ctx, setKey, redis.Z{
-				Score:  score,
-				Member: member,
-			})
-		}
-
-		// Set expiry for the key (7 days)
-		pipe.Expire(ctx, setKey, 7*24*time.Hour)
-	}
-
-	// Store list of instruments
-	instrumentsKey := keyPrefix + "list"
-	pipe.Del(ctx, instrumentsKey)
-	instruments := make([]string, 0, len(expiries))
-	for instrument := range expiries {
-		instruments = append(instruments, instrument)
-	}
-	pipe.SAdd(ctx, instrumentsKey, instruments)
-	pipe.Expire(ctx, instrumentsKey, 7*24*time.Hour)
-
-	// Execute pipeline
-	if _, err := pipe.Exec(ctx); err != nil {
-		log.Error("Failed to store expiries in Redis", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return err
-	}
-
-	log.Info("Successfully stored expiries in Redis", map[string]interface{}{
-		"instruments_count": len(expiries),
-		"expiries":          formatExpiryMapForLog(expiries),
-	})
-
-	return nil
 }
 
 // PrintStrikeCache prints the contents of reverseLookupCacheWithStrike

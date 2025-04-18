@@ -14,11 +14,6 @@ const (
 	DefaultDataPath = "data"
 )
 
-type FileStore interface {
-	SaveGzippedProto(prefix, date string, data []byte) error
-	ReadGzippedProto(prefix, date string) ([]byte, error)
-}
-
 type DiskFileStore struct {
 	logger *logger.Logger
 }
@@ -116,4 +111,17 @@ func (fs *DiskFileStore) ReadGzippedProto(prefix, date string) ([]byte, error) {
 		"filePath": filePath,
 	})
 	return data, nil
+}
+
+func (fs *DiskFileStore) FileExists(prefix, date string) bool {
+	filePath := fs.getPath(prefix, date)
+	_, err := os.Stat(filePath)
+	exists := !os.IsNotExist(err)
+
+	fs.logger.Info("Checked file existence", map[string]interface{}{
+		"filePath": filePath,
+		"exists":   exists,
+	})
+
+	return exists
 }

@@ -1,9 +1,10 @@
-package zerodha
+package core
 
 // Index represents a market index with its details
 type Index struct {
-	ExchangeName    string
+	NameInOptions   string
 	InstrumentToken string
+	NameInIndices   string
 }
 
 // Indices represents all available market indices
@@ -17,16 +18,19 @@ type Indices struct {
 var GetIndices = func() Indices {
 	return Indices{
 		NIFTY: Index{
-			ExchangeName:    "NIFTY 50",
+			NameInOptions:   "NIFTY",
 			InstrumentToken: "256265",
+			NameInIndices:   "NIFTY 50",
 		},
 		SENSEX: Index{
-			ExchangeName:    "SENSEX",
+			NameInOptions:   "SENSEX",
 			InstrumentToken: "265",
+			NameInIndices:   "SENSEX",
 		},
 		BANKNIFTY: Index{
-			ExchangeName:    "NIFTY BANK",
+			NameInOptions:   "BANKNIFTY",
 			InstrumentToken: "260105",
+			NameInIndices:   "NIFTY BANK",
 		},
 	}
 }
@@ -72,4 +76,14 @@ func (i Indices) GetIndexByExchangeName(exchangeName string) *Index {
 	default:
 		return nil
 	}
+}
+
+// GetIndicesToSubscribeForIntraday returns all indices for intraday subscription
+func (i Indices) GetIndicesToSubscribeForIntraday() []Index {
+	return []Index{i.NIFTY, i.SENSEX, i.BANKNIFTY}
+}
+
+// GetIndicesToCollectData returns indices for data collection (excluding BANKNIFTY)
+func (i Indices) GetIndicesToCollectData() []Index {
+	return []Index{i.NIFTY, i.SENSEX}
 }

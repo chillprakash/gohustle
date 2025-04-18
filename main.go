@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gohustle/config"
+	"gohustle/core"
 	"gohustle/logger"
 	"gohustle/zerodha"
 )
@@ -21,12 +22,15 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to initialize KiteConnect")
 	}
 
-	// // Download instrument data
-	// if err := kiteConnect.DownloadInstrumentData(); err != nil {
-	// 	return fmt.Errorf("failed to download instrument data: %w", err)
-	// }
+	indices := core.GetIndices()
+	intradayIndices := indices.GetIndicesToSubscribeForIntraday()
 
-	// kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
+	// Download instrument data
+	if err := kiteConnect.DownloadInstrumentData(ctx, intradayIndices); err != nil {
+		return fmt.Errorf("failed to download instrument data: %w", err)
+	}
+
+	kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
 	// kiteConnect.CreateLookupMapWithExpiryVSTokenMap(ctx)
 
 	// // Get upcoming expiry tokens for configured indices

@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-type Cache struct {
+type InMemoryCache struct {
 	sync.RWMutex
 	items map[string]Item
 }
@@ -15,13 +15,22 @@ type Item struct {
 	Expiration int64
 }
 
-func New() *Cache {
-	return &Cache{
-		items: make(map[string]Item),
-	}
+var (
+	instance *InMemoryCache
+	once     sync.Once
+)
+
+// GetInMemoryCacheInstance returns the singleton instance of InMemoryCache
+func GetInMemoryCacheInstance() *InMemoryCache {
+	once.Do(func() {
+		instance = &InMemoryCache{
+			items: make(map[string]Item),
+		}
+	})
+	return instance
 }
 
-func (c *Cache) Set(key string, value interface{}, duration time.Duration) {
+func (c *InMemoryCache) Set(key string, value interface{}, duration time.Duration) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -32,7 +41,7 @@ func (c *Cache) Set(key string, value interface{}, duration time.Duration) {
 	}
 }
 
-func (c *Cache) Get(key string) (interface{}, bool) {
+func (c *InMemoryCache) Get(key string) (interface{}, bool) {
 	c.RLock()
 	defer c.RUnlock()
 
@@ -48,7 +57,7 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 	return item.Value, true
 }
 
-func (c *Cache) Delete(key string) {
+func (c *InMemoryCache) Delete(key string) {
 	c.Lock()
 	defer c.Unlock()
 	delete(c.items, key)

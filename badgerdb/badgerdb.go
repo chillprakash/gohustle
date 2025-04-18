@@ -3,30 +3,42 @@ package badgerdb
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
 
-// BadgerDBHelper provides a wrapper around BadgerDB operations
-type BadgerDBHelper struct {
-	db     *badger.DB
-	dbPath string
-	mu     sync.RWMutex
+// Define a constant for the database path
+const (
+	DatabasePath = "./data/badgerdb" // Relative path to the data directory
+)
+
+// Credentials represents the structure for storing multiple credentials
+type Credentials struct {
+	Key       string    `json:"key"`        // Unique identifier for the credential
+	Value     string    `json:"value"`      // The actual credential value
+	CreatedAt time.Time `json:"created_at"` // Timestamp for when the credential was created
+	UpdatedAt time.Time `json:"updated_at"` // Timestamp for when the credential was last updated
 }
 
-// Credential represents the structure for storing credentials
-type Credential struct {
-	Value     string    `json:"value"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+// BadgerDBHelper provides a wrapper around BadgerDB operations
+type BadgerDBHelper struct {
+	db *badger.DB
+	mu sync.RWMutex
 }
 
 // NewBadgerDBHelper creates a new instance of BadgerDBHelper
-func NewBadgerDBHelper(dbPath string) (*BadgerDBHelper, error) {
-	opts := badger.DefaultOptions(dbPath)
-	opts.Logger = nil // Disable Badger's internal logger
+func NewBadgerDBHelper() (*BadgerDBHelper, error) {
+	// Ensure the directory exists
+	if err := os.MkdirAll(filepath.Dir(DatabasePath), os.ModePerm); err != nil {
+		return nil, fmt.Errorf("failed to create database directory: %w", err)
+	}
+
+	opts := badger.DefaultOptions(DatabasePath) // Use the constant here
+	opts.Logger = nil                           // Disable Badger's internal logger
 
 	db, err := badger.Open(opts)
 	if err != nil {
@@ -34,8 +46,7 @@ func NewBadgerDBHelper(dbPath string) (*BadgerDBHelper, error) {
 	}
 
 	return &BadgerDBHelper{
-		db:     db,
-		dbPath: dbPath,
+		db: db,
 	}, nil
 }
 
@@ -51,15 +62,16 @@ func (h *BadgerDBHelper) StoreCredential(key string, value string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	credential := Credential{
+	credentials := Credentials{
+		Key:       key, // Set the unique key
 		Value:     value,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
 
-	data, err := json.Marshal(credential)
+	data, err := json.Marshal(credentials)
 	if err != nil {
-		return fmt.Errorf("failed to marshal credential: %w", err)
+		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
 
 	return h.db.Update(func(txn *badger.Txn) error {
@@ -68,11 +80,11 @@ func (h *BadgerDBHelper) StoreCredential(key string, value string) error {
 }
 
 // GetCredential retrieves a credential from the database
-func (h *BadgerDBHelper) GetCredential(key string) (*Credential, error) {
+func (h *BadgerDBHelper) GetCredential(key string) (*Credentials, error) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	var credential Credential
+	var credentials Credentials
 
 	err := h.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(key))
@@ -81,7 +93,7 @@ func (h *BadgerDBHelper) GetCredential(key string) (*Credential, error) {
 		}
 
 		return item.Value(func(val []byte) error {
-			return json.Unmarshal(val, &credential)
+			return json.Unmarshal(val, &credentials)
 		})
 	})
 
@@ -90,10 +102,10 @@ func (h *BadgerDBHelper) GetCredential(key string) (*Credential, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to get credential: %w", err)
+		return nil, fmt.Errorf("failed to get credentials: %w", err)
 	}
 
-	return &credential, nil
+	return &credentials, nil
 }
 
 // DeleteCredential removes a credential from the database
@@ -155,14 +167,15 @@ func (h *BadgerDBHelper) UpdateCredential(key string, value string) error {
 		return fmt.Errorf("credential not found")
 	}
 
-	credential := Credential{
+	credentials := Credentials{
+		Key:       key, // Keep the same key
 		Value:     value,
 		UpdatedAt: time.Now(),
 	}
 
-	data, err := json.Marshal(credential)
+	data, err := json.Marshal(credentials)
 	if err != nil {
-		return fmt.Errorf("failed to marshal credential: %w", err)
+		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
 
 	return h.db.Update(func(txn *badger.Txn) error {

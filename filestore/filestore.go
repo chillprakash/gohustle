@@ -18,9 +18,9 @@ type DiskFileStore struct {
 	logger *logger.Logger
 }
 
-func NewDiskFileStore(logger *logger.Logger) *DiskFileStore {
+func NewDiskFileStore() *DiskFileStore {
 	return &DiskFileStore{
-		logger: logger,
+		logger: logger.L(),
 	}
 }
 

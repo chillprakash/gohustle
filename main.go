@@ -30,11 +30,16 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to download instrument data: %w", err)
 	}
 
+	// Sync instrument expiries from file to cache
 	kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
-	// kiteConnect.CreateLookupMapWithExpiryVSTokenMap(ctx)
 
-	// // Get upcoming expiry tokens for configured indices
-	// tokens, err := kiteConnect.GetUpcomingExpiryTokens(ctx, cfg.Indices.DerivedIndices)
+	// Create lookup map with expiry vs token map
+	kiteConnect.CreateLookUpforStoringFileFromWebsockets(ctx)
+
+	kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetIndicesToSubscribeForIntraday())
+
+	// Get upcoming expiry tokens for configured indices
+	// tokens, err := kiteConnect.GetUpcomingExpiryTokensForIndices(ctx, indices.GetIndicesToSubscribeForIntraday())
 	// if err != nil {
 	// 	return fmt.Errorf("failed to get upcoming expiry tokens: %w", err)
 	// }

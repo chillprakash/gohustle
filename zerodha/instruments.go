@@ -1,13 +1,16 @@
 package zerodha
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"gohustle/cache"
 	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,7 +125,7 @@ func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]s
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context, instrumentNames []core.Index) error {
 	log := logger.L()
 	currentDate := time.Now().Format("02-01-2006")
-	fileStore := filestore.NewDiskFileStore(log)
+	fileStore := filestore.NewDiskFileStore()
 
 	// Check if file already exists for today
 	exists := fileStore.FileExists("instruments", currentDate)
@@ -166,13 +169,43 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 		return err
 	}
 
+	cache := cache.GetInMemoryCacheInstance()
+	now := time.Now().Truncate(24 * time.Hour)
+
 	// Store expiries in memory cache
 	for instrument, dates := range expiries {
+		// Convert dates to string format
+		dateStrs := make([]string, 0, len(dates))
+		for _, date := range dates {
+			dateStrs = append(dateStrs, date.Format("2006-01-02"))
+		}
+
 		// Key for instrument expiries
 		key := fmt.Sprintf("instrument:expiries:%s", instrument)
 
-		// Store dates as a slice
-		expiryCache.Set(key, dates, 7*24*time.Hour) // Cache for 7 days
+		// Store dates as string slice
+		cache.Set(key, dateStrs, 7*24*time.Hour) // Cache for 7 days
+
+		// Find and store nearest expiry
+		var nearestExpiry string
+		for _, dateStr := range dateStrs {
+			date, _ := time.Parse("2006-01-02", dateStr)
+			if date.Before(now) {
+				continue
+			}
+			if nearestExpiry == "" || date.Before(now) {
+				nearestExpiry = dateStr
+			}
+		}
+
+		if nearestExpiry != "" {
+			nearestKey := fmt.Sprintf("instrument:nearest_expiry:%s", instrument)
+			cache.Set(nearestKey, nearestExpiry, 7*24*time.Hour)
+			log.Info("Stored nearest expiry for instrument", map[string]interface{}{
+				"instrument": instrument,
+				"expiry":     nearestExpiry,
+			})
+		}
 	}
 
 	// Store list of instruments
@@ -181,7 +214,7 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 	for instrument := range expiries {
 		instruments = append(instruments, instrument)
 	}
-	expiryCache.Set(instrumentsKey, instruments, 7*24*time.Hour)
+	cache.Set(instrumentsKey, instruments, 7*24*time.Hour)
 
 	log.Info("Successfully stored expiries in memory cache", map[string]interface{}{
 		"instruments_count": len(expiries),
@@ -216,7 +249,7 @@ func (k *KiteConnect) GetCachedInstruments() ([]string, bool) {
 func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[string][]time.Time, error) {
 	log := logger.L()
 	currentDate := time.Now().Format("02-01-2006")
-	fileStore := filestore.NewDiskFileStore(log)
+	fileStore := filestore.NewDiskFileStore()
 
 	// Read the gzipped data
 	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
@@ -280,12 +313,6 @@ func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[s
 
 	result := convertExpiryMapToSortedSlices(expiryMap)
 
-	// Log the expiry data
-	log.Info("Instrument expiries read from file", map[string]interface{}{
-		"instruments_count": len(result),
-		"expiries":          formatExpiryMapForLog(result),
-	})
-
 	return result, nil
 }
 
@@ -299,6 +326,310 @@ func formatExpiryMapForLog(m map[string][]time.Time) map[string][]string {
 		}
 	}
 	return formatted
+}
+
+func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, indices []core.Index) ([]string, error) {
+	log := logger.L()
+	cache := cache.GetInMemoryCacheInstance()
+	now := time.Now().Truncate(24 * time.Hour)
+	tokens := make([]string, 0)
+
+	for _, index := range indices {
+		// Get expiries for this index from cache
+		key := fmt.Sprintf("instrument:expiries:%s", index.NameInOptions)
+		value, exists := cache.Get(key)
+		if !exists {
+			log.Error("No expiries found in cache for index", map[string]interface{}{
+				"index": index.NameInOptions,
+			})
+			continue
+		}
+
+		dates, ok := value.([]time.Time)
+		if !ok {
+			log.Error("Invalid data type in cache for index expiries", map[string]interface{}{
+				"index": index.NameInOptions,
+			})
+			continue
+		}
+
+		// Find the nearest upcoming expiry
+		var nearestExpiry time.Time
+		for _, date := range dates {
+			normalizedDate := date.Truncate(24 * time.Hour)
+			if normalizedDate.Before(now) {
+				continue
+			}
+			if nearestExpiry.IsZero() || normalizedDate.Before(nearestExpiry) {
+				nearestExpiry = normalizedDate
+			}
+		}
+
+		if nearestExpiry.IsZero() {
+			log.Error("No upcoming expiry found for index", map[string]interface{}{
+				"index": index.NameInOptions,
+			})
+			continue
+		}
+
+		log.Info("Found nearest expiry for index", map[string]interface{}{
+			"index":   index.NameInOptions,
+			"expiry":  nearestExpiry.Format("2006-01-02"),
+			"current": now.Format("2006-01-02"),
+		})
+
+		// Get all tokens for this index and expiry
+		for token, info := range reverseLookupCache {
+			if info.Index == index.NameInOptions && info.Expiry.Equal(nearestExpiry) {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("no tokens found for upcoming expiries")
+	}
+
+	log.Info("Retrieved tokens for upcoming expiries", map[string]interface{}{
+		"indices_count": len(indices),
+		"tokens_count":  len(tokens),
+	})
+
+	return tokens, nil
+}
+
+func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context.Context, indices []core.Index) ([]string, error) {
+	log := logger.L()
+	log.Info("Initializing lookup maps for File Store", nil)
+
+	currentDate := time.Now().Format("02-01-2006")
+	fileStore := filestore.NewDiskFileStore()
+	cache := cache.GetInMemoryCacheInstance()
+
+	// First get nearest expiry for each index from cache
+	indexExpiries := make(map[string]string)
+	for _, index := range indices {
+		nearestKey := fmt.Sprintf("instrument:nearest_expiry:%s", index.NameInOptions)
+		value, exists := cache.Get(nearestKey)
+		if !exists {
+			log.Error("No nearest expiry found in cache for index", map[string]interface{}{
+				"index": index.NameInOptions,
+			})
+			continue
+		}
+
+		nearestExpiry, ok := value.(string)
+		if !ok {
+			log.Error("Invalid data type in cache for nearest expiry", map[string]interface{}{
+				"index": index.NameInOptions,
+			})
+			continue
+		}
+
+		// Convert cache date format (2025-04-24) to instrument format (24-04-2025)
+		t, err := time.Parse("2006-01-02", nearestExpiry)
+		if err != nil {
+			log.Error("Failed to parse nearest expiry date", map[string]interface{}{
+				"error":  err.Error(),
+				"expiry": nearestExpiry,
+			})
+			continue
+		}
+		indexExpiries[index.NameInOptions] = t.Format("02-01-2006")
+	}
+
+	if len(indexExpiries) == 0 {
+		return nil, fmt.Errorf("no nearest expiries found in cache, please run SyncInstrumentExpiriesFromFileToCache first")
+	}
+
+	log.Info("Found nearest expiries from cache", map[string]interface{}{
+		"expiries": indexExpiries,
+	})
+
+	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
+	if err != nil {
+		log.Error("Failed to read instrument data", map[string]interface{}{
+			"error": err.Error(),
+			"date":  currentDate,
+		})
+		return nil, err
+	}
+
+	instrumentList := &InstrumentList{}
+	if err := proto.Unmarshal(data, instrumentList); err != nil {
+		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, err
+	}
+
+	// Map to store expiry_strike -> put/call details
+	strikeDetails := make(map[string]map[string]string)
+	expiryStrikeMap := make(map[string]*list.List)
+	uniqueStrikes := make(map[string]map[string]bool) // To track unique strikes per expiry
+
+	// Process instruments only for nearest expiry
+	for _, inst := range instrumentList.Instruments {
+		// Skip if not CE or PE
+		if inst.InstrumentType != "CE" && inst.InstrumentType != "PE" {
+			continue
+		}
+
+		// Check if this is the nearest expiry for this index
+		nearestExpiry, exists := indexExpiries[inst.Name]
+		if !exists || inst.Expiry != nearestExpiry {
+			log.Debug("Skipping instrument", map[string]interface{}{
+				"instrument":     inst.Name,
+				"inst_expiry":    inst.Expiry,
+				"nearest_expiry": nearestExpiry,
+				"match":          inst.Expiry == nearestExpiry,
+			})
+			continue
+		}
+
+		// Convert strike price to whole number
+		strike, err := strconv.ParseFloat(inst.StrikePrice, 64)
+		if err != nil {
+			log.Error("Failed to parse strike price", map[string]interface{}{
+				"error":        err.Error(),
+				"strike_price": inst.StrikePrice,
+				"symbol":       inst.Tradingsymbol,
+			})
+			continue
+		}
+		strikeStr := fmt.Sprintf("%d", int(strike))
+
+		// Create expiry_strike key using YYYY-MM-DD format for consistency
+		expiryDate, _ := time.Parse("02-01-2006", inst.Expiry)
+		expiryKey := fmt.Sprintf("%s_%s_%s", inst.Name, expiryDate.Format("2006-01-02"), strikeStr)
+
+		if strikeDetails[expiryKey] == nil {
+			strikeDetails[expiryKey] = make(map[string]string)
+		}
+
+		// Initialize list and unique strikes map for this expiry if not exists
+		expiryMapKey := fmt.Sprintf("%s_%s", inst.Name, expiryDate.Format("2006-01-02"))
+		if expiryStrikeMap[expiryMapKey] == nil {
+			expiryStrikeMap[expiryMapKey] = list.New()
+			uniqueStrikes[expiryMapKey] = make(map[string]bool)
+		}
+
+		// Add strike to list if not already present
+		if !uniqueStrikes[expiryMapKey][strikeStr] {
+			expiryStrikeMap[expiryMapKey].PushBack(strikeStr)
+			uniqueStrikes[expiryMapKey][strikeStr] = true
+		}
+
+		// Store instrument details
+		prefix := "p"
+		if inst.InstrumentType == "CE" {
+			prefix = "c"
+		}
+		details := fmt.Sprintf("%s_%s|%s_%s", prefix, inst.InstrumentToken, prefix, inst.Tradingsymbol)
+		strikeDetails[expiryKey][inst.InstrumentType] = details
+	}
+
+	// Now combine CE and PE details for each expiry_strike and store in cache
+	processedStrikes := make([]string, 0)
+	for expiryKey, details := range strikeDetails {
+		ce, hasCE := details["CE"]
+		pe, hasPE := details["PE"]
+
+		if !hasCE || !hasPE {
+			log.Debug("Incomplete option pair", map[string]interface{}{
+				"expiry_strike": expiryKey,
+				"has_ce":        hasCE,
+				"has_pe":        hasPE,
+			})
+			continue
+		}
+
+		// Combine CE and PE details
+		combinedDetails := fmt.Sprintf("%s||%s", pe, ce)
+		log.Info("Setting cache for expiry-strike", map[string]interface{}{
+			"expiry_strike":    expiryKey,
+			"combined_details": combinedDetails,
+		})
+		cache.Set(expiryKey, combinedDetails, 7*24*time.Hour)
+		processedStrikes = append(processedStrikes, expiryKey)
+	}
+
+	// Store expiry-strike mapping in cache
+	for expiryKey, strikes := range expiryStrikeMap {
+		// Convert linked list to sorted slice
+		strikeSlice := make([]string, 0, strikes.Len())
+		for e := strikes.Front(); e != nil; e = e.Next() {
+			strikeSlice = append(strikeSlice, e.Value.(string))
+		}
+		sort.Strings(strikeSlice) // Sort strikes numerically
+
+		// Store in cache with prefix to distinguish from other keys
+		cacheKey := fmt.Sprintf("strikes:%s", expiryKey)
+		cache.Set(cacheKey, strikeSlice, 7*24*time.Hour)
+
+		log.Info("Stored strikes for expiry", map[string]interface{}{
+			"expiry":  expiryKey,
+			"strikes": strikeSlice,
+		})
+	}
+
+	log.Info("Created expiry-strike lookup for nearest expiry", map[string]interface{}{
+		"processed_strikes":  len(processedStrikes),
+		"sample_expiry_keys": processedStrikes[:min(3, len(processedStrikes))],
+		"total_instruments":  len(instrumentList.Instruments),
+	})
+
+	log.Info("Processed strikes", map[string]interface{}{
+		"processed_strikes": processedStrikes,
+	})
+
+	return processedStrikes, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// CreateLookUpforFileStore creates a lookup map for index tokens vs Index name for lookup during websocke
+func (k *KiteConnect) CreateLookUpforStoringFileFromWebsockets(ctx context.Context) {
+	log := logger.L()
+	log.Info("Initializing lookup maps for File Store", nil)
+
+	currentDate := time.Now().Format("02-01-2006")
+	fileStore := filestore.NewDiskFileStore()
+	cache := cache.GetInMemoryCacheInstance()
+
+	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
+	if err != nil {
+		log.Error("Failed to read instrument data", map[string]interface{}{
+			"error": err.Error(),
+			"date":  currentDate,
+		})
+		return
+	}
+
+	instrumentList := &InstrumentList{}
+	if err := proto.Unmarshal(data, instrumentList); err != nil {
+		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+	// Process each instrument
+	for _, inst := range instrumentList.Instruments {
+		// Skip if not an option
+		if inst.InstrumentType != "CE" && inst.InstrumentType != "PE" {
+			continue
+		}
+
+		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
+			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
+			continue
+		}
+	}
 }
 
 // CreateLookupMapWithExpiryVSTokenMap extracts instrument tokens and creates a reverse lookup map
@@ -441,7 +772,7 @@ func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []co
 func (k *KiteConnect) saveInstrumentsToFile(instruments []kiteconnect.Instrument) error {
 	log := logger.L()
 	currentDate := time.Now().Format("02-01-2006")
-	fileStore := filestore.NewDiskFileStore(log)
+	fileStore := filestore.NewDiskFileStore()
 
 	// Convert to proto message
 	data, err := proto.Marshal(convertToProtoInstruments(instruments))
@@ -493,7 +824,7 @@ func convertToProtoInstruments(instruments []kiteconnect.Instrument) *Instrument
 func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error) {
 	log := logger.L()
 	currentDate := time.Now().Format("02-01-2006")
-	fileStore := filestore.NewDiskFileStore(log)
+	fileStore := filestore.NewDiskFileStore()
 
 	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
 	if err != nil {
@@ -579,12 +910,6 @@ func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*Instru
 			result.Data[instrument][expiry] = options
 		}
 	}
-
-	log.Debug("Created instrument expiry map", map[string]interface{}{
-		"instruments_count": len(result.Data),
-		"options":           countOptions(result),
-		"sample":            formatSampleData(result),
-	})
 
 	return result, nil
 }

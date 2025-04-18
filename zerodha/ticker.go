@@ -9,10 +9,12 @@ import (
 
 	"gohustle/cache"
 	"gohustle/logger"
-	"gohustle/proto"
+	"gohustle/nats"
+	pb "gohustle/proto"
 
 	"github.com/zerodha/gokiteconnect/v4/models"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
+	protobuf "google.golang.org/protobuf/proto"
 )
 
 // ConnectTicker establishes connections to Kite's ticker service
@@ -139,23 +141,23 @@ func (k *KiteConnect) CloseTicker() error {
 // Internal handlers
 func (k *KiteConnect) handleTick(tick models.Tick) {
 	log := logger.L()
-	distributor := cache.NewTickDistributor()
 	redisCache, _ := cache.NewRedisCache()
+	natsHelper := nats.GetNATSHelper()
 
 	log.Info("Received tick", map[string]interface{}{
 		"token": tick.InstrumentToken,
 	})
 	// Get instrument info
-	tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
-	instrumentInfo, exists := k.GetInstrumentInfo(tokenStr)
-	if !exists {
-		return
-	}
+	// tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
+	// instrumentInfo, exists := k.GetInstrumentInfo(tokenStr)
+	// if !exists {
+	// 	return
+	// }
 
 	// Convert to protobuf and marshal
-	protoTick := &proto.TickData{
+	protoTick := &pb.TickData{
 		// Basic info
-		IndexName:       instrumentInfo.Index,
+		// IndexName:       instrumentInfo.Index,
 		InstrumentToken: tick.InstrumentToken,
 		IsTradable:      tick.IsTradable,
 		IsIndex:         tick.IsIndex,
@@ -168,7 +170,7 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 
 		// Additional metadata
 
-		TargetFile: instrumentInfo.TargetFile,
+		// TargetFile: instrumentInfo.TargetFile,
 
 		// Price and quantity
 		LastPrice:          tick.LastPrice,
@@ -187,7 +189,7 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		NetChange: tick.NetChange,
 
 		// OHLC data
-		Ohlc: &proto.TickData_OHLC{
+		Ohlc: &pb.TickData_OHLC{
 			Open:  tick.OHLC.Open,
 			High:  tick.OHLC.High,
 			Low:   tick.OHLC.Low,
@@ -195,15 +197,28 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		},
 
 		// Market depth
-		Depth: &proto.TickData_MarketDepth{
+		Depth: &pb.TickData_MarketDepth{
 			Buy:  convertDepthItems(tick.Depth.Buy[:]),
 			Sell: convertDepthItems(tick.Depth.Sell[:]),
 		},
 	}
 
-	// Distribute the tick
-	if err := distributor.DistributeTick(context.Background(), protoTick); err != nil {
-		log.Error("Failed to distribute tick", map[string]interface{}{
+	// Marshal protobuf message to bytes
+	tickBytes, err := protobuf.Marshal(protoTick)
+	if err != nil {
+		log.Error("Failed to marshal tick data", map[string]interface{}{
+			"error": err.Error(),
+			"token": tick.InstrumentToken,
+		})
+		return
+	}
+
+	log.Info("Publishing tick to NATS", map[string]interface{}{
+		"token": tick.InstrumentToken,
+	})
+
+	if err := natsHelper.PublishTick(context.Background(), "ticks", tickBytes); err != nil {
+		log.Error("Failed to publish tick to NATS", map[string]interface{}{
 			"error": err.Error(),
 			"token": tick.InstrumentToken,
 		})
@@ -217,9 +232,9 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	ltpDB.Set(ctx, dataKey, tick.LastPrice, 24*time.Hour)
 
 	log.Debug("Stored tick", map[string]interface{}{
-		"token":     tick.InstrumentToken,
-		"index":     instrumentInfo.Index,
-		"is_index":  instrumentInfo.IsIndex,
+		"token": tick.InstrumentToken,
+		// "index":     instrumentInfo.Index,
+		// "is_index":  instrumentInfo.IsIndex,
 		"timestamp": tick.Timestamp.Format("2006-01-02 15:04:05.000"),
 		"data_key":  dataKey,
 	})
@@ -260,10 +275,10 @@ func (k *KiteConnect) onNoReconnect(attempt int) {
 }
 
 // Helper function to convert depth items
-func convertDepthItems(items []models.DepthItem) []*proto.TickData_DepthItem {
-	result := make([]*proto.TickData_DepthItem, len(items))
+func convertDepthItems(items []models.DepthItem) []*pb.TickData_DepthItem {
+	result := make([]*pb.TickData_DepthItem, len(items))
 	for i, item := range items {
-		result[i] = &proto.TickData_DepthItem{
+		result[i] = &pb.TickData_DepthItem{
 			Price:    item.Price,
 			Quantity: uint32(item.Quantity),
 			Orders:   uint32(item.Orders),

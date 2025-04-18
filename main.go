@@ -12,10 +12,29 @@ import (
 	"gohustle/config"
 	"gohustle/core"
 	"gohustle/logger"
+	natspkg "gohustle/nats"
 	"gohustle/zerodha"
 )
 
 func startDataProcessing(ctx context.Context, cfg *config.Config) error {
+	log := logger.L()
+
+	// Initialize NATS
+	natsHelper := natspkg.GetNATSHelper()
+	if err := natsHelper.Initialize(ctx); err != nil {
+		return fmt.Errorf("failed to initialize NATS: %w", err)
+	}
+
+	// Create and start NATS consumer
+	consumer := natspkg.NewTickConsumer(natsHelper)
+	go func() {
+		if err := consumer.Start(ctx); err != nil {
+			log.Error("Consumer error", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}()
+
 	// Initialize KiteConnect with writer pool
 	kiteConnect := zerodha.GetKiteConnect()
 	if kiteConnect == nil {
@@ -47,12 +66,6 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 		"tokens": len(tokens),
 	})
 
-	// Get upcoming expiry tokens for configured indices
-	// tokens, err := kiteConnect.GetUpcomingExpiryTokensForIndices(ctx, indices.GetIndicesToSubscribeForIntraday())
-	// if err != nil {
-	// 	return fmt.Errorf("failed to get upcoming expiry tokens: %w", err)
-	// }
-
 	// Add index tokens for spot indices
 	indexTokens := kiteConnect.GetIndexTokens()
 	var indexTokenSlice []string
@@ -81,14 +94,6 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	})
 
 	kiteConnect.InitializeTickersWithTokens(allTokens)
-
-	// // Initialize and start scheduler
-	// scheduler := scheduler.NewScheduler(
-	// 	ctx,
-	// 	"data/exports",
-	// 	&cfg.Telegram,
-	// )
-	// scheduler.Start()
 
 	// Block until context is cancelled
 	<-ctx.Done()

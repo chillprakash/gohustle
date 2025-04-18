@@ -331,57 +331,97 @@ func formatExpiryMapForLog(m map[string][]time.Time) map[string][]string {
 func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, indices []core.Index) ([]string, error) {
 	log := logger.L()
 	cache := cache.GetInMemoryCacheInstance()
-	now := time.Now().Truncate(24 * time.Hour)
 	tokens := make([]string, 0)
 
 	for _, index := range indices {
-		// Get expiries for this index from cache
-		key := fmt.Sprintf("instrument:expiries:%s", index.NameInOptions)
-		value, exists := cache.Get(key)
+		// Get nearest expiry for this index from cache
+		nearestKey := fmt.Sprintf("instrument:nearest_expiry:%s", index.NameInOptions)
+		value, exists := cache.Get(nearestKey)
 		if !exists {
-			log.Error("No expiries found in cache for index", map[string]interface{}{
+			log.Error("No nearest expiry found in cache for index", map[string]interface{}{
 				"index": index.NameInOptions,
 			})
 			continue
 		}
 
-		dates, ok := value.([]time.Time)
+		nearestExpiry, ok := value.(string)
 		if !ok {
-			log.Error("Invalid data type in cache for index expiries", map[string]interface{}{
+			log.Error("Invalid data type in cache for nearest expiry", map[string]interface{}{
 				"index": index.NameInOptions,
 			})
 			continue
 		}
 
-		// Find the nearest upcoming expiry
-		var nearestExpiry time.Time
-		for _, date := range dates {
-			normalizedDate := date.Truncate(24 * time.Hour)
-			if normalizedDate.Before(now) {
-				continue
-			}
-			if nearestExpiry.IsZero() || normalizedDate.Before(nearestExpiry) {
-				nearestExpiry = normalizedDate
-			}
-		}
-
-		if nearestExpiry.IsZero() {
-			log.Error("No upcoming expiry found for index", map[string]interface{}{
-				"index": index.NameInOptions,
+		// Get strikes for this index and expiry
+		strikesKey := fmt.Sprintf("strikes:%s_%s", index.NameInOptions, nearestExpiry)
+		strikesValue, exists := cache.Get(strikesKey)
+		if !exists {
+			log.Error("No strikes found in cache for index and expiry", map[string]interface{}{
+				"index":  index.NameInOptions,
+				"expiry": nearestExpiry,
 			})
 			continue
 		}
 
-		log.Info("Found nearest expiry for index", map[string]interface{}{
-			"index":   index.NameInOptions,
-			"expiry":  nearestExpiry.Format("2006-01-02"),
-			"current": now.Format("2006-01-02"),
+		strikes, ok := strikesValue.([]string)
+		if !ok {
+			log.Error("Invalid data type in cache for strikes", map[string]interface{}{
+				"index":  index.NameInOptions,
+				"expiry": nearestExpiry,
+			})
+			continue
+		}
+
+		log.Info("Found strikes for index", map[string]interface{}{
+			"index":         index.NameInOptions,
+			"expiry":        nearestExpiry,
+			"strikes_count": len(strikes),
 		})
 
-		// Get all tokens for this index and expiry
-		for token, info := range reverseLookupCache {
-			if info.Index == index.NameInOptions && info.Expiry.Equal(nearestExpiry) {
-				tokens = append(tokens, token)
+		// For each strike, get CE/PE tokens
+		for _, strike := range strikes {
+			detailsKey := fmt.Sprintf("%s_%s_%s", index.NameInOptions, nearestExpiry, strike)
+			detailsValue, exists := cache.Get(detailsKey)
+			if !exists {
+				log.Debug("No details found for strike", map[string]interface{}{
+					"strike": strike,
+					"key":    detailsKey,
+				})
+				continue
+			}
+
+			details, ok := detailsValue.(string)
+			if !ok {
+				log.Error("Invalid data type for strike details", map[string]interface{}{
+					"strike": strike,
+					"key":    detailsKey,
+				})
+				continue
+			}
+
+			// Format: p_19126786|p_BANKNIFTY25APR48300PE||c_19126530|c_BANKNIFTY25APR48300CE
+			// Split by || to separate PE and CE
+			parts := strings.Split(details, "||")
+			if len(parts) != 2 {
+				log.Error("Invalid details format", map[string]interface{}{
+					"details": details,
+					"strike":  strike,
+				})
+				continue
+			}
+
+			// Extract PE token
+			peTokenParts := strings.Split(parts[0], "|")
+			if len(peTokenParts) == 2 {
+				peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
+				tokens = append(tokens, peToken)
+			}
+
+			// Extract CE token
+			ceTokenParts := strings.Split(parts[1], "|")
+			if len(ceTokenParts) == 2 {
+				ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
+				tokens = append(tokens, ceToken)
 			}
 		}
 	}
@@ -393,6 +433,7 @@ func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, ind
 	log.Info("Retrieved tokens for upcoming expiries", map[string]interface{}{
 		"indices_count": len(indices),
 		"tokens_count":  len(tokens),
+		"sample_tokens": tokens[:min(5, len(tokens))],
 	})
 
 	return tokens, nil
@@ -546,10 +587,6 @@ func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context
 
 		// Combine CE and PE details
 		combinedDetails := fmt.Sprintf("%s||%s", pe, ce)
-		log.Info("Setting cache for expiry-strike", map[string]interface{}{
-			"expiry_strike":    expiryKey,
-			"combined_details": combinedDetails,
-		})
 		cache.Set(expiryKey, combinedDetails, 7*24*time.Hour)
 		processedStrikes = append(processedStrikes, expiryKey)
 	}
@@ -569,18 +606,13 @@ func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context
 
 		log.Info("Stored strikes for expiry", map[string]interface{}{
 			"expiry":  expiryKey,
-			"strikes": strikeSlice,
+			"strikes": len(strikeSlice),
 		})
 	}
-
 	log.Info("Created expiry-strike lookup for nearest expiry", map[string]interface{}{
 		"processed_strikes":  len(processedStrikes),
 		"sample_expiry_keys": processedStrikes[:min(3, len(processedStrikes))],
 		"total_instruments":  len(instrumentList.Instruments),
-	})
-
-	log.Info("Processed strikes", map[string]interface{}{
-		"processed_strikes": processedStrikes,
 	})
 
 	return processedStrikes, nil

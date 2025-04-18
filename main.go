@@ -39,39 +39,48 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetIndicesToSubscribeForIntraday())
 
 	// Get upcoming expiry tokens for configured indices
+	tokens, err := kiteConnect.GetUpcomingExpiryTokensForIndices(ctx, indices.GetIndicesToSubscribeForIntraday())
+	if err != nil {
+		return fmt.Errorf("failed to get upcoming expiry tokens: %w", err)
+	}
+	logger.L().Info("Upcoming expiry tokens", map[string]interface{}{
+		"tokens": len(tokens),
+	})
+
+	// Get upcoming expiry tokens for configured indices
 	// tokens, err := kiteConnect.GetUpcomingExpiryTokensForIndices(ctx, indices.GetIndicesToSubscribeForIntraday())
 	// if err != nil {
 	// 	return fmt.Errorf("failed to get upcoming expiry tokens: %w", err)
 	// }
 
-	// // Add index tokens for spot indices
-	// indexTokens := kiteConnect.GetIndexTokens()
-	// var indexTokenSlice []string
-	// for _, token := range indexTokens {
-	// 	indexTokenSlice = append(indexTokenSlice, token)
-	// }
+	// Add index tokens for spot indices
+	indexTokens := kiteConnect.GetIndexTokens()
+	var indexTokenSlice []string
+	for _, token := range indexTokens {
+		indexTokenSlice = append(indexTokenSlice, token)
+	}
 
-	// // Convert both token slices to uint32
-	// normalTokens, err := convertTokensToUint32(tokens)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to convert normal tokens: %w", err)
-	// }
+	// Convert both token slices to uint32
+	normalTokens, err := convertTokensToUint32(tokens)
+	if err != nil {
+		return fmt.Errorf("failed to convert normal tokens: %w", err)
+	}
 
-	// indexTokensUint32, err := convertTokensToUint32(indexTokenSlice)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to convert index tokens: %w", err)
-	// }
+	indexTokensUint32, err := convertTokensToUint32(indexTokenSlice)
+	if err != nil {
+		return fmt.Errorf("failed to convert index tokens: %w", err)
+	}
 
-	// // Combine both uint32 token lists for subscription
-	// allTokens := append(normalTokens, indexTokensUint32...)
+	// Combine both uint32 token lists for subscription
+	allTokens := append(normalTokens, indexTokensUint32...)
 
-	// logger.L().Info("Initializing tickers with tokens", map[string]interface{}{
-	// 	"normal_tokens_count": len(normalTokens),
-	// 	"index_tokens_count":  len(indexTokensUint32),
-	// 	"total_tokens":        len(allTokens),
-	// })
+	logger.L().Info("Initializing tickers with tokens", map[string]interface{}{
+		"normal_tokens_count": len(normalTokens),
+		"index_tokens_count":  len(indexTokensUint32),
+		"total_tokens":        len(allTokens),
+	})
 
-	// kiteConnect.InitializeTickersWithTokens(allTokens)
+	kiteConnect.InitializeTickersWithTokens(allTokens)
 
 	// // Initialize and start scheduler
 	// scheduler := scheduler.NewScheduler(

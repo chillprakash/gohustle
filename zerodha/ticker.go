@@ -142,6 +142,9 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	distributor := cache.NewTickDistributor()
 	redisCache, _ := cache.NewRedisCache()
 
+	log.Info("Received tick", map[string]interface{}{
+		"token": tick.InstrumentToken,
+	})
 	// Get instrument info
 	tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
 	instrumentInfo, exists := k.GetInstrumentInfo(tokenStr)

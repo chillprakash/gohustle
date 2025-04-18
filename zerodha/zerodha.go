@@ -316,12 +316,32 @@ func (k *KiteConnect) RefreshToken(ctx context.Context) (string, error) {
 
 // Ticker Management Methods
 
+// InitializeTickersWithTokens subscribes to the given tokens across available tickers
 func (k *KiteConnect) InitializeTickersWithTokens(tokens []uint32) error {
-	k.log.Info("Initializing tickers with tokens", map[string]interface{}{
+	log := logger.L()
+	log.Info("Initializing token subscriptions", map[string]interface{}{
 		"tokens_count": len(tokens),
 	})
 
+	if len(tokens) == 0 {
+		return fmt.Errorf("no tokens provided for subscription")
+	}
+
+	// Calculate tokens per connection for validation
+	tokensPerConnection := (len(tokens) + MaxConnections - 1) / MaxConnections
+	if tokensPerConnection > MaxTokensPerConnection {
+		log.Error("Too many tokens", map[string]interface{}{
+			"tokens_per_connection": tokensPerConnection,
+			"max_allowed":           MaxTokensPerConnection,
+		})
+		return fmt.Errorf("too many tokens: %d tokens per connection (max: %d)", tokensPerConnection, MaxTokensPerConnection)
+	}
+
+	k.mu.Lock()
 	k.tokens = tokens
+	k.mu.Unlock()
+
+	// Connect and subscribe using the implementation in ticker.go
 	return k.ConnectTicker()
 }
 

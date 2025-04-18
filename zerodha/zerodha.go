@@ -147,15 +147,45 @@ func (k *KiteConnect) IsTokenValid(ctx context.Context) bool {
 
 	cred, err := k.db.GetCredential(k.getTokenKey())
 	if err != nil || cred == nil {
+		k.log.Info("No credential found or error retrieving", map[string]interface{}{
+			"error": err,
+		})
 		return false
 	}
 
 	var tokenData token.TokenData
 	if err := json.Unmarshal([]byte(cred.Value), &tokenData); err != nil {
+		k.log.Error("Failed to unmarshal token data", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return false
 	}
 
-	return time.Now().Before(tokenData.ExpiresAt)
+	now := time.Now()
+
+	// Check if token has expired
+	if !now.Before(tokenData.ExpiresAt) {
+		k.log.Info("Token has expired", map[string]interface{}{
+			"expires_at": tokenData.ExpiresAt,
+			"now":        now,
+		})
+		return false
+	}
+
+	// Get today's 8 AM
+	today8AM := time.Date(now.Year(), now.Month(), now.Day(), 8, 0, 0, 0, now.Location())
+
+	// If it's past 8 AM today and token was generated before 8 AM, consider it invalid
+	if now.After(today8AM) && tokenData.CreatedAt.Before(today8AM) {
+		k.log.Info("Token needs refresh (generated before 8 AM today)", map[string]interface{}{
+			"token_created_at": tokenData.CreatedAt,
+			"today_8am":        today8AM,
+			"now":              now,
+		})
+		return false
+	}
+
+	return true
 }
 
 // StoreToken saves the token with expiry
@@ -165,10 +195,13 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 		"key":          k.getTokenKey(),
 	})
 
+	now := time.Now()
+
 	// Create TokenData
 	tokenData := token.TokenData{
 		AccessToken: accessToken,
-		ExpiresAt:   time.Now().Add(TokenValidity),
+		ExpiresAt:   now.Add(TokenValidity),
+		CreatedAt:   now,
 	}
 
 	// Marshal TokenData to store as value
@@ -184,6 +217,7 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 		"token_length": len(accessToken),
 		"key":          k.getTokenKey(),
 		"expires_at":   tokenData.ExpiresAt,
+		"created_at":   tokenData.CreatedAt,
 	})
 
 	// Store the marshaled TokenData as a string in SQLite
@@ -200,6 +234,7 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 		"token_length": len(accessToken),
 		"key":          k.getTokenKey(),
 		"expires_at":   tokenData.ExpiresAt,
+		"created_at":   tokenData.CreatedAt,
 	})
 
 	// Verify the stored token

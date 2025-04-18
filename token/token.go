@@ -17,4 +17,5 @@ type TokenManager interface {
 type TokenData struct {
 	AccessToken string    `json:"access_token"`
 	ExpiresAt   time.Time `json:"expires_at"`
+	CreatedAt   time.Time `json:"created_at"`
 }

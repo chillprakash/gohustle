@@ -23,7 +23,7 @@ func (r *LoginResponse) IsSuccess() bool {
 
 // GetCurrentSpotPriceOfAllIndices fetches current spot prices for all indices
 func (k *KiteConnect) GetCurrentSpotPriceOfAllIndices(ctx context.Context) (map[string]float64, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Define exchange trading symbols
 	exchangeTradingSymbols := []string{
@@ -86,7 +86,7 @@ type InstrumentData struct {
 
 // Add this helper method
 func (k *KiteConnect) getDataPath() string {
-	log := logger.GetLogger()
+	log := logger.L()
 	dataPath := "data"
 	config := config.GetConfig()
 	if config != nil && config.Kite.DataPath != "" {
@@ -105,7 +105,7 @@ func (k *KiteConnect) getDataPath() string {
 
 // Update GetUpcomingExpiries method
 func (k *KiteConnect) GetUpcomingExpiries(ctx context.Context) error {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Get data path using helper method
 	dataPath := k.getDataPath()
@@ -152,7 +152,7 @@ func (k *KiteConnect) GetUpcomingExpiries(ctx context.Context) error {
 }
 
 func (k *KiteConnect) processFile(filePath string) error {
-	log := logger.GetLogger()
+	log := logger.L()
 	file, err := os.Open(filePath)
 	if err != nil {
 		log.Error("Failed to open file", map[string]interface{}{
@@ -200,7 +200,7 @@ func (k *KiteConnect) processFile(filePath string) error {
 }
 
 func (k *KiteConnect) ConnectTicker() error {
-	log := logger.GetLogger()
+	log := logger.L()
 	log.Info("Connecting to ticker", nil)
 
 	// Example logic for connecting to a ticker

@@ -26,10 +26,8 @@ const (
 	TokenSetKey    = "kite:tokens" // Set to track all tokens
 )
 
-var _ TokenOperations = (*KiteConnect)(nil)
-
 func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Get Redis cache instance
 	redisCache, err := cache.NewRedisCache()
@@ -59,7 +57,7 @@ func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
 }
 
 func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Get Redis cache instance
 	redisCache, err := cache.NewRedisCache()
@@ -93,7 +91,7 @@ func (k *KiteConnect) refreshAccessToken(ctx context.Context) (string, error) {
 }
 
 func (k *KiteConnect) performLogin(client *http.Client) *LoginResponse {
-	log := logger.GetLogger()
+	log := logger.L()
 	cfg := config.GetConfig()
 
 	loginData := url.Values{}
@@ -126,7 +124,7 @@ func (k *KiteConnect) performLogin(client *http.Client) *LoginResponse {
 }
 
 func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *LoginResponse) {
-	log := logger.GetLogger()
+	log := logger.L()
 	cfg := config.GetConfig()
 
 	totpCode, err := totp.GenerateCode(cfg.Kite.TOTPKey, time.Now())
@@ -158,7 +156,7 @@ func (k *KiteConnect) performTwoFactorAuth(client *http.Client, loginResult *Log
 }
 
 func (k *KiteConnect) getRequestToken(client *http.Client) string {
-	log := logger.GetLogger()
+	log := logger.L()
 	cfg := config.GetConfig()
 
 	kiteLoginURL := fmt.Sprintf(
@@ -183,7 +181,7 @@ func (k *KiteConnect) getRequestToken(client *http.Client) string {
 
 // GenerateAccessToken generates and sets the access token using the request token
 func (k *KiteConnect) generateAccessToken(ctx context.Context, requestToken string) (string, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 	cfg := config.GetConfig()
 
 	session, err := k.Kite.GenerateSession(requestToken, cfg.Kite.APISecret)
@@ -207,7 +205,7 @@ func (k *KiteConnect) generateAccessToken(ctx context.Context, requestToken stri
 
 // extractRequestToken extracts the request token from the redirect URL
 func (k *KiteConnect) extractRequestToken(errorMsg string) string {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	re := regexp.MustCompile(`request_token=([^&"]+)(&.*)?`)
 	matches := re.FindStringSubmatch(errorMsg)
@@ -227,7 +225,7 @@ func (k *KiteConnect) extractRequestToken(errorMsg string) string {
 	return ""
 }
 func (k *KiteConnect) initializeHTTPClient() *http.Client {
-	log := logger.GetLogger()
+	log := logger.L()
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		log.Error("Failed to create cookie jar", map[string]interface{}{

@@ -22,7 +22,7 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	}
 
 	// // Download instrument data
-	// if err := kiteConnect.DownloadInstrumentData(ctx); err != nil {
+	// if err := kiteConnect.DownloadInstrumentData(); err != nil {
 	// 	return fmt.Errorf("failed to download instrument data: %w", err)
 	// }
 

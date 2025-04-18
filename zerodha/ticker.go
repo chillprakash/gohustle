@@ -17,7 +17,7 @@ import (
 )
 
 func (k *KiteConnect) ConnectTickers() error {
-	log := logger.GetLogger()
+	log := logger.L()
 	cfg := config.GetConfig()
 
 	if len(k.tokens) == 0 {
@@ -119,7 +119,7 @@ func (k *KiteConnect) ConnectTickers() error {
 }
 
 func (k *KiteConnect) CloseTicker() error {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	for i, ticker := range k.Tickers {
 		if ticker != nil {
@@ -135,7 +135,7 @@ func (k *KiteConnect) CloseTicker() error {
 
 // Internal handlers
 func (k *KiteConnect) handleTick(tick models.Tick) {
-	log := logger.GetLogger()
+	log := logger.L()
 	distributor := cache.NewTickDistributor()
 	redisCache, _ := cache.NewRedisCache()
 
@@ -220,7 +220,7 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 }
 
 func (k *KiteConnect) onError(err error) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	log.Error("Ticker error", map[string]interface{}{
 		"error": err.Error(),
@@ -228,7 +228,7 @@ func (k *KiteConnect) onError(err error) {
 }
 
 func (k *KiteConnect) onClose(code int, reason string) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	log.Info("Ticker closed", map[string]interface{}{
 		"code":   code,
@@ -237,7 +237,7 @@ func (k *KiteConnect) onClose(code int, reason string) {
 }
 
 func (k *KiteConnect) onReconnect(attempt int, delay time.Duration) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	log.Info("Ticker reconnecting", map[string]interface{}{
 		"attempt": attempt,
@@ -246,7 +246,7 @@ func (k *KiteConnect) onReconnect(attempt int, delay time.Duration) {
 }
 
 func (k *KiteConnect) onNoReconnect(attempt int) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	log.Error("Ticker max reconnect attempts reached", map[string]interface{}{
 		"attempts": attempt,

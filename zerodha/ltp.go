@@ -9,7 +9,7 @@ import (
 
 func (z *KiteConnect) GetIndexLTPFromRedis(ctx context.Context, index string) (float64, error) {
 	redisCache, err := cache.NewRedisCache()
-	log := logger.GetLogger()
+	log := logger.L()
 	if err != nil {
 		return 0, err
 	}

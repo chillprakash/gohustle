@@ -30,6 +30,7 @@ type ExpiryOptions struct {
 }
 
 // InstrumentExpiryMap organizes options by instrument and expiry
+
 type InstrumentExpiryMap struct {
 	Data map[string]map[time.Time]ExpiryOptions
 }
@@ -60,7 +61,7 @@ func (k *KiteConnect) GetInstrumentInfo(token string) (TokenInfo, bool) {
 }
 
 func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]string {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	instrumentMutex.RLock()
 	defer instrumentMutex.RUnlock()
@@ -114,7 +115,7 @@ func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]s
 
 // DownloadInstrumentData downloads and saves instrument data
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Define instrument names we're interested in
 	instrumentNames := []string{"NIFTY", "SENSEX"}
@@ -138,11 +139,11 @@ func (k *KiteConnect) DownloadInstrumentData(ctx context.Context) error {
 	})
 
 	// Save filtered data
-	return k.saveInstrumentsToFile(ctx, filteredInstruments)
+	return k.saveInstrumentsToFile(filteredInstruments)
 }
 
 func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context) error {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Read expiries from file
 	expiries, err := k.readInstrumentExpiriesFromFile(ctx)
@@ -170,9 +171,9 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 
 // GetInstrumentExpiries reads the gzipped instrument data and returns expiry dates
 func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[string][]time.Time, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 	currentDate := time.Now().Format("02-01-2006")
-	fileStore := filestore.NewDiskFileStore()
+	fileStore := filestore.NewDiskFileStore(log)
 
 	// Read the gzipped data
 	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
@@ -243,7 +244,7 @@ func formatExpiryMapForLog(m map[string][]time.Time) map[string][]string {
 // CreateLookupMapWithExpiryVSTokenMap extracts instrument tokens and creates a reverse lookup map
 func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(ctx context.Context) (map[string]string, map[string]TokenInfo, map[string]string) {
 	once.Do(func() {
-		log := logger.GetLogger()
+		log := logger.L()
 		log.Info("Initializing lookup maps", nil)
 		// Get the full instrument map
 		instrumentMap, err := k.GetInstrumentExpirySymbolMap(ctx)
@@ -377,10 +378,10 @@ func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []st
 	return filtered
 }
 
-func (k *KiteConnect) saveInstrumentsToFile(ctx context.Context, instruments []kiteconnect.Instrument) error {
-	log := logger.GetLogger()
+func (k *KiteConnect) saveInstrumentsToFile(instruments []kiteconnect.Instrument) error {
+	log := logger.L()
 	currentDate := time.Now().Format("02-01-2006")
-	fileStore := filestore.NewDiskFileStore()
+	fileStore := filestore.NewDiskFileStore(log)
 
 	// Convert to proto message
 	data, err := proto.Marshal(convertToProtoInstruments(instruments))
@@ -430,9 +431,9 @@ func convertToProtoInstruments(instruments []kiteconnect.Instrument) *Instrument
 
 // GetInstrumentExpirySymbolMap reads instrument data and organizes trading symbols
 func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 	currentDate := time.Now().Format("02-01-2006")
-	fileStore := filestore.NewDiskFileStore()
+	fileStore := filestore.NewDiskFileStore(log)
 
 	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
 	if err != nil {
@@ -580,7 +581,7 @@ func formatOptionSample(options []OptionTokenPair, limit int) []map[string]strin
 }
 
 func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, indices []string) ([]string, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Get the full instrument map
 	symbolMap, err := k.GetInstrumentExpirySymbolMap(ctx)
@@ -649,18 +650,16 @@ func extractIndex(symbol string) string {
 
 // GetIndexTokens returns a map of index names to their instrument tokens
 func (k *KiteConnect) GetIndexTokens() map[string]string {
-	return map[string]string{
-		"NIFTY":  "256265",
-		"SENSEX": "265",
-		// "BANKEX":     "274441",
-		// "BANKNIFTY":  "260105",
-		// "FINNIFTY":   "257801",
-		// "MIDCPNIFTY": "288009",
+	indices := GetIndices()
+	tokens := make(map[string]string)
+	for _, index := range indices.GetAllIndices() {
+		tokens[index.ExchangeName] = index.InstrumentToken
 	}
+	return tokens
 }
 
 func (k *KiteConnect) GetIndexVsExpiryMap(ctx context.Context) (map[string][]time.Time, error) {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Read expiries from file
 	expiries, err := k.readInstrumentExpiriesFromFile(ctx)
@@ -718,7 +717,7 @@ func formatExpiryMap(m map[string][]time.Time) map[string][]string {
 }
 
 func (k *KiteConnect) saveExpiriesToRedis(ctx context.Context, expiries map[string][]time.Time) error {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	// Get Redis cache instance
 	redisCache, err := cache.NewRedisCache()
@@ -788,7 +787,7 @@ func (k *KiteConnect) saveExpiriesToRedis(ctx context.Context, expiries map[stri
 
 // PrintStrikeCache prints the contents of reverseLookupCacheWithStrike
 func (k *KiteConnect) PrintStrikeCache() {
-	log := logger.GetLogger()
+	log := logger.L()
 
 	instrumentMutex.RLock()
 	defer instrumentMutex.RUnlock()

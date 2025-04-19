@@ -662,6 +662,10 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsockets(ctx context.Conte
 			continue
 		}
 	}
+
+	for _, index := range core.GetIndices().GetIndicesToSubscribeForIntraday() {
+		cache.Set(index.InstrumentToken, index.NameInOptions, 7*24*time.Hour)
+	}
 }
 
 // CreateLookupMapWithExpiryVSTokenMap extracts instrument tokens and creates a reverse lookup map

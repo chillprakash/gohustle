@@ -17,7 +17,7 @@ import (
 const (
 	FlushInterval          = 1 * time.Second
 	BatchSize              = 1000
-	DefaultConsumerWorkers = 4
+	DefaultConsumerWorkers = 8
 	DataDir                = "data/ticks"
 )
 
@@ -39,7 +39,8 @@ type TickConsumer struct {
 	subMu         sync.Mutex // protect subscriptions slice
 	wg            sync.WaitGroup
 	metrics       *consumerMetrics
-	done          chan struct{} // signal for graceful shutdown
+	done          chan struct{}  // signal for graceful shutdown
+	msgChan       chan *nats.Msg // Channel for queuing messages
 }
 
 type consumerMetrics struct {
@@ -69,6 +70,7 @@ func GetTickConsumer(ctx context.Context) (*TickConsumer, error) {
 			lastFlush:   make(map[string]time.Time),
 			metrics:     &consumerMetrics{},
 			done:        make(chan struct{}),
+			msgChan:     make(chan *nats.Msg, 10000), // Buffered channel for messages
 		}
 
 		// Initialize NATS connection
@@ -108,8 +110,10 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 		"queue_group":    queue,
 	})
 
-	// Create context for internal operations
 	workerCtx, cancel := context.WithCancel(context.Background())
+
+	// Start metrics logging
+	go c.logMetrics(workerCtx)
 
 	// Start flush routine
 	flushTicker := time.NewTicker(FlushInterval)
@@ -125,56 +129,46 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 		}
 	}()
 
-	// Start workers
+	// Single subscription to receive messages
+	sub, err := c.nats.QueueSubscribe(workerCtx, subject, queue, func(msg *nats.Msg) {
+		select {
+		case <-workerCtx.Done():
+			return
+		case c.msgChan <- msg:
+			// Message queued successfully
+		default:
+			// Channel full - log warning and skip message
+			c.log.Error("Message channel full - dropping message", map[string]interface{}{
+				"subject": msg.Subject,
+			})
+			c.incrementErrorCount()
+		}
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to create subscription: %w", err)
+	}
+
+	c.subMu.Lock()
+	c.subscriptions = append(c.subscriptions, sub)
+	c.subMu.Unlock()
+
+	// Start worker pool to process messages from channel
 	for i := 0; i < c.workerCount; i++ {
 		workerId := i
 		c.wg.Add(1)
-		go func() {
+		go func(id int) {
 			defer c.wg.Done()
-
-			// Each worker gets its own subscription
-			sub, err := c.nats.QueueSubscribe(workerCtx, subject, queue, func(msg *nats.Msg) {
-				select {
-				case <-workerCtx.Done():
-					return
-				default:
-					c.handleMessage(msg, workerId)
-				}
-			})
-			if err != nil {
-				c.log.Error("Failed to start consumer worker", map[string]interface{}{
-					"worker_id": workerId,
-					"error":     err.Error(),
-				})
-				return
-			}
-
-			c.subMu.Lock()
-			c.subscriptions = append(c.subscriptions, sub)
-			c.subMu.Unlock()
-
-			c.log.Info("Started consumer worker", map[string]interface{}{
-				"worker_id": workerId,
-			})
-
-			// Keep the worker running until context is cancelled
-			<-workerCtx.Done()
-			c.log.Info("Worker shutting down", map[string]interface{}{
-				"worker_id": workerId,
-			})
-		}()
+			c.processMessages(workerCtx, id)
+		}(workerId)
 	}
 
 	// Monitor main context for shutdown
 	go func() {
 		<-ctx.Done()
 		c.log.Info("Initiating consumer shutdown")
-		cancel() // Cancel worker context
-
-		// Wait for all workers to complete
+		cancel()
 		c.wg.Wait()
-
-		// Run cleanup after all workers are done
 		c.cleanup()
 		c.log.Info("Consumer shutdown complete")
 	}()
@@ -182,8 +176,54 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 	return nil
 }
 
+// New method to process messages from channel
+func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
+	c.log.Info("Started message processor", map[string]interface{}{
+		"worker_id": workerId,
+	})
+
+	// For channel draining
+	drainTimer := time.NewTicker(10 * time.Millisecond)
+	defer drainTimer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.log.Info("Message processor shutting down", map[string]interface{}{
+				"worker_id": workerId,
+			})
+			return
+		case <-drainTimer.C:
+			// Aggressively drain the message channel
+			drainCount := 0
+			for drainCount < 100 { // Process up to 100 messages at once
+				select {
+				case msg := <-c.msgChan:
+					c.handleMessage(msg, workerId)
+					drainCount++
+				default:
+					// No more messages in channel
+					goto done
+				}
+			}
+		done:
+			if drainCount > 0 {
+				c.log.Debug("Drained messages", map[string]interface{}{
+					"worker_id": workerId,
+					"count":     drainCount,
+				})
+			}
+		}
+	}
+}
+
 // handleMessage processes incoming NATS messages
 func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
+	// Reduce to debug level for high-volume logs
+	c.log.Debug("Received tick", map[string]interface{}{
+		"subject": msg.Subject,
+	})
+
 	tick := &pb.TickData{}
 	if err := proto.Unmarshal(msg.Data, tick); err != nil {
 		c.log.Error("Failed to unmarshal tick data", map[string]interface{}{
@@ -193,27 +233,34 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 		c.incrementErrorCount()
 		return
 	}
-
-	c.log.Info("Received tick", map[string]interface{}{
-		"tick": tick,
-	})
-
 	c.addToBatch(tick, workerId)
 	c.incrementReceivedCount()
 }
 
-// addToBatch adds a tick to the appropriate batch
+// addToBatch adds a tick to the appropriate batch with optimized locking
 func (c *TickConsumer) addToBatch(tick *pb.TickData, workerId int) {
 	index := tick.IndexName
 
-	c.batchMu.Lock()
-	if _, exists := c.batchMap[index]; !exists {
-		c.batchMap[index] = make([]*pb.TickData, 0, BatchSize)
-		c.lastFlush[index] = time.Now()
+	var needsFlush bool
+	// Check if we need to initialize a new batch with a read lock first
+	c.batchMu.RLock()
+	_, exists := c.batchMap[index]
+	c.batchMu.RUnlock()
+
+	if !exists {
+		c.batchMu.Lock()
+		// Double-check in case another goroutine created it
+		if _, exists := c.batchMap[index]; !exists {
+			c.batchMap[index] = make([]*pb.TickData, 0, BatchSize)
+			c.lastFlush[index] = time.Now()
+		}
+		c.batchMu.Unlock()
 	}
 
+	// Add the tick to the batch
+	c.batchMu.Lock()
 	c.batchMap[index] = append(c.batchMap[index], tick)
-	needsFlush := len(c.batchMap[index]) >= BatchSize
+	needsFlush = len(c.batchMap[index]) >= BatchSize
 	c.batchMu.Unlock()
 
 	if needsFlush {
@@ -343,12 +390,14 @@ func (c *TickConsumer) logMetrics(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.metrics.mu.RLock()
+			pending := len(c.msgChan)
 			c.log.Info("Consumer metrics", map[string]interface{}{
 				"received_count":  c.metrics.receivedCount,
 				"processed_count": c.metrics.processedCount,
 				"flush_count":     c.metrics.flushCount,
 				"error_count":     c.metrics.errorCount,
 				"worker_count":    c.workerCount,
+				"channel_pending": pending,
 			})
 			c.metrics.mu.RUnlock()
 		}

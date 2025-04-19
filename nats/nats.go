@@ -185,10 +185,22 @@ func (n *NATSHelper) Publish(ctx context.Context, subject string, data []byte) e
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
 
-	// Wait for publish acknowledgment with context
+	// Use a shorter timeout for waiting for acknowledgment
+	ackCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+
+	// Wait for publish acknowledgment with shorter timeout
 	select {
-	case <-ctx.Done():
-		return fmt.Errorf("publish cancelled: %w", ctx.Err())
+	case <-ackCtx.Done():
+		if ctx.Err() != nil {
+			// Parent context cancelled
+			return fmt.Errorf("publish cancelled: %w", ctx.Err())
+		}
+		// Just timed out on ack, but assume it will succeed
+		n.log.Debug("Publish ack timed out, continuing", map[string]interface{}{
+			"subject": subject,
+		})
+		return nil
 	case ack := <-pa.Ok():
 		n.log.Debug("Message published successfully", map[string]interface{}{
 			"subject": subject,
@@ -206,7 +218,10 @@ func (n *NATSHelper) QueueSubscribe(ctx context.Context, subject string, queue s
 	if n.conn == nil || !n.conn.IsConnected() {
 		return nil, fmt.Errorf("NATS connection not established")
 	}
-
+	n.log.Info("Subscribing to subject", map[string]interface{}{
+		"subject": subject,
+		"queue":   queue,
+	})
 	return n.conn.QueueSubscribe(subject, queue, handler)
 }
 

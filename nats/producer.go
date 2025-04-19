@@ -206,7 +206,7 @@ func (p *TickProducer) PublishTick(ctx context.Context, subject string, tick *pb
 	// Try to send to publish channel with minimal timeout
 	select {
 	case p.publishChan <- &publishJob{subject: subject, tick: tick}:
-		p.log.Info("Successfully queued tick for publishing", map[string]interface{}{
+		p.log.Debug("Successfully queued tick for publishing", map[string]interface{}{
 			"subject": subject,
 			"token":   tick.InstrumentToken,
 		})
@@ -264,6 +264,27 @@ func (p *TickProducer) worker(ctx context.Context, id int) {
 				batch.subjects = batch.subjects[:0]
 			}
 
+			// Drain channel while we're at it (up to batch size)
+			drainCount := 0
+			for len(batch.ticks) < MaxBatchSize && drainCount < 50 {
+				select {
+				case job := <-p.publishChan:
+					batch.ticks = append(batch.ticks, job.tick)
+					batch.subjects = append(batch.subjects, job.subject)
+					drainCount++
+				default:
+					// No more messages
+					break
+				}
+			}
+
+			// If we accumulated enough messages, publish
+			if len(batch.ticks) >= MaxBatchSize/2 {
+				p.publishBatch(ctx, batch)
+				batch.ticks = batch.ticks[:0]
+				batch.subjects = batch.subjects[:0]
+			}
+
 		case <-ticker.C:
 			if len(batch.ticks) > 0 {
 				p.publishBatch(ctx, batch)
@@ -281,6 +302,7 @@ func (p *TickProducer) publishBatch(ctx context.Context, batch *batchJob) {
 		return
 	}
 
+	startTime := time.Now()
 	p.log.Debug("Publishing batch", map[string]interface{}{
 		"size": batchSize,
 	})
@@ -289,6 +311,7 @@ func (p *TickProducer) publishBatch(ctx context.Context, batch *batchJob) {
 	atomic.AddUint64(&p.metrics.avgBatchSize, uint64(batchSize))
 
 	// Process each message in the batch
+	successCount := 0
 	for i := 0; i < batchSize; i++ {
 		// Check context cancellation
 		select {
@@ -321,7 +344,20 @@ func (p *TickProducer) publishBatch(ctx context.Context, batch *batchJob) {
 			continue
 		}
 
+		successCount++
 		atomic.AddUint64(&p.metrics.publishedCount, 1)
+	}
+
+	elapsedMs := time.Since(startTime).Milliseconds()
+	if elapsedMs > 100 {
+		// Log slow batches
+		p.log.Info("Batch publishing completed", map[string]interface{}{
+			"size":         batchSize,
+			"success":      successCount,
+			"failed":       batchSize - successCount,
+			"duration_ms":  elapsedMs,
+			"rate_per_sec": int64(float64(successCount) / (float64(elapsedMs) / 1000.0)),
+		})
 	}
 }
 

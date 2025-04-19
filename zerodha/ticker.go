@@ -7,14 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"gohustle/cache"
 	"gohustle/logger"
 	"gohustle/nats"
 	pb "gohustle/proto"
 
 	"github.com/zerodha/gokiteconnect/v4/models"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
-	protobuf "google.golang.org/protobuf/proto"
 )
 
 // ConnectTicker establishes connections to Kite's ticker service
@@ -141,23 +139,24 @@ func (k *KiteConnect) CloseTicker() error {
 // Internal handlers
 func (k *KiteConnect) handleTick(tick models.Tick) {
 	log := logger.L()
-	redisCache, _ := cache.NewRedisCache()
-	natsHelper := nats.GetNATSHelper()
+	natsProducer := nats.GetTickProducer()
 
-	log.Info("Received tick", map[string]interface{}{
-		"token": tick.InstrumentToken,
-	})
-	// Get instrument info
-	// tokenStr := fmt.Sprintf("%d", tick.InstrumentToken)
-	// instrumentInfo, exists := k.GetInstrumentInfo(tokenStr)
-	// if !exists {
-	// 	return
-	// }
+	// Create a short-lived context for this tick
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 
-	// Convert to protobuf and marshal
+	indexName, err := k.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", tick.InstrumentToken))
+	if err != nil {
+		log.Error("Failed to get index name", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	// Convert to protobuf
 	protoTick := &pb.TickData{
 		// Basic info
-		// IndexName:       instrumentInfo.Index,
+		IndexName:       indexName,
 		InstrumentToken: tick.InstrumentToken,
 		IsTradable:      tick.IsTradable,
 		IsIndex:         tick.IsIndex,
@@ -203,41 +202,17 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		},
 	}
 
-	// Marshal protobuf message to bytes
-	tickBytes, err := protobuf.Marshal(protoTick)
-	if err != nil {
-		log.Error("Failed to marshal tick data", map[string]interface{}{
+	// Use hierarchical subject pattern
+	subject := fmt.Sprintf("ticks.%s", indexName)
+
+	// Publish asynchronously - don't block on errors
+	if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
+		log.Error("Failed to queue tick for publishing", map[string]interface{}{
 			"error": err.Error(),
 			"token": tick.InstrumentToken,
 		})
-		return
+		// Continue processing even if publish fails
 	}
-
-	log.Info("Publishing tick to NATS", map[string]interface{}{
-		"token": tick.InstrumentToken,
-	})
-
-	if err := natsHelper.PublishTick(context.Background(), "ticks", tickBytes); err != nil {
-		log.Error("Failed to publish tick to NATS", map[string]interface{}{
-			"error": err.Error(),
-			"token": tick.InstrumentToken,
-		})
-		return
-	}
-
-	// 3. Store LTP data in LTP DB
-	dataKey := fmt.Sprintf("ltp:%d", tick.InstrumentToken)
-	ltpDB := redisCache.GetLTPDB3()
-	ctx := context.Background()
-	ltpDB.Set(ctx, dataKey, tick.LastPrice, 24*time.Hour)
-
-	log.Debug("Stored tick", map[string]interface{}{
-		"token": tick.InstrumentToken,
-		// "index":     instrumentInfo.Index,
-		// "is_index":  instrumentInfo.IsIndex,
-		"timestamp": tick.Timestamp.Format("2006-01-02 15:04:05.000"),
-		"data_key":  dataKey,
-	})
 }
 
 func (k *KiteConnect) onError(err error) {

@@ -18,22 +18,22 @@ const (
 	PingInterval         = 30 * time.Second
 	MaxPingOutstanding   = 2
 
-	// Stream configuration
-	StreamName   = "TICKS"
-	TicksSubject = "ticks"
-	MaxAge       = 24 * time.Hour    // Keep data for 24 hours
-	MaxBytes     = 1024 * 1024 * 512 // 512MB
+	// JetStream configuration
+	StreamName             = "TICKS"
+	TicksSubject           = "ticks"
+	MaxMsgAge              = 30 * time.Minute
+	MaxBytes               = 1 * 1024 * 1024 * 1024 // 1GB
+	PublishAsyncMaxPending = 16384
 )
 
-// NATSHelper manages NATS connections and operations
+// NATSHelper manages NATS connections
 type NATSHelper struct {
-	conn     *nats.Conn
-	js       nats.JetStreamContext
-	log      *logger.Logger
-	mu       sync.RWMutex
-	subjects map[string]struct{}
-	ctx      context.Context
-	cancel   context.CancelFunc
+	conn   *nats.Conn
+	log    *logger.Logger
+	mu     sync.RWMutex
+	ctx    context.Context
+	cancel context.CancelFunc
+	js     nats.JetStream
 }
 
 var (
@@ -57,10 +57,9 @@ func GetNATSHelper() *NATSHelper {
 	once.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		instance = &NATSHelper{
-			log:      logger.L(),
-			subjects: make(map[string]struct{}),
-			ctx:      ctx,
-			cancel:   cancel,
+			log:    logger.L(),
+			ctx:    ctx,
+			cancel: cancel,
 		}
 	})
 
@@ -94,7 +93,6 @@ func (n *NATSHelper) Shutdown() {
 	if n.conn != nil {
 		n.conn.Close()
 		n.conn = nil
-		n.js = nil
 	}
 
 	n.log.Info("NATS connection shut down", nil)
@@ -105,7 +103,7 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
-	if n.conn != nil && n.conn.IsConnected() {
+	if n.conn != nil && n.conn.IsConnected() && n.js != nil {
 		return nil
 	}
 
@@ -113,7 +111,6 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		"url": DefaultURL,
 	})
 
-	// Configure connection options
 	opts := []nats.Option{
 		nats.Name("gohustle-client"),
 		nats.ReconnectWait(ReconnectWait),
@@ -131,12 +128,9 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 			})
 		}),
 		nats.ErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
-			delivered, _ := sub.Delivered()
 			n.log.Error("NATS error", map[string]interface{}{
-				"error":     err.Error(),
-				"subject":   sub.Subject,
-				"queue":     sub.Queue,
-				"delivered": delivered,
+				"error":   err.Error(),
+				"subject": sub.Subject,
 			})
 		}),
 	}
@@ -150,8 +144,13 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to NATS: %w", err)
 	}
 
-	// Create JetStream context
-	js, err := nc.JetStream()
+	n.conn = nc
+	n.log.Info("Successfully connected to NATS", map[string]interface{}{
+		"url": nc.ConnectedUrl(),
+	})
+
+	// Initialize JetStream
+	js, err := nc.JetStream(nats.PublishAsyncMaxPending(PublishAsyncMaxPending))
 	if err != nil {
 		n.log.Error("Failed to create JetStream context", map[string]interface{}{
 			"error": err.Error(),
@@ -159,106 +158,66 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to create JetStream context: %w", err)
 	}
 
-	n.conn = nc
 	n.js = js
-
-	// Initialize stream
-	if err := n.setupStream(); err != nil {
-		n.log.Error("Failed to setup stream", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return fmt.Errorf("failed to setup stream: %w", err)
-	}
-
-	n.log.Info("Successfully connected to NATS", map[string]interface{}{
-		"url":    nc.ConnectedUrl(),
-		"stream": StreamName,
-	})
+	n.log.Info("JetStream context created successfully", nil)
 
 	return nil
 }
 
-// setupStream creates or updates the JetStream stream
-func (n *NATSHelper) setupStream() error {
-	// Delete existing stream if it exists
-	n.js.DeleteStream(StreamName)
+// Publish publishes a message to NATS with minimal lock contention and proper acknowledgment
+func (n *NATSHelper) Publish(ctx context.Context, subject string, data []byte) error {
+	// Quick check for connection with read lock
+	n.mu.RLock()
+	js := n.js
+	n.mu.RUnlock()
 
-	// Create new stream with proper configuration
-	config := &nats.StreamConfig{
-		Name:      StreamName,
-		Subjects:  []string{TicksSubject},
-		Retention: nats.LimitsPolicy,
-		MaxAge:    MaxAge,
-		MaxBytes:  MaxBytes,
-		Storage:   nats.FileStorage,
-		Discard:   nats.DiscardOld,
+	if js == nil {
+		return fmt.Errorf("NATS connection not established")
 	}
 
-	// Create new stream
-	if _, err := n.js.AddStream(config); err != nil {
-		n.log.Error("Failed to create stream", map[string]interface{}{
-			"error":  err.Error(),
-			"stream": StreamName,
-			"config": config,
+	// Publish with context only
+	pa, err := js.PublishAsync(subject, data)
+	if err != nil {
+		n.log.Error("Failed to publish message", map[string]interface{}{
+			"subject": subject,
+			"error":   err.Error(),
 		})
-		return fmt.Errorf("failed to create stream: %w", err)
+		return fmt.Errorf("failed to publish message: %w", err)
 	}
 
-	n.log.Info("Created new stream", map[string]interface{}{
-		"stream": StreamName,
-		"config": config,
-	})
-
-	return nil
+	// Wait for publish acknowledgment with context
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("publish cancelled: %w", ctx.Err())
+	case ack := <-pa.Ok():
+		n.log.Debug("Message published successfully", map[string]interface{}{
+			"subject": subject,
+			"seq":     ack.Sequence,
+			"stream":  ack.Stream,
+		})
+		return nil
+	case err := <-pa.Err():
+		return fmt.Errorf("publish error: %w", err)
+	}
 }
 
-// PublishTick publishes a tick to NATS
-func (n *NATSHelper) PublishTick(ctx context.Context, subject string, data []byte) error {
+// QueueSubscribe subscribes to a NATS subject with a queue group
+func (n *NATSHelper) QueueSubscribe(ctx context.Context, subject string, queue string, handler func(msg *nats.Msg)) (*nats.Subscription, error) {
+	if n.conn == nil || !n.conn.IsConnected() {
+		return nil, fmt.Errorf("NATS connection not established")
+	}
+
+	return n.conn.QueueSubscribe(subject, queue, handler)
+}
+
+// Subscribe subscribes to a NATS subject
+func (n *NATSHelper) Subscribe(ctx context.Context, subject string, handler func(msg *nats.Msg)) (*nats.Subscription, error) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 
 	if n.conn == nil || !n.conn.IsConnected() {
-		return fmt.Errorf("not connected to NATS")
+		return nil, fmt.Errorf("NATS connection not established")
 	}
 
-	// Publish with JetStream
-	_, err := n.js.Publish(subject, data)
-	if err != nil {
-		n.log.Error("Failed to publish tick", map[string]interface{}{
-			"error":   err.Error(),
-			"subject": subject,
-		})
-		return fmt.Errorf("failed to publish tick: %w", err)
-	}
-	n.log.Info("Published tick", map[string]interface{}{
-		"subject": subject,
-	})
-
-	return nil
-}
-
-// SubscribeTicks subscribes to tick updates
-func (n *NATSHelper) SubscribeTicks(ctx context.Context, subject string, handler func(msg *nats.Msg)) (*nats.Subscription, error) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-
-	if n.conn == nil || !n.conn.IsConnected() {
-		return nil, fmt.Errorf("not connected to NATS")
-	}
-
-	// Subscribe with JetStream
-	sub, err := n.js.Subscribe(subject, handler)
-	if err != nil {
-		n.log.Error("Failed to subscribe to ticks", map[string]interface{}{
-			"error":   err.Error(),
-			"subject": subject,
-		})
-		return nil, fmt.Errorf("failed to subscribe to ticks: %w", err)
-	}
-
-	n.log.Info("Successfully subscribed to ticks", map[string]interface{}{
-		"subject": subject,
-	})
-
-	return sub, nil
+	return n.conn.Subscribe(subject, handler)
 }

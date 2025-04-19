@@ -12,28 +12,27 @@ import (
 	"gohustle/config"
 	"gohustle/core"
 	"gohustle/logger"
-	natspkg "gohustle/nats"
+	"gohustle/nats"
 	"gohustle/zerodha"
 )
 
 func startDataProcessing(ctx context.Context, cfg *config.Config) error {
-	log := logger.L()
-
 	// Initialize NATS
-	natsHelper := natspkg.GetNATSHelper()
-	if err := natsHelper.Initialize(ctx); err != nil {
+	natsConsumer, err := nats.GetTickConsumer(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to initialize NATS: %w", err)
 	}
 
-	// Create and start NATS consumer
-	consumer := natspkg.NewTickConsumer(natsHelper)
-	go func() {
-		if err := consumer.Start(ctx); err != nil {
-			log.Error("Consumer error", map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}()
+	// Log connection status using the NATS helper
+	natsHelper := nats.GetNATSHelper()
+	logger.L().Info("NATS connection status", map[string]interface{}{
+		"connected": natsHelper.IsConnected(),
+	})
+
+	// Start consumer with wildcard subject pattern
+	if err := natsConsumer.Start(ctx, "ticks.>", "tick_consumer"); err != nil {
+		return fmt.Errorf("failed to start consumer: %w", err)
+	}
 
 	// Initialize KiteConnect with writer pool
 	kiteConnect := zerodha.GetKiteConnect()

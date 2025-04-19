@@ -48,7 +48,8 @@ type KiteConnect struct {
 	config *config.Config
 
 	// Synchronization
-	mu sync.RWMutex
+	mu  sync.RWMutex
+	ctx context.Context
 }
 
 var (

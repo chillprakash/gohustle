@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"gohustle/cache"
 	"gohustle/filestore"
 	"gohustle/logger"
 	pb "gohustle/proto"
@@ -206,6 +207,80 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 		return
 	}
 
+	// Get Redis instance
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		c.log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		c.incrementErrorCount()
+		return
+	}
+
+	// Get LTP DB (DB 3)
+	ltpDB := redisCache.GetLTPDB3()
+	if ltpDB == nil {
+		c.log.Error("LTP Redis DB is nil", nil)
+		c.incrementErrorCount()
+		return
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	// Create required keys map
+	instrumentToken := fmt.Sprintf("%d", tick.InstrumentToken)
+	requiredKeys := map[string]interface{}{
+		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
+		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
+		fmt.Sprintf("%s_total_sell_quantity", instrumentToken):  tick.TotalSellQuantity,
+		fmt.Sprintf("%s_total_buy_quantity", instrumentToken):   tick.TotalBuyQuantity,
+		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
+		fmt.Sprintf("%s_change", instrumentToken):               tick.NetChange,
+	}
+
+	// Filter out zero/nil values
+	redisData := make(map[string]interface{})
+	for key, value := range requiredKeys {
+		// Skip if value is zero
+		if !isZeroValue(value) {
+			redisData[key] = value
+		}
+	}
+
+	// If we have data to store
+	if len(redisData) > 0 {
+		// Use pipeline for better performance
+		pipe := ltpDB.Pipeline()
+
+		// Set all values
+		for key, value := range redisData {
+			// Convert value to string based on type
+			strValue := convertToString(value)
+			if strValue != "" {
+				pipe.Set(ctx, key, strValue, 12*time.Hour) // 12 hours expiry
+			}
+		}
+
+		// Execute pipeline
+		if _, err := pipe.Exec(ctx); err != nil {
+			c.log.Error("Failed to execute Redis pipeline", map[string]interface{}{
+				"error": err.Error(),
+				"token": instrumentToken,
+			})
+			c.incrementErrorCount()
+			return
+		}
+
+		c.log.Debug("Successfully stored LTP data in Redis", map[string]interface{}{
+			"token":    instrumentToken,
+			"keys_set": len(redisData),
+			"ltp":      tick.LastPrice,
+			"volume":   tick.VolumeTraded,
+		})
+	}
+
 	// Write directly to tick store
 	tickStore := filestore.GetTickStore()
 	if err := tickStore.WriteTick(tick); err != nil {
@@ -220,6 +295,37 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 
 	c.incrementProcessedCount(1)
 	c.incrementReceivedCount()
+}
+
+// Helper functions for Redis operations
+func isZeroValue(v interface{}) bool {
+	switch v := v.(type) {
+	case int32:
+		return v == 0
+	case int64:
+		return v == 0
+	case float64:
+		return v == 0
+	case string:
+		return v == ""
+	default:
+		return v == nil
+	}
+}
+
+func convertToString(v interface{}) string {
+	switch v := v.(type) {
+	case int32:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case float64:
+		return fmt.Sprintf("%f", v)
+	case string:
+		return v
+	default:
+		return ""
+	}
 }
 
 // cleanup handles graceful shutdown

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"gohustle/cache"
 	"gohustle/filestore"
 	"gohustle/logger"
 
@@ -141,6 +142,9 @@ type WalToParquetRequest struct {
 func (s *Server) setupRoutes() {
 	// Health check endpoint
 	s.router.HandleFunc("/api/health", s.handleHealthCheck).Methods("GET")
+
+	// Expiries endpoint
+	s.router.HandleFunc("/api/expiries", s.handleGetExpiries).Methods("GET")
 
 	// API version 1 routes
 	v1 := s.router.PathPrefix("/api/v1").Subrouter()
@@ -464,4 +468,62 @@ func SendErrorResponse(w http.ResponseWriter, status int, message string, err er
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleGetExpiries returns the expiry dates for all indices from in-memory cache
+func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
+	cache := cache.GetInMemoryCacheInstance()
+
+	// Get list of instruments from cache
+	instrumentsKey := "instrument:expiries:list"
+	instrumentsValue, exists := cache.Get(instrumentsKey)
+	if !exists {
+		SendErrorResponse(w, http.StatusNotFound, "No instruments found in cache", nil)
+		return
+	}
+
+	instruments, ok := instrumentsValue.([]string)
+	if !ok {
+		SendErrorResponse(w, http.StatusInternalServerError, "Invalid data type for instruments in cache", nil)
+		return
+	}
+
+	// Create response map
+	expiriesMap := make(map[string][]string)
+
+	// Get expiries for each instrument
+	for _, instrument := range instruments {
+		key := fmt.Sprintf("instrument:expiries:%s", instrument)
+		value, exists := cache.Get(key)
+		if !exists {
+			s.log.Debug("No expiries found for instrument", map[string]interface{}{
+				"instrument": instrument,
+			})
+			continue
+		}
+
+		dates, ok := value.([]string)
+		if !ok {
+			s.log.Error("Invalid data type for expiries in cache", map[string]interface{}{
+				"instrument": instrument,
+			})
+			continue
+		}
+
+		// Add to response map
+		expiriesMap[instrument] = dates
+	}
+
+	if len(expiriesMap) == 0 {
+		SendErrorResponse(w, http.StatusNotFound, "No expiry dates found", nil)
+		return
+	}
+
+	resp := Response{
+		Success: true,
+		Message: "Expiry dates retrieved successfully",
+		Data:    expiriesMap,
+	}
+
+	SendJSONResponse(w, http.StatusOK, resp)
 }

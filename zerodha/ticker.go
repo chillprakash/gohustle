@@ -217,6 +217,7 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		})
 		// Continue processing even if publish fails
 	}
+
 }
 
 func (k *KiteConnect) onError(err error) {

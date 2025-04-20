@@ -65,6 +65,49 @@ func (ps *ParquetStore) getFilePath(index string) string {
 	return filepath.Join(DefaultParquetDir, fmt.Sprintf("%s_%s.parquet", index, ps.currentDay))
 }
 
+// rotateFile handles the file rotation when day changes
+func (ps *ParquetStore) rotateFile(index string, currentDay string) error {
+	// Close existing writer if day changed
+	if writer, exists := ps.writers[index]; exists {
+		if err := writer.Close(); err != nil {
+			ps.log.Error("Failed to close writer during rotation", map[string]interface{}{
+				"error": err.Error(),
+				"index": index,
+			})
+		}
+		delete(ps.writers, index)
+	}
+
+	// Create new writer
+	filePath := ps.getFilePath(index)
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); err == nil {
+		// File exists, create a backup with timestamp
+		backupPath := filePath + fmt.Sprintf(".%s.bak", time.Now().Format("150405"))
+		if err := os.Rename(filePath, backupPath); err != nil {
+			return fmt.Errorf("failed to create backup of existing file: %w", err)
+		}
+		ps.log.Info("Created backup of existing file", map[string]interface{}{
+			"original": filePath,
+			"backup":   backupPath,
+		})
+	}
+
+	writer, err := NewParquetWriter(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to create writer: %w", err)
+	}
+
+	ps.writers[index] = writer
+	ps.currentDay = currentDay
+
+	return nil
+}
+
 // GetOrCreateWriter gets existing writer or creates new one for the index
 func (ps *ParquetStore) GetOrCreateWriter(index string) (*ParquetWriter, error) {
 	currentDay := time.Now().Format("2006-01-02")
@@ -86,32 +129,12 @@ func (ps *ParquetStore) GetOrCreateWriter(index string) (*ParquetWriter, error) 
 		return writer, nil
 	}
 
-	// Close existing writer if day changed
-	if writer, exists := ps.writers[index]; exists {
-		if err := writer.Close(); err != nil {
-			ps.log.Error("Failed to close writer", map[string]interface{}{
-				"error": err.Error(),
-				"index": index,
-			})
-		}
-		delete(ps.writers, index)
+	// Rotate file if day changed
+	if err := ps.rotateFile(index, currentDay); err != nil {
+		return nil, fmt.Errorf("failed to rotate file: %w", err)
 	}
 
-	// Create new writer
-	filePath := ps.getFilePath(index)
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		return nil, fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	writer, err := NewParquetWriter(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create writer: %w", err)
-	}
-
-	ps.writers[index] = writer
-	ps.currentDay = currentDay
-
-	return writer, nil
+	return ps.writers[index], nil
 }
 
 // WriteTick writes a single tick to the appropriate daily file
@@ -257,10 +280,22 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Create file
-	f, err := os.Create(filePath)
+	// Open file in append mode or create if doesn't exist
+	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create file: %w", err)
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+
+	// Get file info to check if it's new
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	// If file exists and not empty, we need to handle existing data
+	if fi.Size() > 0 {
+		log.Printf("File %s exists with size %d bytes, data will be appended", filePath, fi.Size())
 	}
 
 	// Define metadata for SQL compatibility
@@ -269,11 +304,15 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		"writer.version",
 		"table.name",
 		"table.description",
+		"created_at",
+		"updated_at",
 	}, []string{
 		"gohustle",
 		"1.0",
 		"market_ticks",
 		"Market tick data with OHLC and depth information",
+		time.Now().Format(time.RFC3339),
+		time.Now().Format(time.RFC3339),
 	})
 
 	// Define complete schema matching TimescaleDB
@@ -607,4 +646,9 @@ func (w *ParquetWriter) GetStats() (WriterStats, error) {
 	}
 
 	return stats, nil
+}
+
+// UncompressedSize returns the current uncompressed size of the parquet file
+func (w *ParquetWriter) UncompressedSize() int64 {
+	return w.uncompressedSize
 }

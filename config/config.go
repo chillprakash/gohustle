@@ -18,6 +18,17 @@ type Config struct {
 	Queue     QueueConfig     `json:"queue"`
 	DuckDB    DuckDBConfig    `json:"duckdb"`
 	Timescale TimescaleConfig `json:"timescale"`
+	API       APIConfig       `json:"api"`
+}
+
+// API configuration
+type APIConfig struct {
+	Enabled          bool     `json:"enabled"`
+	Port             string   `json:"port"`
+	CORSAllowOrigins []string `json:"cors_allow_origins"`
+	ReadTimeout      string   `json:"read_timeout"`
+	WriteTimeout     string   `json:"write_timeout"`
+	IdleTimeout      string   `json:"idle_timeout"`
 }
 
 type RedisConfig struct {

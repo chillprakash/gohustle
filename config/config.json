@@ -53,5 +53,13 @@
             "NIFTY",
             "SENSEX"
         ]
+    },
+    "api": {
+        "enabled": true,
+        "port": "8080",
+        "cors_allow_origins": ["*"],
+        "read_timeout": "15s",
+        "write_timeout": "15s",
+        "idle_timeout": "60s"
     }
 } 

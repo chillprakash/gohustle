@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"gohustle/api"
 	"gohustle/config"
 	"gohustle/core"
 	"gohustle/filestore"
@@ -100,6 +101,33 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
+func startAPIServer(ctx context.Context, cfg *config.Config) error {
+	// Skip starting API server if not enabled in config
+	if !cfg.API.Enabled {
+		logger.L().Info("API server disabled in config", nil)
+		return nil
+	}
+
+	// Get API server singleton
+	apiServer := api.GetAPIServer()
+
+	// Set port from config
+	if cfg.API.Port != "" {
+		apiServer.SetPort(cfg.API.Port)
+	}
+
+	// Start the API server
+	if err := apiServer.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start API server: %w", err)
+	}
+
+	logger.L().Info("API server started", map[string]interface{}{
+		"port": cfg.API.Port,
+	})
+
+	return nil
+}
+
 func initializeProcess() (context.Context, context.CancelFunc, chan os.Signal, error) {
 	// No need to pass logger anymore
 	pid := os.Getpid()
@@ -130,7 +158,7 @@ func main() {
 	cfg := config.GetConfig()
 
 	// Create error and done channels
-	errChan := make(chan error, 1)
+	errChan := make(chan error, 2) // Increased to 2 to handle both data processing and API server errors
 	shutdownComplete := make(chan struct{})
 
 	// Start data processing in a goroutine
@@ -140,11 +168,18 @@ func main() {
 		}
 	}()
 
+	// Start API server in a goroutine
+	go func() {
+		if err := startAPIServer(ctx, cfg); err != nil {
+			errChan <- err
+		}
+	}()
+
 	// Wait for either error or shutdown signal
 	var shutdownErr error
 	select {
 	case err := <-errChan:
-		logger.L().Error("Data processing error", map[string]interface{}{
+		logger.L().Error("Application error", map[string]interface{}{
 			"error": err.Error(),
 		})
 		shutdownErr = err
@@ -175,6 +210,14 @@ func main() {
 		// Close NATS connections
 		natsHelper := nats.GetNATSHelper()
 		natsHelper.Shutdown()
+
+		// Get API server and shut it down
+		apiServer := api.GetAPIServer()
+		if err := apiServer.Shutdown(); err != nil {
+			logger.L().Error("Error shutting down API server", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 
 		close(shutdownComplete)
 	}()

@@ -10,16 +10,13 @@ import (
 	"gohustle/logger"
 	pb "gohustle/proto"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 )
 
 const (
-	FlushInterval          = 1 * time.Second
-	BatchSize              = 1000
 	DefaultConsumerWorkers = 8
-	DataDir                = "data/ticks"
+	ChannelBuffer          = 10000 // Buffer size for message channel
 )
 
 var (
@@ -33,21 +30,17 @@ type TickConsumer struct {
 	nats          *NATSHelper
 	log           *logger.Logger
 	workerCount   int
-	batchMap      map[string][]*pb.TickData // index -> ticks
-	batchMu       sync.RWMutex
-	lastFlush     map[string]time.Time // index -> last flush time
 	subscriptions []*nats.Subscription
-	subMu         sync.Mutex // protect subscriptions slice
+	subMu         sync.Mutex
 	wg            sync.WaitGroup
 	metrics       *consumerMetrics
-	done          chan struct{}  // signal for graceful shutdown
-	msgChan       chan *nats.Msg // Channel for queuing messages
+	done          chan struct{}
+	msgChan       chan *nats.Msg
 }
 
 type consumerMetrics struct {
 	receivedCount  uint64
 	processedCount uint64
-	flushCount     uint64
 	errorCount     uint64
 	mu             sync.RWMutex
 }
@@ -67,14 +60,11 @@ func GetTickConsumer(ctx context.Context) (*TickConsumer, error) {
 			nats:        GetNATSHelper(),
 			log:         logger.L(),
 			workerCount: DefaultConsumerWorkers,
-			batchMap:    make(map[string][]*pb.TickData),
-			lastFlush:   make(map[string]time.Time),
 			metrics:     &consumerMetrics{},
 			done:        make(chan struct{}),
-			msgChan:     make(chan *nats.Msg, 10000), // Buffered channel for messages
+			msgChan:     make(chan *nats.Msg, ChannelBuffer),
 		}
 
-		// Initialize NATS connection
 		if err := instance.Initialize(ctx); err != nil {
 			instance.log.Error("Failed to initialize consumer", map[string]interface{}{
 				"error": err.Error(),
@@ -104,31 +94,15 @@ func (c *TickConsumer) Initialize(ctx context.Context) error {
 // Start begins consuming tick messages with parallel workers
 func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) error {
 	c.log.Info("Starting tick consumer", map[string]interface{}{
-		"worker_count":   c.workerCount,
-		"batch_size":     BatchSize,
-		"flush_interval": FlushInterval,
-		"subject":        subject,
-		"queue_group":    queue,
+		"worker_count": c.workerCount,
+		"subject":      subject,
+		"queue_group":  queue,
 	})
 
 	workerCtx, cancel := context.WithCancel(context.Background())
 
 	// Start metrics logging
 	go c.logMetrics(workerCtx)
-
-	// Start flush routine
-	flushTicker := time.NewTicker(FlushInterval)
-	go func() {
-		defer flushTicker.Stop()
-		for {
-			select {
-			case <-workerCtx.Done():
-				return
-			case <-flushTicker.C:
-				c.checkAndFlush()
-			}
-		}
-	}()
 
 	// Single subscription to receive messages
 	sub, err := c.nats.QueueSubscribe(workerCtx, subject, queue, func(msg *nats.Msg) {
@@ -154,7 +128,7 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 	c.subscriptions = append(c.subscriptions, sub)
 	c.subMu.Unlock()
 
-	// Start worker pool to process messages from channel
+	// Start worker pool
 	for i := 0; i < c.workerCount; i++ {
 		workerId := i
 		c.wg.Add(1)
@@ -177,13 +151,12 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 	return nil
 }
 
-// New method to process messages from channel
+// processMessages handles messages from the channel
 func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 	c.log.Info("Started message processor", map[string]interface{}{
 		"worker_id": workerId,
 	})
 
-	// For channel draining
 	drainTimer := time.NewTicker(10 * time.Millisecond)
 	defer drainTimer.Stop()
 
@@ -195,7 +168,6 @@ func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 			})
 			return
 		case <-drainTimer.C:
-			// Aggressively drain the message channel
 			drainCount := 0
 			for drainCount < 100 { // Process up to 100 messages at once
 				select {
@@ -203,13 +175,12 @@ func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 					c.handleMessage(msg, workerId)
 					drainCount++
 				default:
-					// No more messages in channel
 					goto done
 				}
 			}
 		done:
 			if drainCount > 0 {
-				c.log.Debug("Drained messages", map[string]interface{}{
+				c.log.Debug("Processed messages", map[string]interface{}{
 					"worker_id": workerId,
 					"count":     drainCount,
 				})
@@ -220,9 +191,9 @@ func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 
 // handleMessage processes incoming NATS messages
 func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
-	// Reduce to debug level for high-volume logs
 	c.log.Debug("Received tick", map[string]interface{}{
-		"subject": msg.Subject,
+		"subject":   msg.Subject,
+		"worker_id": workerId,
 	})
 
 	tick := &pb.TickData{}
@@ -234,186 +205,21 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 		c.incrementErrorCount()
 		return
 	}
-	c.addToBatch(tick, workerId)
-	c.incrementReceivedCount()
-}
 
-// addToBatch adds a tick to the appropriate batch with optimized locking
-func (c *TickConsumer) addToBatch(tick *pb.TickData, workerId int) {
-	index := tick.IndexName
-
-	var needsFlush bool
-	// Check if we need to initialize a new batch with a read lock first
-	c.batchMu.RLock()
-	_, exists := c.batchMap[index]
-	c.batchMu.RUnlock()
-
-	if !exists {
-		c.batchMu.Lock()
-		// Double-check in case another goroutine created it
-		if _, exists := c.batchMap[index]; !exists {
-			c.batchMap[index] = make([]*pb.TickData, 0, BatchSize)
-			c.lastFlush[index] = time.Now()
-		}
-		c.batchMu.Unlock()
-	}
-
-	// Add the tick to the batch
-	c.batchMu.Lock()
-	c.batchMap[index] = append(c.batchMap[index], tick)
-	needsFlush = len(c.batchMap[index]) >= BatchSize
-	c.batchMu.Unlock()
-
-	if needsFlush {
-		c.flushIndex(index)
-	}
-}
-
-// checkAndFlush checks if flush interval has elapsed and flushes if needed
-func (c *TickConsumer) checkAndFlush() {
-	now := time.Now()
-
-	c.batchMu.RLock()
-	indicesToFlush := make([]string, 0)
-	for index := range c.batchMap {
-		if now.Sub(c.lastFlush[index]) >= FlushInterval {
-			indicesToFlush = append(indicesToFlush, index)
-		}
-	}
-	c.batchMu.RUnlock()
-
-	// Flush indices outside the lock
-	for _, index := range indicesToFlush {
-		c.flushIndex(index)
-	}
-}
-
-// flushIndex flushes ticks for a specific index to a Parquet file
-func (c *TickConsumer) flushIndex(index string) {
-	c.batchMu.Lock()
-	if len(c.batchMap[index]) == 0 {
-		c.batchMu.Unlock()
-		return
-	}
-
-	// Take the current batch and create a new one
-	batch := c.batchMap[index]
-	c.batchMap[index] = make([]*pb.TickData, 0, BatchSize)
-	c.lastFlush[index] = time.Now()
-	c.batchMu.Unlock()
-
-	// Get ParquetStore singleton
-	store := filestore.GetParquetStore()
-	writer, err := store.GetOrCreateWriter(index)
-	if err != nil {
-		c.log.Error("Failed to get Parquet writer", map[string]interface{}{
-			"error": err.Error(),
-			"index": index,
+	// Write directly to tick store
+	tickStore := filestore.GetTickStore()
+	if err := tickStore.WriteTick(tick); err != nil {
+		c.log.Error("Failed to write tick to store", map[string]interface{}{
+			"worker_id": workerId,
+			"index":     tick.IndexName,
+			"error":     err.Error(),
 		})
 		c.incrementErrorCount()
 		return
 	}
 
-	// Write each tick in the batch
-	for _, tick := range batch {
-		record := filestore.TickRecord{
-			// Basic info
-			InstrumentToken: int64(tick.InstrumentToken),
-			IsTradable:      tick.IsTradable,
-			IsIndex:         tick.IsIndex,
-			Mode:            tick.Mode,
-
-			// Timestamps
-			Timestamp: pgtype.Timestamp{
-				Time:  time.Unix(tick.Timestamp, 0),
-				Valid: true,
-			},
-			LastTradeTime: pgtype.Timestamp{
-				Time:  time.Unix(tick.LastTradeTime, 0),
-				Valid: true,
-			},
-
-			// Price information
-			LastPrice:          tick.LastPrice,
-			LastTradedQuantity: int32(tick.LastTradedQuantity),
-			AverageTradePrice:  tick.AverageTradePrice,
-			VolumeTraded:       int32(tick.VolumeTraded),
-			TotalBuyQuantity:   int32(tick.TotalBuyQuantity),
-			TotalSellQuantity:  int32(tick.TotalSellQuantity),
-			TotalBuy:           int32(tick.TotalBuy),
-			TotalSell:          int32(tick.TotalSell),
-
-			// OHLC
-			OhlcOpen:  tick.Ohlc.Open,
-			OhlcHigh:  tick.Ohlc.High,
-			OhlcLow:   tick.Ohlc.Low,
-			OhlcClose: tick.Ohlc.Close,
-
-			// Market Depth - Buy
-			DepthBuyPrice1:    getDepthValue(tick.Depth.Buy, 0, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthBuyQuantity1: int32(getDepthValue(tick.Depth.Buy, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthBuyOrders1:   int32(getDepthValue(tick.Depth.Buy, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthBuyPrice2:    getDepthValue(tick.Depth.Buy, 1, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthBuyQuantity2: int32(getDepthValue(tick.Depth.Buy, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthBuyOrders2:   int32(getDepthValue(tick.Depth.Buy, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthBuyPrice3:    getDepthValue(tick.Depth.Buy, 2, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthBuyQuantity3: int32(getDepthValue(tick.Depth.Buy, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthBuyOrders3:   int32(getDepthValue(tick.Depth.Buy, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthBuyPrice4:    getDepthValue(tick.Depth.Buy, 3, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthBuyQuantity4: int32(getDepthValue(tick.Depth.Buy, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthBuyOrders4:   int32(getDepthValue(tick.Depth.Buy, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthBuyPrice5:    getDepthValue(tick.Depth.Buy, 4, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthBuyQuantity5: int32(getDepthValue(tick.Depth.Buy, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthBuyOrders5:   int32(getDepthValue(tick.Depth.Buy, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-
-			// Market Depth - Sell
-			DepthSellPrice1:    getDepthValue(tick.Depth.Sell, 0, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthSellQuantity1: int32(getDepthValue(tick.Depth.Sell, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthSellOrders1:   int32(getDepthValue(tick.Depth.Sell, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthSellPrice2:    getDepthValue(tick.Depth.Sell, 1, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthSellQuantity2: int32(getDepthValue(tick.Depth.Sell, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthSellOrders2:   int32(getDepthValue(tick.Depth.Sell, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthSellPrice3:    getDepthValue(tick.Depth.Sell, 2, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthSellQuantity3: int32(getDepthValue(tick.Depth.Sell, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthSellOrders3:   int32(getDepthValue(tick.Depth.Sell, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthSellPrice4:    getDepthValue(tick.Depth.Sell, 3, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthSellQuantity4: int32(getDepthValue(tick.Depth.Sell, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthSellOrders4:   int32(getDepthValue(tick.Depth.Sell, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-			DepthSellPrice5:    getDepthValue(tick.Depth.Sell, 4, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
-			DepthSellQuantity5: int32(getDepthValue(tick.Depth.Sell, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
-			DepthSellOrders5:   int32(getDepthValue(tick.Depth.Sell, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
-
-			// Additional fields
-			NetChange: tick.NetChange,
-
-			// Metadata
-			TickReceivedTime: pgtype.Timestamp{
-				Time:  time.Unix(tick.TickRecievedTime, 0),
-				Valid: true,
-			},
-			TickStoredInDbTime: pgtype.Timestamp{
-				Time:  time.Unix(tick.TickStoredInDbTime, 0),
-				Valid: true,
-			},
-		}
-
-		if err := writer.Write(record); err != nil {
-			c.log.Error("Failed to write tick to Parquet file", map[string]interface{}{
-				"error": err.Error(),
-				"index": index,
-			})
-			c.incrementErrorCount()
-			continue
-		}
-	}
-
-	c.log.Info("Flushed ticks to Parquet file", map[string]interface{}{
-		"index": index,
-		"count": len(batch),
-	})
-
-	c.incrementProcessedCount(uint64(len(batch)))
-	c.incrementFlushCount()
+	c.incrementProcessedCount(1)
+	c.incrementReceivedCount()
 }
 
 // cleanup handles graceful shutdown
@@ -432,24 +238,15 @@ func (c *TickConsumer) cleanup() {
 	c.subscriptions = nil
 	c.subMu.Unlock()
 
-	// Final flush of all batches
-	c.log.Info("Performing final flush")
-	c.flushAll()
+	// Close tick store
+	tickStore := filestore.GetTickStore()
+	if err := tickStore.Close(); err != nil {
+		c.log.Error("Failed to close tick store", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	c.log.Info("Cleanup complete")
-}
-
-// flushAll flushes all pending ticks
-func (c *TickConsumer) flushAll() {
-	c.batchMu.RLock()
-	indices := make([]string, 0, len(c.batchMap))
-	for index := range c.batchMap {
-		indices = append(indices, index)
-	}
-	c.batchMu.RUnlock()
-
-	for _, index := range indices {
-		c.flushIndex(index)
-	}
 }
 
 // Metric management functions
@@ -462,12 +259,6 @@ func (c *TickConsumer) incrementReceivedCount() {
 func (c *TickConsumer) incrementProcessedCount(count uint64) {
 	c.metrics.mu.Lock()
 	c.metrics.processedCount += count
-	c.metrics.mu.Unlock()
-}
-
-func (c *TickConsumer) incrementFlushCount() {
-	c.metrics.mu.Lock()
-	c.metrics.flushCount++
 	c.metrics.mu.Unlock()
 }
 
@@ -491,10 +282,10 @@ func (c *TickConsumer) logMetrics(ctx context.Context) {
 		case <-ticker.C:
 			c.metrics.mu.RLock()
 			pending := len(c.msgChan)
+
 			c.log.Info("Consumer metrics", map[string]interface{}{
 				"received_count":  c.metrics.receivedCount,
 				"processed_count": c.metrics.processedCount,
-				"flush_count":     c.metrics.flushCount,
 				"error_count":     c.metrics.errorCount,
 				"worker_count":    c.workerCount,
 				"channel_pending": pending,
@@ -502,11 +293,4 @@ func (c *TickConsumer) logMetrics(ctx context.Context) {
 			c.metrics.mu.RUnlock()
 		}
 	}
-}
-
-func getDepthValue(depth []*pb.TickData_DepthItem, index int, getValue func(*pb.TickData_DepthItem) float64) float64 {
-	if depth == nil || index < 0 || index >= len(depth) || depth[index] == nil {
-		return 0.0 // Return default value for missing/invalid depth data
-	}
-	return getValue(depth[index])
 }

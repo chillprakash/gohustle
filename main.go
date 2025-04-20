@@ -11,6 +11,7 @@ import (
 
 	"gohustle/config"
 	"gohustle/core"
+	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/nats"
 	"gohustle/zerodha"
@@ -128,8 +129,11 @@ func main() {
 
 	cfg := config.GetConfig()
 
-	// Start data processing in a goroutine
+	// Create error and done channels
 	errChan := make(chan error, 1)
+	shutdownComplete := make(chan struct{})
+
+	// Start data processing in a goroutine
 	go func() {
 		if err := startDataProcessing(ctx, cfg); err != nil {
 			errChan <- err
@@ -137,36 +141,57 @@ func main() {
 	}()
 
 	// Wait for either error or shutdown signal
+	var shutdownErr error
 	select {
 	case err := <-errChan:
 		logger.L().Error("Data processing error", map[string]interface{}{
 			"error": err.Error(),
 		})
+		shutdownErr = err
 	case sig := <-sigChan:
 		logger.L().Info("Received shutdown signal", map[string]interface{}{
 			"signal": sig.String(),
 		})
 	}
 
-	// Start graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Start graceful shutdown with timeout
+	logger.L().Info("Starting graceful shutdown")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer shutdownCancel()
 
-	// Create a channel to track shutdown completion
-	shutdownComplete := make(chan struct{})
-
 	go func() {
-		// Cancel the main context
+		// Cancel the main context to initiate shutdown
 		cancel()
+
+		// Get ParquetStore instance and close all writers
+		store := filestore.GetParquetStore()
+		if err := store.Close(); err != nil {
+			logger.L().Error("Error closing Parquet store", map[string]interface{}{
+				"error": err.Error(),
+			})
+			shutdownErr = err
+		}
+
+		// Close NATS connections
+		natsHelper := nats.GetNATSHelper()
+		natsHelper.Shutdown()
+
 		close(shutdownComplete)
 	}()
 
 	// Wait for shutdown to complete or timeout
 	select {
 	case <-shutdownComplete:
+		if shutdownErr != nil {
+			logger.L().Error("Shutdown completed with errors", map[string]interface{}{
+				"error": shutdownErr.Error(),
+			})
+			os.Exit(1)
+		}
 		logger.L().Info("Clean shutdown successful", nil)
 	case <-shutdownCtx.Done():
 		logger.L().Error("Shutdown timed out, forcing exit", nil)
+		os.Exit(1)
 	}
 
 	os.Exit(0)

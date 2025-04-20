@@ -98,6 +98,35 @@ func (n *NATSHelper) Shutdown() {
 	n.log.Info("NATS connection shut down", nil)
 }
 
+// Add these methods before Connect
+func (n *NATSHelper) handleDisconnect(nc *nats.Conn, err error) {
+	if err != nil {
+		n.log.Error("NATS disconnected", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+}
+
+func (n *NATSHelper) handleReconnect(nc *nats.Conn) {
+	if nc != nil {
+		n.log.Info("NATS reconnected", map[string]interface{}{
+			"url": nc.ConnectedUrl(),
+		})
+	}
+}
+
+func (n *NATSHelper) handleError(nc *nats.Conn, sub *nats.Subscription, err error) {
+	if err != nil {
+		fields := map[string]interface{}{
+			"error": err.Error(),
+		}
+		if sub != nil {
+			fields["subject"] = sub.Subject
+		}
+		n.log.Error("NATS error", fields)
+	}
+}
+
 // Connect establishes a connection to NATS server
 func (n *NATSHelper) Connect(ctx context.Context) error {
 	n.mu.Lock()
@@ -117,22 +146,9 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		nats.MaxReconnects(MaxReconnectAttempts),
 		nats.PingInterval(PingInterval),
 		nats.MaxPingsOutstanding(MaxPingOutstanding),
-		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
-			n.log.Error("NATS disconnected", map[string]interface{}{
-				"error": err.Error(),
-			})
-		}),
-		nats.ReconnectHandler(func(nc *nats.Conn) {
-			n.log.Info("NATS reconnected", map[string]interface{}{
-				"url": nc.ConnectedUrl(),
-			})
-		}),
-		nats.ErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
-			n.log.Error("NATS error", map[string]interface{}{
-				"error":   err.Error(),
-				"subject": sub.Subject,
-			})
-		}),
+		nats.DisconnectErrHandler(n.handleDisconnect),
+		nats.ReconnectHandler(n.handleReconnect),
+		nats.ErrorHandler(n.handleError),
 	}
 
 	// Connect to NATS

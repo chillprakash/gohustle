@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	"github.com/apache/arrow/go/v14/arrow"
 	"github.com/apache/arrow/go/v14/arrow/array"
@@ -13,7 +15,154 @@ import (
 	"github.com/apache/arrow/go/v14/parquet/compress"
 	"github.com/apache/arrow/go/v14/parquet/pqarrow"
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"gohustle/logger"
 )
+
+const (
+	DefaultParquetDir = "data/parquet"
+)
+
+var (
+	parquetStoreInstance *ParquetStore
+	parquetStoreOnce     sync.Once
+	parquetStoreMu       sync.RWMutex
+)
+
+// ParquetStore manages daily Parquet files per index
+type ParquetStore struct {
+	writers    map[string]*ParquetWriter // map[indexName]writer
+	writersMu  sync.RWMutex
+	log        *logger.Logger
+	currentDay string
+}
+
+// GetParquetStore returns the singleton instance of ParquetStore
+func GetParquetStore() *ParquetStore {
+	parquetStoreMu.RLock()
+	if parquetStoreInstance != nil {
+		parquetStoreMu.RUnlock()
+		return parquetStoreInstance
+	}
+	parquetStoreMu.RUnlock()
+
+	parquetStoreMu.Lock()
+	defer parquetStoreMu.Unlock()
+
+	parquetStoreOnce.Do(func() {
+		parquetStoreInstance = &ParquetStore{
+			writers:    make(map[string]*ParquetWriter),
+			log:        logger.L(),
+			currentDay: time.Now().Format("2006-01-02"),
+		}
+	})
+
+	return parquetStoreInstance
+}
+
+// getFilePath returns the path for a given index and date
+func (ps *ParquetStore) getFilePath(index string) string {
+	return filepath.Join(DefaultParquetDir, fmt.Sprintf("%s_%s.parquet", index, ps.currentDay))
+}
+
+// GetOrCreateWriter gets existing writer or creates new one for the index
+func (ps *ParquetStore) GetOrCreateWriter(index string) (*ParquetWriter, error) {
+	currentDay := time.Now().Format("2006-01-02")
+
+	ps.writersMu.RLock()
+	writer, exists := ps.writers[index]
+	if exists && ps.currentDay == currentDay {
+		ps.writersMu.RUnlock()
+		return writer, nil
+	}
+	ps.writersMu.RUnlock()
+
+	// Need to create or rotate writer
+	ps.writersMu.Lock()
+	defer ps.writersMu.Unlock()
+
+	// Double check after acquiring write lock
+	if writer, exists := ps.writers[index]; exists && ps.currentDay == currentDay {
+		return writer, nil
+	}
+
+	// Close existing writer if day changed
+	if writer, exists := ps.writers[index]; exists {
+		if err := writer.Close(); err != nil {
+			ps.log.Error("Failed to close writer", map[string]interface{}{
+				"error": err.Error(),
+				"index": index,
+			})
+		}
+		delete(ps.writers, index)
+	}
+
+	// Create new writer
+	filePath := ps.getFilePath(index)
+	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	writer, err := NewParquetWriter(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create writer: %w", err)
+	}
+
+	ps.writers[index] = writer
+	ps.currentDay = currentDay
+
+	return writer, nil
+}
+
+// WriteTick writes a single tick to the appropriate daily file
+func (ps *ParquetStore) WriteTick(index string, record TickRecord) error {
+	writer, err := ps.GetOrCreateWriter(index)
+	if err != nil {
+		return fmt.Errorf("failed to get writer: %w", err)
+	}
+
+	return writer.Write(record)
+}
+
+// WriteBatch writes a batch of ticks to the appropriate daily file
+func (ps *ParquetStore) WriteBatch(index string, records []TickRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+
+	writer, err := ps.GetOrCreateWriter(index)
+	if err != nil {
+		return fmt.Errorf("failed to get writer: %w", err)
+	}
+
+	for _, record := range records {
+		if err := writer.Write(record); err != nil {
+			return fmt.Errorf("failed to write record: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Close closes all open writers
+func (ps *ParquetStore) Close() error {
+	ps.writersMu.Lock()
+	defer ps.writersMu.Unlock()
+
+	var lastErr error
+	for index, writer := range ps.writers {
+		if err := writer.Close(); err != nil {
+			ps.log.Error("Failed to close writer", map[string]interface{}{
+				"error": err.Error(),
+				"index": index,
+			})
+			lastErr = err
+		}
+		delete(ps.writers, index)
+	}
+
+	return lastErr
+}
 
 // WriterStats holds statistics about the parquet writing process
 type WriterStats struct {
@@ -112,92 +261,93 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		return nil, fmt.Errorf("failed to create file: %w", err)
 	}
 
+	// Define metadata for SQL compatibility
+	metadata := arrow.NewMetadata([]string{
+		"writer.type",
+		"writer.version",
+		"table.name",
+		"table.description",
+	}, []string{
+		"gohustle",
+		"1.0",
+		"market_ticks",
+		"Market tick data with OHLC and depth information",
+	})
+
 	// Define complete schema matching TimescaleDB
 	schema := arrow.NewSchema(
 		[]arrow.Field{
-			{Name: "id", Type: arrow.PrimitiveTypes.Int64},
-			{Name: "instrument_token", Type: arrow.PrimitiveTypes.Int64},
-			{Name: "timestamp", Type: arrow.FixedWidthTypes.Timestamp_us},
-			{Name: "is_tradable", Type: arrow.FixedWidthTypes.Boolean},
-			{Name: "is_index", Type: arrow.FixedWidthTypes.Boolean},
-			{Name: "mode", Type: arrow.BinaryTypes.String},
-
-			// Price information
-			{Name: "last_price", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "last_traded_quantity", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "average_trade_price", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "volume_traded", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "total_buy_quantity", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "total_sell_quantity", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "total_buy", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "total_sell", Type: arrow.PrimitiveTypes.Int32},
-
-			// OHLC
-			{Name: "ohlc_open", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "ohlc_high", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "ohlc_low", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "ohlc_close", Type: arrow.PrimitiveTypes.Float64},
-
-			// Market Depth - Buy
-			{Name: "depth_buy_price_1", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_buy_quantity_1", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_orders_1", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_price_2", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_buy_quantity_2", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_orders_2", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_price_3", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_buy_quantity_3", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_orders_3", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_price_4", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_buy_quantity_4", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_orders_4", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_price_5", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_buy_quantity_5", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_buy_orders_5", Type: arrow.PrimitiveTypes.Int32},
-
-			// Market Depth - Sell
-			{Name: "depth_sell_price_1", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_sell_quantity_1", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_orders_1", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_price_2", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_sell_quantity_2", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_orders_2", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_price_3", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_sell_quantity_3", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_orders_3", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_price_4", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_sell_quantity_4", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_orders_4", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_price_5", Type: arrow.PrimitiveTypes.Float64},
-			{Name: "depth_sell_quantity_5", Type: arrow.PrimitiveTypes.Int32},
-			{Name: "depth_sell_orders_5", Type: arrow.PrimitiveTypes.Int32},
-
-			// Additional fields
-			{Name: "last_trade_time", Type: arrow.FixedWidthTypes.Timestamp_us},
-			{Name: "net_change", Type: arrow.PrimitiveTypes.Float64},
-
-			// Metadata
-			{Name: "tick_received_time", Type: arrow.FixedWidthTypes.Timestamp_us},
-			{Name: "tick_stored_in_db_time", Type: arrow.FixedWidthTypes.Timestamp_us},
+			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+			{Name: "instrument_token", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
+			{Name: "timestamp", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
+			{Name: "is_tradable", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
+			{Name: "is_index", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
+			{Name: "mode", Type: arrow.BinaryTypes.String, Nullable: false},
+			{Name: "last_price", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "last_traded_quantity", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "average_trade_price", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "volume_traded", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "total_buy_quantity", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "total_sell_quantity", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "total_buy", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "total_sell", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "ohlc_open", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "ohlc_high", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "ohlc_low", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "ohlc_close", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_buy_price_1", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_buy_quantity_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_orders_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_price_2", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_buy_quantity_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_orders_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_price_3", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_buy_quantity_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_orders_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_price_4", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_buy_quantity_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_orders_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_price_5", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_buy_quantity_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_buy_orders_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_price_1", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_sell_quantity_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_orders_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_price_2", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_sell_quantity_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_orders_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_price_3", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_sell_quantity_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_orders_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_price_4", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_sell_quantity_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_orders_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_price_5", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "depth_sell_quantity_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "depth_sell_orders_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
+			{Name: "last_trade_time", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: true},
+			{Name: "net_change", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "tick_received_time", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
+			{Name: "tick_stored_in_db_time", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
 		},
-		nil,
+		&metadata,
 	)
 
 	// Create Arrow memory allocator
 	pool := memory.NewGoAllocator()
 
-	// Create writer properties with maximum compression
+	// Create writer properties optimized for SQL compatibility
 	writerProps := parquet.NewWriterProperties(
 		parquet.WithCompression(compress.Codecs.Zstd),
 		parquet.WithDictionaryDefault(true),
-		parquet.WithDataPageSize(1024*1024),                 // 1MB page size
-		parquet.WithDictionaryPageSizeLimit(1024*1024*1024), // 1GB dictionary size
-		parquet.WithMaxRowGroupLength(128*1024*1024),        // 128MB row groups
-		parquet.WithCreatedBy("GoHustle Exporter v1.0"),     // Add creator info
-		parquet.WithVersion(parquet.V2_LATEST),              // Use latest version
+		parquet.WithDataPageSize(1024*1024),                // 1MB page size
+		parquet.WithDictionaryPageSizeLimit(128*1024*1024), // 128MB dictionary size
+		parquet.WithMaxRowGroupLength(128*1024*1024),       // 128MB row groups
+		parquet.WithCreatedBy("GoHustle"),
+		parquet.WithVersion(parquet.V2_LATEST),
 	)
 
-	// Create Arrow writer properties - remove compression setting
+	// Create Arrow writer properties with SQL compatibility options
 	arrowProps := pqarrow.NewArrowWriterProperties(
 		pqarrow.WithStoreSchema(),
 		pqarrow.WithAllocator(pool),
@@ -365,11 +515,19 @@ func (w *ParquetWriter) Write(record TickRecord) error {
 }
 
 func (w *ParquetWriter) Close() error {
+	if w.writer == nil {
+		return nil // Already closed
+	}
+
 	if err := w.writer.Close(); err != nil {
 		w.file.Close()
+		w.writer = nil
 		return fmt.Errorf("failed to close writer: %w", err)
 	}
-	return w.file.Close()
+
+	err := w.file.Close()
+	w.writer = nil
+	return err
 }
 
 func (w *ParquetWriter) GetStats() (WriterStats, error) {

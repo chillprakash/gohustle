@@ -3,13 +3,14 @@ package nats
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"time"
 
+	"gohustle/filestore"
 	"gohustle/logger"
 	pb "gohustle/proto"
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/protobuf/proto"
 )
@@ -301,18 +302,117 @@ func (c *TickConsumer) flushIndex(index string) {
 	c.lastFlush[index] = time.Now()
 	c.batchMu.Unlock()
 
-	// Process the batch outside the lock
-	filename := filepath.Join(DataDir, fmt.Sprintf("_%s.parquet", time.Now().Format("2006-01-02-15-04-05")))
-	count := len(batch)
+	// Get ParquetStore singleton
+	store := filestore.GetParquetStore()
+	writer, err := store.GetOrCreateWriter(index)
+	if err != nil {
+		c.log.Error("Failed to get Parquet writer", map[string]interface{}{
+			"error": err.Error(),
+			"index": index,
+		})
+		c.incrementErrorCount()
+		return
+	}
 
-	// TODO: Write to Parquet file
+	// Write each tick in the batch
+	for _, tick := range batch {
+		record := filestore.TickRecord{
+			// Basic info
+			InstrumentToken: int64(tick.InstrumentToken),
+			IsTradable:      tick.IsTradable,
+			IsIndex:         tick.IsIndex,
+			Mode:            tick.Mode,
+
+			// Timestamps
+			Timestamp: pgtype.Timestamp{
+				Time:  time.Unix(tick.Timestamp, 0),
+				Valid: true,
+			},
+			LastTradeTime: pgtype.Timestamp{
+				Time:  time.Unix(tick.LastTradeTime, 0),
+				Valid: true,
+			},
+
+			// Price information
+			LastPrice:          tick.LastPrice,
+			LastTradedQuantity: int32(tick.LastTradedQuantity),
+			AverageTradePrice:  tick.AverageTradePrice,
+			VolumeTraded:       int32(tick.VolumeTraded),
+			TotalBuyQuantity:   int32(tick.TotalBuyQuantity),
+			TotalSellQuantity:  int32(tick.TotalSellQuantity),
+			TotalBuy:           int32(tick.TotalBuy),
+			TotalSell:          int32(tick.TotalSell),
+
+			// OHLC
+			OhlcOpen:  tick.Ohlc.Open,
+			OhlcHigh:  tick.Ohlc.High,
+			OhlcLow:   tick.Ohlc.Low,
+			OhlcClose: tick.Ohlc.Close,
+
+			// Market Depth - Buy
+			DepthBuyPrice1:    getDepthValue(tick.Depth.Buy, 0, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthBuyQuantity1: int32(getDepthValue(tick.Depth.Buy, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthBuyOrders1:   int32(getDepthValue(tick.Depth.Buy, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthBuyPrice2:    getDepthValue(tick.Depth.Buy, 1, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthBuyQuantity2: int32(getDepthValue(tick.Depth.Buy, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthBuyOrders2:   int32(getDepthValue(tick.Depth.Buy, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthBuyPrice3:    getDepthValue(tick.Depth.Buy, 2, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthBuyQuantity3: int32(getDepthValue(tick.Depth.Buy, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthBuyOrders3:   int32(getDepthValue(tick.Depth.Buy, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthBuyPrice4:    getDepthValue(tick.Depth.Buy, 3, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthBuyQuantity4: int32(getDepthValue(tick.Depth.Buy, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthBuyOrders4:   int32(getDepthValue(tick.Depth.Buy, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthBuyPrice5:    getDepthValue(tick.Depth.Buy, 4, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthBuyQuantity5: int32(getDepthValue(tick.Depth.Buy, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthBuyOrders5:   int32(getDepthValue(tick.Depth.Buy, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+
+			// Market Depth - Sell
+			DepthSellPrice1:    getDepthValue(tick.Depth.Sell, 0, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthSellQuantity1: int32(getDepthValue(tick.Depth.Sell, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthSellOrders1:   int32(getDepthValue(tick.Depth.Sell, 0, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthSellPrice2:    getDepthValue(tick.Depth.Sell, 1, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthSellQuantity2: int32(getDepthValue(tick.Depth.Sell, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthSellOrders2:   int32(getDepthValue(tick.Depth.Sell, 1, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthSellPrice3:    getDepthValue(tick.Depth.Sell, 2, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthSellQuantity3: int32(getDepthValue(tick.Depth.Sell, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthSellOrders3:   int32(getDepthValue(tick.Depth.Sell, 2, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthSellPrice4:    getDepthValue(tick.Depth.Sell, 3, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthSellQuantity4: int32(getDepthValue(tick.Depth.Sell, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthSellOrders4:   int32(getDepthValue(tick.Depth.Sell, 3, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+			DepthSellPrice5:    getDepthValue(tick.Depth.Sell, 4, func(d *pb.TickData_DepthItem) float64 { return d.Price }),
+			DepthSellQuantity5: int32(getDepthValue(tick.Depth.Sell, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Quantity) })),
+			DepthSellOrders5:   int32(getDepthValue(tick.Depth.Sell, 4, func(d *pb.TickData_DepthItem) float64 { return float64(d.Orders) })),
+
+			// Additional fields
+			NetChange: tick.NetChange,
+
+			// Metadata
+			TickReceivedTime: pgtype.Timestamp{
+				Time:  time.Unix(tick.TickRecievedTime, 0),
+				Valid: true,
+			},
+			TickStoredInDbTime: pgtype.Timestamp{
+				Time:  time.Unix(tick.TickStoredInDbTime, 0),
+				Valid: true,
+			},
+		}
+
+		if err := writer.Write(record); err != nil {
+			c.log.Error("Failed to write tick to Parquet file", map[string]interface{}{
+				"error": err.Error(),
+				"index": index,
+			})
+			c.incrementErrorCount()
+			continue
+		}
+	}
+
 	c.log.Info("Flushed ticks to Parquet file", map[string]interface{}{
-		"index":    index,
-		"count":    count,
-		"filename": filename,
+		"index": index,
+		"count": len(batch),
 	})
 
-	c.incrementProcessedCount(uint64(count))
+	c.incrementProcessedCount(uint64(len(batch)))
 	c.incrementFlushCount()
 }
 
@@ -402,4 +502,11 @@ func (c *TickConsumer) logMetrics(ctx context.Context) {
 			c.metrics.mu.RUnlock()
 		}
 	}
+}
+
+func getDepthValue(depth []*pb.TickData_DepthItem, index int, getValue func(*pb.TickData_DepthItem) float64) float64 {
+	if index < len(depth) {
+		return getValue(depth[index])
+	}
+	return 0
 }

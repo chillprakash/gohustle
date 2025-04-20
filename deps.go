@@ -1,4 +1,4 @@
-package main
+package deps
 
 // Import all external dependencies used in the project
 import (

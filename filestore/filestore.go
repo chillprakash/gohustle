@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"gohustle/logger"
 )
@@ -14,14 +15,40 @@ const (
 	DefaultDataPath = "data"
 )
 
+var (
+	diskFileStoreInstance *DiskFileStore
+	diskFileStoreOnce     sync.Once
+	diskFileStoreMu       sync.RWMutex
+)
+
 type DiskFileStore struct {
 	logger *logger.Logger
 }
 
-func NewDiskFileStore() *DiskFileStore {
-	return &DiskFileStore{
-		logger: logger.L(),
+// GetDiskFileStore returns a singleton instance of DiskFileStore
+func GetDiskFileStore() *DiskFileStore {
+	diskFileStoreMu.RLock()
+	if diskFileStoreInstance != nil {
+		diskFileStoreMu.RUnlock()
+		return diskFileStoreInstance
 	}
+	diskFileStoreMu.RUnlock()
+
+	diskFileStoreMu.Lock()
+	defer diskFileStoreMu.Unlock()
+
+	diskFileStoreOnce.Do(func() {
+		diskFileStoreInstance = &DiskFileStore{
+			logger: logger.L(),
+		}
+	})
+
+	return diskFileStoreInstance
+}
+
+// Legacy method for backwards compatibility
+func NewDiskFileStore() *DiskFileStore {
+	return GetDiskFileStore()
 }
 
 func (fs *DiskFileStore) getPath(prefix, date string) string {
@@ -124,4 +151,33 @@ func (fs *DiskFileStore) FileExists(prefix, date string) bool {
 	})
 
 	return exists
+}
+
+// CreateParquetFile creates a new Parquet file at the specified path
+func (fs *DiskFileStore) CreateParquetFile(filePath string) error {
+	// Create directories if they don't exist
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, os.ModePerm); err != nil {
+		fs.logger.Error("Failed to create directory for Parquet file", map[string]interface{}{
+			"error": err.Error(),
+			"dir":   dir,
+		})
+		return err
+	}
+
+	// Create an empty file (will be filled by Parquet writer)
+	file, err := os.Create(filePath)
+	if err != nil {
+		fs.logger.Error("Failed to create Parquet file", map[string]interface{}{
+			"error":    err.Error(),
+			"filePath": filePath,
+		})
+		return err
+	}
+	defer file.Close()
+
+	fs.logger.Info("Created Parquet file", map[string]interface{}{
+		"filePath": filePath,
+	})
+	return nil
 }

@@ -26,16 +26,27 @@ var (
 // GetPositionManager returns a singleton instance of PositionManager
 func GetPositionManager() *PositionManager {
 	positionOnce.Do(func() {
-		positionInstance = &PositionManager{
-			log: logger.L(),
+		log := logger.L()
+		kite := GetKiteConnect()
+		if kite == nil {
+			log.Error("Failed to get KiteConnect instance", map[string]interface{}{})
+			return
 		}
+
+		positionInstance = &PositionManager{
+			log:  log,
+			kite: kite,
+		}
+		log.Info("Position manager initialized", map[string]interface{}{})
 	})
 	return positionInstance
 }
 
 // GetOpenPositions fetches current positions from Zerodha
 func (pm *PositionManager) GetOpenPositions(ctx context.Context) (kiteconnect.Positions, error) {
-	var positions kiteconnect.Positions
+	if pm == nil || pm.kite == nil {
+		return kiteconnect.Positions{}, fmt.Errorf("position manager or kite client not initialized")
+	}
 
 	positions, err := pm.kite.Kite.GetPositions()
 	if err != nil {

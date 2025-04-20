@@ -129,5 +129,4 @@ func InitializePositionPolling(ctx context.Context) {
 
 	scheduler.AddTask(task)
 	scheduler.Start(ctx)
-	logger.L().Info("Position polling task added to scheduler", map[string]interface{}{})
 }

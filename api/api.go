@@ -651,13 +651,13 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	kc := zerodha.GetKiteConnect()
 	indices := core.GetIndices()
-	atmStrike := kc.GetTentativeATMBasedonLTP(*indices.GetIndexByName(index), allStrikes)
-	logger.L().Info("ATM strike", map[string]interface{}{
-		"atm_strike": atmStrike,
+	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indices.GetIndexByName(index), allStrikes)
+	logger.L().Info("ATM strike tentative", map[string]interface{}{
+		"atm_strike": atmStrike_tentative,
 	})
 
 	// Find the middle strike
-	middleIndex := slices.Index(allStrikes, atmStrike)
+	middleIndex := slices.Index(allStrikes, atmStrike_tentative)
 	startIndex := max(0, middleIndex-numStrikes)
 	endIndex := min(len(allStrikes), middleIndex+numStrikes+1)
 
@@ -773,6 +773,10 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	// Build option chain with the collected data
 	optionChain := make([]map[string]interface{}, 0)
+	lowestTotal := math.MaxFloat64
+	var atmStrike float64
+
+	// First pass: Calculate CE+PE totals and find the lowest
 	for _, strike := range selectedStrikes {
 		details := instrumentDetails[strike]
 		parts := strings.Split(details, "||")
@@ -805,14 +809,25 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 			if pe, hasPE := strikeItem["PE"].(map[string]interface{}); hasPE {
 				ceLTP := ce["ltp"].(float64)
 				peLTP := pe["ltp"].(float64)
-				strikeItem["ce_pe_total"] = ceLTP + peLTP
+				total := ceLTP + peLTP
+				strikeItem["ce_pe_total"] = total
+
+				// Update lowest total and corresponding strike
+				if total < lowestTotal {
+					lowestTotal = total
+					atmStrike = strikeFloat
+				}
 			}
 		}
 
-		// Set is_atm flag (you might want to adjust the logic for determining ATM)
-		strikeItem["is_atm"] = math.Abs(strikeFloat-underlyingPrice) < 50 // Using a 50-point threshold
-
 		optionChain = append(optionChain, strikeItem)
+	}
+
+	// Second pass: Set is_atm flag based on the strike with lowest CE+PE total
+	for i := range optionChain {
+		if strike, ok := optionChain[i]["strike"].(float64); ok {
+			optionChain[i]["is_atm"] = strike == atmStrike
+		}
 	}
 
 	resp := Response{
@@ -821,6 +836,7 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		Data: map[string]interface{}{
 			"underlying_price": underlyingPrice,
 			"chain":            optionChain,
+			"atm_strike":       atmStrike,
 		},
 	}
 

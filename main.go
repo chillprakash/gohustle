@@ -15,6 +15,7 @@ import (
 	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/nats"
+	"gohustle/scheduler"
 	"gohustle/zerodha"
 )
 
@@ -95,6 +96,8 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	})
 
 	kiteConnect.InitializeTickersWithTokens(allTokens)
+
+	scheduler.InitializePositionPolling(ctx)
 
 	// Block until context is cancelled
 	<-ctx.Done()

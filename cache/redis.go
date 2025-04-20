@@ -11,7 +11,8 @@ import (
 )
 
 type RedisCache struct {
-	ltpDB3 *redis.Client
+	ltpDB3       *redis.Client
+	positionsDB2 *redis.Client
 }
 
 var (
@@ -61,10 +62,10 @@ func initializeRedisCache() (*RedisCache, error) {
 	cfg := config.GetConfig()
 
 	// Initialize Redis client for relational DB 1
-	relationalDB1 := redis.NewClient(&redis.Options{
+	positionsDB2 := redis.NewClient(&redis.Options{
 		Addr:         fmt.Sprintf("%s:%s", cfg.Redis.Host, cfg.Redis.Port),
 		Password:     cfg.Redis.Password,
-		DB:           1, // Use DB 1 for relational data
+		DB:           2, // Use DB 2 for positions data
 		MinIdleConns: cfg.Redis.MinConnections,
 		PoolSize:     cfg.Redis.MaxConnections,
 	})
@@ -85,7 +86,7 @@ func initializeRedisCache() (*RedisCache, error) {
 	// Test connections in parallel
 	errChan := make(chan error, 2)
 	go func() {
-		errChan <- relationalDB1.Ping(ctx).Err()
+		errChan <- positionsDB2.Ping(ctx).Err()
 	}()
 	go func() {
 		errChan <- ltpDB3.Ping(ctx).Err()
@@ -95,14 +96,15 @@ func initializeRedisCache() (*RedisCache, error) {
 	for i := 0; i < 2; i++ {
 		if err := <-errChan; err != nil {
 			// Clean up on failure
-			relationalDB1.Close()
+			positionsDB2.Close()
 			ltpDB3.Close()
 			return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 		}
 	}
 
 	return &RedisCache{
-		ltpDB3: ltpDB3,
+		ltpDB3:       ltpDB3,
+		positionsDB2: positionsDB2,
 	}, nil
 }
 
@@ -111,7 +113,11 @@ func (r *RedisCache) GetLTPDB3() *redis.Client {
 	return r.ltpDB3
 }
 
-// Close closes all Redis connections
+func (r *RedisCache) GetPositionsDB2() *redis.Client {
+	return r.positionsDB2
+}
+
+// Close closes all Redis connection
 func (r *RedisCache) Close() error {
 	var errs []error
 

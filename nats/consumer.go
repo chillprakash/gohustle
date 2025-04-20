@@ -505,8 +505,8 @@ func (c *TickConsumer) logMetrics(ctx context.Context) {
 }
 
 func getDepthValue(depth []*pb.TickData_DepthItem, index int, getValue func(*pb.TickData_DepthItem) float64) float64 {
-	if index < len(depth) {
-		return getValue(depth[index])
+	if depth == nil || index < 0 || index >= len(depth) || depth[index] == nil {
+		return 0.0 // Return default value for missing/invalid depth data
 	}
-	return 0
+	return getValue(depth[index])
 }

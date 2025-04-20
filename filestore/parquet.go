@@ -246,6 +246,8 @@ type ParquetWriter struct {
 	recordBldr       *array.RecordBuilder
 	recordCount      int64
 	uncompressedSize int64
+	closed           bool
+	flushSize        int64
 }
 
 func NewParquetWriter(filePath string) (*ParquetWriter, error) {
@@ -371,10 +373,30 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		recordBldr:       array.NewRecordBuilder(pool, schema),
 		recordCount:      0,
 		uncompressedSize: 0,
+		closed:           false,
+		flushSize:        10000,
 	}, nil
 }
 
 func (w *ParquetWriter) Write(record TickRecord) error {
+	if w.closed {
+		return fmt.Errorf("writer is closed")
+	}
+
+	// Validate required fields
+	if record.InstrumentToken == 0 {
+		return fmt.Errorf("instrument token is required")
+	}
+
+	if !record.Timestamp.Valid {
+		return fmt.Errorf("timestamp is required")
+	}
+
+	// Estimate uncompressed size (rough approximation)
+	// Each numeric field ~8 bytes, string ~32 bytes, timestamp ~8 bytes
+	w.uncompressedSize += 8*30 + 32*1 + 8*4 // 30 numeric fields, 1 string field, 4 timestamps
+
+	// Build the record
 	// Basic fields
 	w.recordBldr.Field(0).(*array.Int64Builder).Append(record.ID)
 	w.recordBldr.Field(1).(*array.Int64Builder).Append(record.InstrumentToken)
@@ -450,64 +472,72 @@ func (w *ParquetWriter) Write(record TickRecord) error {
 	w.recordBldr.Field(47).(*array.Int32Builder).Append(record.DepthSellOrders5)
 
 	// Additional fields
-	w.recordBldr.Field(48).(*array.TimestampBuilder).Append(arrow.Timestamp(record.LastTradeTime.Time.UnixMicro()))
+	if record.LastTradeTime.Valid {
+		w.recordBldr.Field(48).(*array.TimestampBuilder).Append(arrow.Timestamp(record.LastTradeTime.Time.UnixMicro()))
+	} else {
+		w.recordBldr.Field(48).(*array.TimestampBuilder).AppendNull()
+	}
 	w.recordBldr.Field(49).(*array.Float64Builder).Append(record.NetChange)
 
 	// Metadata
-	w.recordBldr.Field(50).(*array.TimestampBuilder).Append(arrow.Timestamp(record.TickReceivedTime.Time.UnixMicro()))
-	w.recordBldr.Field(51).(*array.TimestampBuilder).Append(arrow.Timestamp(record.TickStoredInDbTime.Time.UnixMicro()))
+	if record.TickReceivedTime.Valid {
+		w.recordBldr.Field(50).(*array.TimestampBuilder).Append(arrow.Timestamp(record.TickReceivedTime.Time.UnixMicro()))
+	} else {
+		w.recordBldr.Field(50).(*array.TimestampBuilder).AppendNull()
+	}
+	if record.TickStoredInDbTime.Valid {
+		w.recordBldr.Field(51).(*array.TimestampBuilder).Append(arrow.Timestamp(record.TickStoredInDbTime.Time.UnixMicro()))
+	} else {
+		w.recordBldr.Field(51).(*array.TimestampBuilder).AppendNull()
+	}
+
+	w.recordCount++
+
+	// Check if we need to flush
+	if w.recordCount >= w.flushSize {
+		if err := w.flush(); err != nil {
+			return fmt.Errorf("failed to flush records: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// flush writes the current batch of records to the parquet file
+func (w *ParquetWriter) flush() error {
+	if w.recordCount == 0 {
+		return nil
+	}
 
 	// Create record batch
 	rec := w.recordBldr.NewRecord()
 	defer rec.Release()
 
-	// Update record count
-	w.recordCount++
-
-	// Simple size estimation based on fixed sizes
-	// This is an approximation, but good enough for monitoring
-	const (
-		boolSize      = 1
-		int32Size     = 4
-		int64Size     = 8
-		float64Size   = 8
-		timestampSize = 8
-	)
-
-	size := int64(
-		2*int64Size + // ID, InstrumentToken
-			3*boolSize + // IsTradable, IsIndex
-			len(record.Mode) + // Mode (string)
-			7*float64Size + // Price information
-			4*int32Size + // Quantities
-			4*float64Size + // OHLC
-			15*float64Size + // Depth Buy Prices
-			15*int32Size + // Depth Buy Quantities
-			15*int32Size + // Depth Buy Orders
-			15*float64Size + // Depth Sell Prices
-			15*int32Size + // Depth Sell Quantities
-			15*int32Size + // Depth Sell Orders
-			3*timestampSize + // Timestamps
-			float64Size, // NetChange
-	)
-
-	w.uncompressedSize += size
+	// Log debug info
+	log.Printf("Flushing %d records to parquet file %s", w.recordCount, w.file.Name())
 
 	// Write record batch
 	if err := w.writer.Write(rec); err != nil {
-		return fmt.Errorf("failed to write record: %w", err)
+		return fmt.Errorf("failed to write record batch: %w", err)
 	}
 
-	// Monitor compression ratio every 10000 records
-	if w.recordCount%10000 == 0 {
-		if stats, err := w.GetStats(); err == nil {
-			if stats.CompressionRatio < 2.0 {
-				log.Printf("Warning: Low compression ratio (%.2f) for file %s after %d records",
-					stats.CompressionRatio,
-					w.file.Name(),
-					w.recordCount,
-				)
-			}
+	// Reset record count and builder
+	prevCount := w.recordCount
+	w.recordCount = 0
+	w.recordBldr.Reserve(int(w.flushSize)) // Pre-allocate space for next batch
+
+	// Monitor compression ratio
+	if stats, err := w.GetStats(); err == nil {
+		log.Printf("Flush complete - Records: %d, Total Size: %.2f MB, Compression: %.2fx",
+			prevCount,
+			float64(stats.CompressedSize)/(1024*1024),
+			stats.CompressionRatio,
+		)
+		if stats.CompressionRatio < 2.0 {
+			log.Printf("Warning: Low compression ratio (%.2f) for file %s",
+				stats.CompressionRatio,
+				w.file.Name(),
+			)
 		}
 	}
 
@@ -515,19 +545,45 @@ func (w *ParquetWriter) Write(record TickRecord) error {
 }
 
 func (w *ParquetWriter) Close() error {
-	if w.writer == nil {
+	if w.closed {
 		return nil // Already closed
 	}
 
+	// Ensure any remaining records are flushed
+	if w.recordCount > 0 {
+		if err := w.flush(); err != nil {
+			return fmt.Errorf("failed to flush remaining records during close: %w", err)
+		}
+	}
+
+	// Close the writer
 	if err := w.writer.Close(); err != nil {
-		w.file.Close()
+		w.file.Close() // Best effort to close file
 		w.writer = nil
+		w.closed = true
 		return fmt.Errorf("failed to close writer: %w", err)
 	}
 
-	err := w.file.Close()
+	// Close the file
+	if err := w.file.Close(); err != nil {
+		w.writer = nil
+		w.closed = true
+		return fmt.Errorf("failed to close file: %w", err)
+	}
+
 	w.writer = nil
-	return err
+	w.closed = true
+
+	// Log final stats
+	if stats, err := w.GetStats(); err == nil {
+		log.Printf("Final parquet file stats - Records: %d, Size: %.2f MB, Compression: %.2fx",
+			stats.RecordCount,
+			float64(stats.CompressedSize)/(1024*1024),
+			stats.CompressionRatio,
+		)
+	}
+
+	return nil
 }
 
 func (w *ParquetWriter) GetStats() (WriterStats, error) {
@@ -536,13 +592,17 @@ func (w *ParquetWriter) GetStats() (WriterStats, error) {
 		UncompressedSize: w.uncompressedSize,
 	}
 
+	if w.file == nil {
+		return stats, fmt.Errorf("file is nil")
+	}
+
 	fileInfo, err := w.file.Stat()
 	if err != nil {
 		return stats, fmt.Errorf("failed to get file stats: %w", err)
 	}
 
 	stats.CompressedSize = fileInfo.Size()
-	if stats.CompressedSize > 0 {
+	if stats.CompressedSize > 0 && stats.UncompressedSize > 0 {
 		stats.CompressionRatio = float64(stats.UncompressedSize) / float64(stats.CompressedSize)
 	}
 

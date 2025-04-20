@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"gohustle/core"
 	"gohustle/logger"
 	"gohustle/nats"
 	pb "gohustle/proto"
@@ -205,6 +206,9 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	// Use hierarchical subject pattern
 	subject := fmt.Sprintf("ticks.%s", indexName)
 
+	if indexName == core.GetIndices().BANKNIFTY.NameInOptions {
+		return
+	}
 	// Publish asynchronously - don't block on errors
 	if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
 		log.Error("Failed to queue tick for publishing", map[string]interface{}{

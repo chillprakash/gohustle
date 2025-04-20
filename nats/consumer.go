@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gohustle/cache"
+	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
 	pb "gohustle/proto"
@@ -207,83 +208,18 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 		return
 	}
 
-	// Get Redis instance
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		c.log.Error("Failed to get Redis cache", map[string]interface{}{
-			"error": err.Error(),
+	// Store data in Redis
+	if err := c.storeTickInRedis(tick); err != nil {
+		c.log.Error("Failed to store tick in Redis", map[string]interface{}{
+			"worker_id": workerId,
+			"error":     err.Error(),
 		})
 		c.incrementErrorCount()
 		return
 	}
 
-	// Get LTP DB (DB 3)
-	ltpDB := redisCache.GetLTPDB3()
-	if ltpDB == nil {
-		c.log.Error("LTP Redis DB is nil", nil)
-		c.incrementErrorCount()
-		return
-	}
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	// Create required keys map
-	instrumentToken := fmt.Sprintf("%d", tick.InstrumentToken)
-	requiredKeys := map[string]interface{}{
-		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
-		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
-		fmt.Sprintf("%s_total_sell_quantity", instrumentToken):  tick.TotalSellQuantity,
-		fmt.Sprintf("%s_total_buy_quantity", instrumentToken):   tick.TotalBuyQuantity,
-		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
-		fmt.Sprintf("%s_change", instrumentToken):               tick.NetChange,
-	}
-
-	// Filter out zero/nil values
-	redisData := make(map[string]interface{})
-	for key, value := range requiredKeys {
-		// Skip if value is zero
-		if !isZeroValue(value) {
-			redisData[key] = value
-		}
-	}
-
-	// If we have data to store
-	if len(redisData) > 0 {
-		// Use pipeline for better performance
-		pipe := ltpDB.Pipeline()
-
-		// Set all values
-		for key, value := range redisData {
-			// Convert value to string based on type
-			strValue := convertToString(value)
-			if strValue != "" {
-				pipe.Set(ctx, key, strValue, 12*time.Hour) // 12 hours expiry
-			}
-		}
-
-		// Execute pipeline
-		if _, err := pipe.Exec(ctx); err != nil {
-			c.log.Error("Failed to execute Redis pipeline", map[string]interface{}{
-				"error": err.Error(),
-				"token": instrumentToken,
-			})
-			c.incrementErrorCount()
-			return
-		}
-
-		c.log.Debug("Successfully stored LTP data in Redis", map[string]interface{}{
-			"token":    instrumentToken,
-			"keys_set": len(redisData),
-			"ltp":      tick.LastPrice,
-			"volume":   tick.VolumeTraded,
-		})
-	}
-
-	// Write directly to tick store
-	tickStore := filestore.GetTickStore()
-	if err := tickStore.WriteTick(tick); err != nil {
+	// Write to tick store
+	if err := c.writeTickToStore(tick, workerId); err != nil {
 		c.log.Error("Failed to write tick to store", map[string]interface{}{
 			"worker_id": workerId,
 			"index":     tick.IndexName,
@@ -295,6 +231,74 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 
 	c.incrementProcessedCount(1)
 	c.incrementReceivedCount()
+}
+
+// storeTickInRedis handles storing tick data in Redis
+func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+
+	ltpDB := redisCache.GetLTPDB3()
+	if ltpDB == nil {
+		return fmt.Errorf("LTP Redis DB is nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	instrumentToken := fmt.Sprintf("%d", tick.InstrumentToken)
+	requiredKeys := map[string]interface{}{
+		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
+		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
+		fmt.Sprintf("%s_total_sell_quantity", instrumentToken):  tick.TotalSellQuantity,
+		fmt.Sprintf("%s_total_buy_quantity", instrumentToken):   tick.TotalBuyQuantity,
+		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
+		fmt.Sprintf("%s_change", instrumentToken):               tick.NetChange,
+	}
+
+	redisData := make(map[string]interface{})
+	for key, value := range requiredKeys {
+		if !isZeroValue(value) {
+			redisData[key] = value
+		}
+	}
+
+	if len(redisData) > 0 {
+		pipe := ltpDB.Pipeline()
+		for key, value := range redisData {
+			strValue := convertToString(value)
+			if strValue != "" {
+				pipe.Set(ctx, key, strValue, 12*time.Hour)
+			}
+		}
+
+		if _, err := pipe.Exec(ctx); err != nil {
+			return fmt.Errorf("failed to execute Redis pipeline for token %s: %w", instrumentToken, err)
+		}
+
+		c.log.Debug("Successfully stored LTP data in Redis", map[string]interface{}{
+			"token":    instrumentToken,
+			"keys_set": len(redisData),
+			"ltp":      tick.LastPrice,
+			"volume":   tick.VolumeTraded,
+		})
+	}
+
+	return nil
+}
+
+// writeTickToStore handles writing tick data to the file store
+func (c *TickConsumer) writeTickToStore(tick *pb.TickData, workerId int) error {
+	if tick.IndexName == core.GetIndices().BANKNIFTY.NameInOptions {
+		return nil
+	}
+	tickStore := filestore.GetTickStore()
+	if err := tickStore.WriteTick(tick); err != nil {
+		return fmt.Errorf("failed to write tick to store: %w", err)
+	}
+	return nil
 }
 
 // Helper functions for Redis operations

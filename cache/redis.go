@@ -11,8 +11,7 @@ import (
 )
 
 type RedisCache struct {
-	relationalDB1 *redis.Client
-	ltpDB3        *redis.Client
+	ltpDB3 *redis.Client
 }
 
 var (
@@ -103,50 +102,13 @@ func initializeRedisCache() (*RedisCache, error) {
 	}
 
 	return &RedisCache{
-		relationalDB1: relationalDB1,
-		ltpDB3:        ltpDB3,
+		ltpDB3: ltpDB3,
 	}, nil
-}
-
-// GetRelationalDB1 returns the Redis client for relational database 1
-func (r *RedisCache) GetRelationalDB1() *redis.Client {
-	return r.relationalDB1
 }
 
 // GetLTPDB3 returns the Redis client for LTP database 3
 func (r *RedisCache) GetLTPDB3() *redis.Client {
 	return r.ltpDB3
-}
-
-// GetValidToken retrieves a valid token from Redis with timeout
-func (r *RedisCache) GetValidToken(ctx context.Context) (string, error) {
-	// Add timeout if context doesn't have one
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-	}
-
-	token, err := r.relationalDB1.Get(ctx, "kite:access_token").Result()
-	if err != nil {
-		if err == redis.Nil {
-			return "", nil // No token found
-		}
-		return "", fmt.Errorf("failed to get token: %w", err)
-	}
-	return token, nil
-}
-
-// StoreAccessToken stores the access token in Redis with expiry
-func (r *RedisCache) StoreAccessToken(ctx context.Context, token string) error {
-	// Add timeout if context doesn't have one
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-	}
-
-	return r.relationalDB1.Set(ctx, "kite:access_token", token, 24*time.Hour).Err()
 }
 
 // Close closes all Redis connections
@@ -160,9 +122,9 @@ func (r *RedisCache) Close() error {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if r.relationalDB1 != nil {
-			if err := r.relationalDB1.Close(); err != nil {
-				errChan <- fmt.Errorf("failed to close Redis DB 1: %w", err)
+		if r.ltpDB3 != nil {
+			if err := r.ltpDB3.Close(); err != nil {
+				errChan <- fmt.Errorf("failed to close Redis DB 3: %w", err)
 			}
 		}
 	}()

@@ -1,0 +1,863 @@
+[
+    {
+        "strike": 22850,
+        "CE": {
+            "instrument_token": "20330242",
+            "ltp": 1019.05,
+            "oi": 74475,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20330498",
+            "ltp": 25.75,
+            "oi": 364200,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 1044.8,
+        "is_atm": false
+    },
+    {
+        "strike": 22900,
+        "CE": {
+            "instrument_token": "20331522",
+            "ltp": 970.3,
+            "oi": 560100,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20332290",
+            "ltp": 27.95,
+            "oi": 1397550,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 998.25,
+        "is_atm": false
+    },
+    {
+        "strike": 22950,
+        "CE": {
+            "instrument_token": "20332546",
+            "ltp": 919.1,
+            "oi": 94125,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20333314",
+            "ltp": 30.1,
+            "oi": 381900,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 949.2,
+        "is_atm": false
+    },
+    {
+        "strike": 23000,
+        "CE": {
+            "instrument_token": "20333570",
+            "ltp": 877.7,
+            "oi": 1976700,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20334850",
+            "ltp": 32.45,
+            "oi": 6977850,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 910.15,
+        "is_atm": false
+    },
+    {
+        "strike": 23050,
+        "CE": {
+            "instrument_token": "20335106",
+            "ltp": 829.95,
+            "oi": 141900,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20335362",
+            "ltp": 36.0,
+            "oi": 462750,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 865.95,
+        "is_atm": false
+    },
+    {
+        "strike": 23100,
+        "CE": {
+            "instrument_token": "20335618",
+            "ltp": 783.55,
+            "oi": 419400,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20335874",
+            "ltp": 38.95,
+            "oi": 1606125,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 822.5,
+        "is_atm": false
+    },
+    {
+        "strike": 23150,
+        "CE": {
+            "instrument_token": "20336130",
+            "ltp": 739.05,
+            "oi": 112125,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20336386",
+            "ltp": 42.45,
+            "oi": 471525,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 781.5,
+        "is_atm": false
+    },
+    {
+        "strike": 23200,
+        "CE": {
+            "instrument_token": "20336642",
+            "ltp": 697.65,
+            "oi": 846300,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20336898",
+            "ltp": 46.8,
+            "oi": 2448525,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 744.45,
+        "is_atm": false
+    },
+    {
+        "strike": 23250,
+        "CE": {
+            "instrument_token": "20337154",
+            "ltp": 647.05,
+            "oi": 123450,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20337410",
+            "ltp": 51.5,
+            "oi": 571200,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 698.55,
+        "is_atm": false
+    },
+    {
+        "strike": 23300,
+        "CE": {
+            "instrument_token": "20337666",
+            "ltp": 604.4,
+            "oi": 2274600,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20337922",
+            "ltp": 56.45,
+            "oi": 4504125,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 660.85,
+        "is_atm": false
+    },
+    {
+        "strike": 23350,
+        "CE": {
+            "instrument_token": "20338178",
+            "ltp": 562.4,
+            "oi": 488850,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20348674",
+            "ltp": 62.85,
+            "oi": 1022175,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 625.25,
+        "is_atm": false
+    },
+    {
+        "strike": 23400,
+        "CE": {
+            "instrument_token": "20348930",
+            "ltp": 518.65,
+            "oi": 2439525,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20349186",
+            "ltp": 68.9,
+            "oi": 3953475,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 587.55,
+        "is_atm": false
+    },
+    {
+        "strike": 23450,
+        "CE": {
+            "instrument_token": "20349442",
+            "ltp": 477.7,
+            "oi": 216975,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20352002",
+            "ltp": 76.25,
+            "oi": 676500,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 553.95,
+        "is_atm": false
+    },
+    {
+        "strike": 23500,
+        "CE": {
+            "instrument_token": "20352258",
+            "ltp": 430.35,
+            "oi": 5073150,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20352514",
+            "ltp": 84.4,
+            "oi": 8391750,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 514.75,
+        "is_atm": false
+    },
+    {
+        "strike": 23550,
+        "CE": {
+            "instrument_token": "20352770",
+            "ltp": 393.7,
+            "oi": 201675,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20353026",
+            "ltp": 95.35,
+            "oi": 614025,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 489.05,
+        "is_atm": false
+    },
+    {
+        "strike": 23600,
+        "CE": {
+            "instrument_token": "20353282",
+            "ltp": 354.8,
+            "oi": 1615650,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20353538",
+            "ltp": 106.85,
+            "oi": 2618400,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 461.65,
+        "is_atm": false
+    },
+    {
+        "strike": 23650,
+        "CE": {
+            "instrument_token": "20353794",
+            "ltp": 317.65,
+            "oi": 371100,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20354050",
+            "ltp": 119.35,
+            "oi": 672450,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 437.0,
+        "is_atm": false
+    },
+    {
+        "strike": 23700,
+        "CE": {
+            "instrument_token": "20354306",
+            "ltp": 282.35,
+            "oi": 1950300,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20354562",
+            "ltp": 134.45,
+            "oi": 2471100,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 416.8,
+        "is_atm": false
+    },
+    {
+        "strike": 23750,
+        "CE": {
+            "instrument_token": "20354818",
+            "ltp": 249.85,
+            "oi": 479025,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20355074",
+            "ltp": 151.6,
+            "oi": 486600,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 401.45,
+        "is_atm": false
+    },
+    {
+        "strike": 23800,
+        "CE": {
+            "instrument_token": "20355330",
+            "ltp": 217.9,
+            "oi": 3316200,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20355586",
+            "ltp": 171.4,
+            "oi": 3004125,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 389.3,
+        "is_atm": false
+    },
+    {
+        "strike": 23850,
+        "CE": {
+            "instrument_token": "20355842",
+            "ltp": 190.15,
+            "oi": 1005600,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20356098",
+            "ltp": 192.65,
+            "oi": 905175,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 382.8,
+        "is_atm": false
+    },
+    {
+        "strike": 23900,
+        "CE": {
+            "instrument_token": "20356354",
+            "ltp": 164.5,
+            "oi": 1935450,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20356610",
+            "ltp": 216.5,
+            "oi": 876975,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 381.0,
+        "is_atm": true
+    },
+    {
+        "strike": 23950,
+        "CE": {
+            "instrument_token": "20356866",
+            "ltp": 141.45,
+            "oi": 486075,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20359170",
+            "ltp": 242.55,
+            "oi": 124125,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 384.0,
+        "is_atm": false
+    },
+    {
+        "strike": 24000,
+        "CE": {
+            "instrument_token": "20359426",
+            "ltp": 120.0,
+            "oi": 5590050,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20361218",
+            "ltp": 271.65,
+            "oi": 2049000,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 391.65,
+        "is_atm": false
+    },
+    {
+        "strike": 24050,
+        "CE": {
+            "instrument_token": "20361474",
+            "ltp": 101.55,
+            "oi": 457425,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20363778",
+            "ltp": 301.9,
+            "oi": 41550,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 403.45,
+        "is_atm": false
+    },
+    {
+        "strike": 24100,
+        "CE": {
+            "instrument_token": "20364034",
+            "ltp": 85.5,
+            "oi": 2071875,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20365826",
+            "ltp": 335.25,
+            "oi": 101025,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 420.75,
+        "is_atm": false
+    },
+    {
+        "strike": 24150,
+        "CE": {
+            "instrument_token": "20366082",
+            "ltp": 71.15,
+            "oi": 427275,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20379394",
+            "ltp": 374.0,
+            "oi": 13125,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 445.15,
+        "is_atm": false
+    },
+    {
+        "strike": 24200,
+        "CE": {
+            "instrument_token": "20379650",
+            "ltp": 60.2,
+            "oi": 2664450,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20380418",
+            "ltp": 407.5,
+            "oi": 177075,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 467.7,
+        "is_atm": false
+    },
+    {
+        "strike": 24250,
+        "CE": {
+            "instrument_token": "20381698",
+            "ltp": 50.6,
+            "oi": 409950,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20385538",
+            "ltp": 450.2,
+            "oi": 12000,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 500.8,
+        "is_atm": false
+    },
+    {
+        "strike": 24300,
+        "CE": {
+            "instrument_token": "20385794",
+            "ltp": 42.2,
+            "oi": 1919025,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20386050",
+            "ltp": 490.25,
+            "oi": 77325,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 532.45,
+        "is_atm": false
+    },
+    {
+        "strike": 24350,
+        "CE": {
+            "instrument_token": "20386306",
+            "ltp": 34.9,
+            "oi": 706650,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20386562",
+            "ltp": 534.0,
+            "oi": 13050,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 568.9,
+        "is_atm": false
+    },
+    {
+        "strike": 24400,
+        "CE": {
+            "instrument_token": "20386818",
+            "ltp": 29.4,
+            "oi": 1611675,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20387074",
+            "ltp": 572.45,
+            "oi": 45525,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 601.85,
+        "is_atm": false
+    },
+    {
+        "strike": 24450,
+        "CE": {
+            "instrument_token": "20387330",
+            "ltp": 24.15,
+            "oi": 348525,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20387586",
+            "ltp": 968.0,
+            "oi": 3600,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 992.15,
+        "is_atm": false
+    },
+    {
+        "strike": 24500,
+        "CE": {
+            "instrument_token": "20387842",
+            "ltp": 20.7,
+            "oi": 5522175,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20388098",
+            "ltp": 667.9,
+            "oi": 578175,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 688.6,
+        "is_atm": false
+    },
+    {
+        "strike": 24550,
+        "CE": {
+            "instrument_token": "20388354",
+            "ltp": 16.95,
+            "oi": 750450,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20388610",
+            "ltp": 819.0,
+            "oi": 1350,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 835.95,
+        "is_atm": false
+    },
+    {
+        "strike": 24600,
+        "CE": {
+            "instrument_token": "20388866",
+            "ltp": 14.85,
+            "oi": 1583325,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20389122",
+            "ltp": 764.35,
+            "oi": 19950,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 779.2,
+        "is_atm": false
+    },
+    {
+        "strike": 24650,
+        "CE": {
+            "instrument_token": "20389378",
+            "ltp": 12.55,
+            "oi": 408450,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20395266",
+            "ltp": 829.85,
+            "oi": 2025,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 842.4,
+        "is_atm": false
+    },
+    {
+        "strike": 24700,
+        "CE": {
+            "instrument_token": "20395522",
+            "ltp": 10.5,
+            "oi": 1935375,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20395778",
+            "ltp": 849.5,
+            "oi": 31500,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 860.0,
+        "is_atm": false
+    },
+    {
+        "strike": 24750,
+        "CE": {
+            "instrument_token": "20396034",
+            "ltp": 9.5,
+            "oi": 587775,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20396290",
+            "ltp": 924.7,
+            "oi": 1875,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 934.2,
+        "is_atm": false
+    },
+    {
+        "strike": 24800,
+        "CE": {
+            "instrument_token": "20396546",
+            "ltp": 7.95,
+            "oi": 2397300,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20396802",
+            "ltp": 962.35,
+            "oi": 21600,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 970.3,
+        "is_atm": false
+    },
+    {
+        "strike": 24850,
+        "CE": {
+            "instrument_token": "20397058",
+            "ltp": 6.95,
+            "oi": 957750,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "PE": {
+            "instrument_token": "20397826",
+            "ltp": 1015.25,
+            "oi": 1575,
+            "volume": 0,
+            "vwap": 0.0,
+            "change": 0.0
+        },
+        "ce_pe_total": 1022.2,
+        "is_atm": false
+    }
+]

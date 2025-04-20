@@ -5,17 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"gohustle/cache"
+	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
 
 	pb "gohustle/proto"
 
 	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 )
 
 // Server represents the HTTP API server
@@ -138,26 +143,69 @@ type WalToParquetRequest struct {
 	RowGroupSize int    `json:"row_group_size,omitempty"` // Optional
 }
 
+// OptionChainResponse represents the structure for each option in the chain
+type OptionData struct {
+	InstrumentToken string  `json:"instrument_token"`
+	LTP             float64 `json:"ltp"`
+	OI              int64   `json:"oi"`
+	Volume          int64   `json:"volume"`
+	VWAP            float64 `json:"vwap"`
+	Change          float64 `json:"change"`
+}
+
+type OptionChainItem struct {
+	Strike    float64     `json:"strike"`
+	CE        *OptionData `json:"CE"`
+	PE        *OptionData `json:"PE"`
+	CEPETotal float64     `json:"ce_pe_total"`
+	IsATM     bool        `json:"is_atm"`
+}
+
+// CORSMiddleware adds CORS headers to responses
+func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Set CORS headers
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow all origins
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Max-Age", "3600")
+
+		// Handle preflight requests
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // setupRoutes initializes all API routes
 func (s *Server) setupRoutes() {
+	// Add CORS middleware to the router
+	s.router.Use(s.CORSMiddleware)
+
 	// Health check endpoint
-	s.router.HandleFunc("/api/health", s.handleHealthCheck).Methods("GET")
+	s.router.HandleFunc("/api/health", s.handleHealthCheck).Methods("GET", "OPTIONS")
 
 	// Expiries endpoint
-	s.router.HandleFunc("/api/expiries", s.handleGetExpiries).Methods("GET")
+	s.router.HandleFunc("/api/expiries", s.handleGetExpiries).Methods("GET", "OPTIONS")
+
+	// Option chain endpoint
+	s.router.HandleFunc("/api/option-chain", s.handleGetOptionChain).Methods("GET", "OPTIONS")
 
 	// API version 1 routes
 	v1 := s.router.PathPrefix("/api/v1").Subrouter()
 
 	// Market data endpoints
 	market := v1.PathPrefix("/market").Subrouter()
-	market.HandleFunc("/indices", s.handleListIndices).Methods("GET")
-	market.HandleFunc("/instruments", s.handleListInstruments).Methods("GET")
-	market.HandleFunc("/status", s.handleGetMarketStatus).Methods("GET")
+	market.HandleFunc("/indices", s.handleListIndices).Methods("GET", "OPTIONS")
+	market.HandleFunc("/instruments", s.handleListInstruments).Methods("GET", "OPTIONS")
+	market.HandleFunc("/status", s.handleGetMarketStatus).Methods("GET", "OPTIONS")
 
 	// Data export endpoints
 	export := v1.PathPrefix("/export").Subrouter()
-	export.HandleFunc("/wal-to-parquet", s.handleWalToParquet).Methods("POST")
+	export.HandleFunc("/wal-to-parquet", s.handleWalToParquet).Methods("POST", "OPTIONS")
 
 	// Add more routes as needed
 }
@@ -526,4 +574,264 @@ func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	SendJSONResponse(w, http.StatusOK, resp)
+}
+
+// handleGetOptionChain returns the option chain for a specific index and expiry
+func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
+	// Get query parameters
+	index := r.URL.Query().Get("index")
+	expiry := r.URL.Query().Get("expiry")
+
+	// Validate required parameters
+	if index == "" {
+		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: index", nil)
+		return
+	}
+	if expiry == "" {
+		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: expiry", nil)
+		return
+	}
+
+	// Validate expiry date format
+	if _, err := time.Parse("2006-01-02", expiry); err != nil {
+		SendErrorResponse(w, http.StatusBadRequest, "Invalid expiry date format. Use YYYY-MM-DD", nil)
+		return
+	}
+
+	// Get Redis cache instance
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get Redis cache", err)
+		return
+	}
+
+	// Get LTP DB
+	ltpDB := redisCache.GetLTPDB3()
+	if ltpDB == nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "LTP Redis DB is nil", nil)
+		return
+	}
+
+	// Get strikes for this index and expiry
+	strikesKey := fmt.Sprintf("strikes:%s_%s", index, expiry)
+	logger.L().Info("Strikes key", map[string]interface{}{
+		"key": strikesKey,
+	})
+
+	// Get from in-memory cache instead of Redis
+	inMemCache := cache.GetInMemoryCacheInstance()
+	strikesValue, exists := inMemCache.Get(strikesKey)
+	if !exists {
+		SendErrorResponse(w, http.StatusNotFound, "No strikes found for given index and expiry", nil)
+		return
+	}
+
+	strikes := []string{}
+	instrumentDetails := make(map[string]string) // map[strike]details
+	ceTokens := make([]string, 0)
+	peTokens := make([]string, 0)
+
+	// First collect all strikes and their instrument tokens
+	for _, strike := range strikesValue.([]string) {
+		expiryKey := fmt.Sprintf("%s_%s_%s", index, expiry, strike)
+		strikeValue, exists := inMemCache.Get(expiryKey)
+		if !exists {
+			SendErrorResponse(w, http.StatusNotFound, "No strike found for given index and expiry", nil)
+			return
+		}
+		details := strikeValue.(string)
+		instrumentDetails[strike] = details
+		strikes = append(strikes, strike)
+
+		// Parse CE and PE tokens
+		parts := strings.Split(details, "||")
+		if len(parts) == 2 {
+			// PE token
+			if peTokenParts := strings.Split(parts[0], "|"); len(peTokenParts) == 2 {
+				peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
+				peTokens = append(peTokens, peToken)
+			}
+			// CE token
+			if ceTokenParts := strings.Split(parts[1], "|"); len(ceTokenParts) == 2 {
+				ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
+				ceTokens = append(ceTokens, ceToken)
+			}
+		}
+	}
+
+	// Get underlying index price
+	indices := core.GetIndices()
+	var indexToken string
+	for _, idx := range indices.GetAllIndices() {
+		if idx.NameInOptions == index {
+			indexToken = idx.InstrumentToken
+			break
+		}
+	}
+	if indexToken == "" {
+		SendErrorResponse(w, http.StatusBadRequest, "Invalid index", nil)
+		return
+	}
+
+	underlyingPrice, err := ltpDB.Get(r.Context(), fmt.Sprintf("%s_ltp", indexToken)).Float64()
+	if err != nil && err != redis.Nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get underlying price", err)
+		return
+	}
+
+	// Create a map to store all instrument data
+	instrumentData := make(map[string]map[string]interface{})
+
+	// Use pipeline to fetch all data at once
+	pipe := ltpDB.Pipeline()
+	ltpCmds := make(map[string]*redis.StringCmd)
+	oiCmds := make(map[string]*redis.StringCmd)
+	volumeCmds := make(map[string]*redis.StringCmd)
+
+	// Queue up all gets for both CE and PE tokens
+	allTokens := append(ceTokens, peTokens...)
+	for _, token := range allTokens {
+		ltpCmds[token] = pipe.Get(r.Context(), fmt.Sprintf("%s_ltp", token))
+		oiCmds[token] = pipe.Get(r.Context(), fmt.Sprintf("%s_oi", token))
+		volumeCmds[token] = pipe.Get(r.Context(), fmt.Sprintf("%s_volume", token))
+	}
+
+	// Execute pipeline
+	_, err = pipe.Exec(r.Context())
+	if err != nil && err != redis.Nil {
+		s.log.Error("Failed to execute pipeline", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Process results and build instrumentData map
+	for _, token := range allTokens {
+		data := make(map[string]interface{})
+		data["instrument_token"] = token
+
+		if ltp, err := ltpCmds[token].Float64(); err == nil {
+			data["ltp"] = ltp
+		} else {
+			data["ltp"] = 0.0
+		}
+
+		if oi, err := oiCmds[token].Float64(); err == nil {
+			data["oi"] = int64(oi)
+		} else {
+			data["oi"] = int64(0)
+		}
+
+		if volume, err := volumeCmds[token].Float64(); err == nil {
+			data["volume"] = int64(volume)
+		} else {
+			data["volume"] = int64(0)
+		}
+
+		data["vwap"] = 0.0 // Default values as per example
+		data["change"] = 0.0
+
+		instrumentData[token] = data
+	}
+
+	// Build option chain with the collected data
+	optionChain := make([]map[string]interface{}, 0)
+	for _, strike := range strikes {
+		details := instrumentDetails[strike]
+		parts := strings.Split(details, "||")
+		if len(parts) != 2 {
+			continue
+		}
+
+		strikeItem := make(map[string]interface{})
+		strikeFloat, _ := strconv.ParseFloat(strike, 64)
+		strikeItem["strike"] = strikeFloat
+
+		// Add PE data
+		if peTokenParts := strings.Split(parts[0], "|"); len(peTokenParts) == 2 {
+			peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
+			if peData, exists := instrumentData[peToken]; exists {
+				strikeItem["PE"] = peData
+			}
+		}
+
+		// Add CE data
+		if ceTokenParts := strings.Split(parts[1], "|"); len(ceTokenParts) == 2 {
+			ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
+			if ceData, exists := instrumentData[ceToken]; exists {
+				strikeItem["CE"] = ceData
+			}
+		}
+
+		// Calculate CE+PE total if both exist
+		if ce, hasCE := strikeItem["CE"].(map[string]interface{}); hasCE {
+			if pe, hasPE := strikeItem["PE"].(map[string]interface{}); hasPE {
+				ceLTP := ce["ltp"].(float64)
+				peLTP := pe["ltp"].(float64)
+				strikeItem["ce_pe_total"] = ceLTP + peLTP
+			}
+		}
+
+		// Set is_atm flag (you might want to adjust the logic for determining ATM)
+		strikeItem["is_atm"] = math.Abs(strikeFloat-underlyingPrice) < 50 // Using a 50-point threshold
+
+		optionChain = append(optionChain, strikeItem)
+	}
+
+	resp := Response{
+		Success: true,
+		Message: "Option chain retrieved successfully",
+		Data: map[string]interface{}{
+			"underlying_price": underlyingPrice,
+			"chain":            optionChain,
+		},
+	}
+
+	SendJSONResponse(w, http.StatusOK, resp)
+}
+
+// getOptionData retrieves option data from Redis
+func getOptionData(ctx context.Context, ltpDB *redis.Client, token string) (map[string]interface{}, error) {
+	pipe := ltpDB.Pipeline()
+
+	// Queue up all the gets
+	ltpCmd := pipe.Get(ctx, fmt.Sprintf("%s_ltp", token))
+	oiCmd := pipe.Get(ctx, fmt.Sprintf("%s_oi", token))
+	volumeCmd := pipe.Get(ctx, fmt.Sprintf("%s_volume", token))
+
+	// Execute pipeline
+	_, err := pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	// Parse results
+	data := map[string]interface{}{
+		"instrument_token": token,
+	}
+
+	if ltp, err := ltpCmd.Float64(); err == nil {
+		data["ltp"] = ltp
+	}
+	if oi, err := oiCmd.Int64(); err == nil {
+		data["oi"] = oi
+	}
+	if volume, err := volumeCmd.Int64(); err == nil {
+		data["volume"] = volume
+	}
+
+	return data, nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

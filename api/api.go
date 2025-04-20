@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
+	"gohustle/zerodha"
 
 	pb "gohustle/proto"
 
@@ -581,6 +583,7 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	// Get query parameters
 	index := r.URL.Query().Get("index")
 	expiry := r.URL.Query().Get("expiry")
+	strikes_count := r.URL.Query().Get("strikes")
 
 	// Validate required parameters
 	if index == "" {
@@ -590,6 +593,17 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	if expiry == "" {
 		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: expiry", nil)
 		return
+	}
+
+	// Parse strikes_count (default to 5)
+	numStrikes := 5
+	if strikes_count != "" {
+		var err error
+		numStrikes, err = strconv.Atoi(strikes_count)
+		if err != nil {
+			SendErrorResponse(w, http.StatusBadRequest, "Invalid value for strikes parameter. Must be an integer.", nil)
+			return
+		}
 	}
 
 	// Validate expiry date format
@@ -626,13 +640,39 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	strikes := []string{}
+	allStrikes := strikesValue.([]string)
+	if len(allStrikes) == 0 {
+		SendErrorResponse(w, http.StatusNotFound, "Empty strikes list", nil)
+		return
+	}
+	logger.L().Info("All strikes", map[string]interface{}{
+		"strikes": allStrikes,
+	})
+
+	kc := zerodha.GetKiteConnect()
+	indices := core.GetIndices()
+	atmStrike := kc.GetTentativeATMBasedonLTP(*indices.GetIndexByName(index), allStrikes)
+	logger.L().Info("ATM strike", map[string]interface{}{
+		"atm_strike": atmStrike,
+	})
+
+	// Find the middle strike
+	middleIndex := slices.Index(allStrikes, atmStrike)
+	startIndex := max(0, middleIndex-numStrikes)
+	endIndex := min(len(allStrikes), middleIndex+numStrikes+1)
+
+	// Get the subset of strikes we want to process
+	selectedStrikes := allStrikes[startIndex:endIndex]
+	logger.L().Info("Selected strikes", map[string]interface{}{
+		"strikes": selectedStrikes,
+	})
+
 	instrumentDetails := make(map[string]string) // map[strike]details
 	ceTokens := make([]string, 0)
 	peTokens := make([]string, 0)
 
 	// First collect all strikes and their instrument tokens
-	for _, strike := range strikesValue.([]string) {
+	for _, strike := range selectedStrikes {
 		expiryKey := fmt.Sprintf("%s_%s_%s", index, expiry, strike)
 		strikeValue, exists := inMemCache.Get(expiryKey)
 		if !exists {
@@ -641,7 +681,6 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		}
 		details := strikeValue.(string)
 		instrumentDetails[strike] = details
-		strikes = append(strikes, strike)
 
 		// Parse CE and PE tokens
 		parts := strings.Split(details, "||")
@@ -660,7 +699,6 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get underlying index price
-	indices := core.GetIndices()
 	var indexToken string
 	for _, idx := range indices.GetAllIndices() {
 		if idx.NameInOptions == index {
@@ -735,7 +773,7 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	// Build option chain with the collected data
 	optionChain := make([]map[string]interface{}, 0)
-	for _, strike := range strikes {
+	for _, strike := range selectedStrikes {
 		details := instrumentDetails[strike]
 		parts := strings.Split(details, "||")
 		if len(parts) != 2 {

@@ -8,6 +8,7 @@ import (
 	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -60,12 +61,72 @@ func init() {
 	expiryCache = cache.GetInMemoryCacheInstance()
 }
 
-func (k *KiteConnect) GetInstrumentInfo(token string) (TokenInfo, bool) {
-	instrumentMutex.RLock()
-	defer instrumentMutex.RUnlock()
+func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []string) string {
+	log := logger.L()
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return ""
+	}
 
-	info, exists := reverseLookupCache[token]
-	return info, exists
+	ltpDB := redisCache.GetLTPDB3()
+	if ltpDB == nil {
+		log.Error("Failed to get LTP DB", map[string]interface{}{
+			"error": "LTP DB is nil",
+		})
+		return ""
+	}
+	log.Info("index", map[string]interface{}{
+		"index": index.InstrumentToken,
+	})
+
+	ltp, err := ltpDB.Get(context.Background(), fmt.Sprintf("%s_ltp", index.InstrumentToken)).Float64()
+	if err != nil {
+		log.Error("Failed to get LTP for index", map[string]interface{}{
+			"error": err.Error(),
+			"index": index.InstrumentToken,
+		})
+		return ""
+	}
+
+	log.Info("Got LTP for index", map[string]interface{}{
+		"index": index.InstrumentToken,
+		"ltp":   ltp,
+	})
+
+	// Find nearest strike to LTP
+	var nearestStrike string
+	minDiff := math.MaxFloat64
+
+	for _, strike := range strikes {
+		strikePrice, err := strconv.ParseFloat(strike, 64)
+		if err != nil {
+			log.Error("Failed to parse strike price", map[string]interface{}{
+				"error":  err.Error(),
+				"strike": strike,
+			})
+			continue
+		}
+
+		diff := math.Abs(ltp - strikePrice)
+		if diff < minDiff {
+			minDiff = diff
+			nearestStrike = strike
+		}
+	}
+
+	if nearestStrike != "" {
+		log.Info("Found nearest strike", map[string]interface{}{
+			"ltp":           ltp,
+			"nearestStrike": nearestStrike,
+			"difference":    minDiff,
+		})
+		return nearestStrike
+	}
+
+	return ""
 }
 
 func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]string {

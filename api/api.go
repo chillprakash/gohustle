@@ -628,7 +628,7 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	// Get strikes for this index and expiry
 	strikesKey := fmt.Sprintf("strikes:%s_%s", index, expiry)
-	logger.L().Info("Strikes key", map[string]interface{}{
+	logger.L().Debug("Strikes key", map[string]interface{}{
 		"key": strikesKey,
 	})
 
@@ -645,16 +645,13 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		SendErrorResponse(w, http.StatusNotFound, "Empty strikes list", nil)
 		return
 	}
-	logger.L().Info("All strikes", map[string]interface{}{
+	logger.L().Debug("All strikes", map[string]interface{}{
 		"strikes": allStrikes,
 	})
 
 	kc := zerodha.GetKiteConnect()
 	indices := core.GetIndices()
 	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indices.GetIndexByName(index), allStrikes)
-	logger.L().Info("ATM strike tentative", map[string]interface{}{
-		"atm_strike": atmStrike_tentative,
-	})
 
 	// Find the middle strike
 	middleIndex := slices.Index(allStrikes, atmStrike_tentative)
@@ -663,9 +660,6 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	// Get the subset of strikes we want to process
 	selectedStrikes := allStrikes[startIndex:endIndex]
-	logger.L().Info("Selected strikes", map[string]interface{}{
-		"strikes": selectedStrikes,
-	})
 
 	instrumentDetails := make(map[string]string) // map[strike]details
 	ceTokens := make([]string, 0)

@@ -78,10 +78,6 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 		})
 		return ""
 	}
-	log.Info("index", map[string]interface{}{
-		"index": index.InstrumentToken,
-	})
-
 	ltp, err := ltpDB.Get(context.Background(), fmt.Sprintf("%s_ltp", index.InstrumentToken)).Float64()
 	if err != nil {
 		log.Error("Failed to get LTP for index", map[string]interface{}{
@@ -90,11 +86,6 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 		})
 		return ""
 	}
-
-	log.Info("Got LTP for index", map[string]interface{}{
-		"index": index.InstrumentToken,
-		"ltp":   ltp,
-	})
 
 	// Find nearest strike to LTP
 	var nearestStrike string
@@ -117,16 +108,7 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 		}
 	}
 
-	if nearestStrike != "" {
-		log.Info("Found nearest strike", map[string]interface{}{
-			"ltp":           ltp,
-			"nearestStrike": nearestStrike,
-			"difference":    minDiff,
-		})
-		return nearestStrike
-	}
-
-	return ""
+	return nearestStrike
 }
 
 func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]string {

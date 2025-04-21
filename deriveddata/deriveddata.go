@@ -2,10 +2,12 @@ package deriveddata
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"gohustle/cache"
 	"gohustle/core"
 	"gohustle/logger"
+	"gohustle/optionchain"
 	"math"
 	"time"
 )
@@ -15,6 +17,16 @@ type IndexMetrics struct {
 	SpotPrice     float64
 	FairPrice     float64
 	StraddlePrice float64
+	Timestamp     int64
+}
+
+// StraddleMetrics holds detailed information about straddle calculations
+type StraddleMetrics struct {
+	Strike        float64
+	StraddlePrice float64
+	FairPrice     float64
+	CallLTP       float64
+	PutLTP        float64
 	Timestamp     int64
 }
 
@@ -37,43 +49,10 @@ func NewIndexDataManager() (*IndexDataManager, error) {
 	}, nil
 }
 
-// CalculateAndStoreIndexMetrics calculates and stores metrics for the given index
+// CalculateAndStoreIndexMetrics is now a placeholder as metrics are calculated and stored during option chain updates
 func (idm *IndexDataManager) CalculateAndStoreIndexMetrics(ctx context.Context, index core.Index) error {
-	// Get time series DB for storing derived data
-	tsDB := idm.redisCache.GetTimeSeriesDB()
-	if tsDB == nil {
-		return fmt.Errorf("time series DB not available")
-	}
-
-	// Calculate metrics
-	metrics, err := idm.calculateIndexMetrics(ctx, index)
-	if err != nil {
-		return fmt.Errorf("failed to calculate metrics: %w", err)
-	}
-
-	// Store in Redis time series DB
-	pipe := tsDB.Pipeline()
-	baseKey := fmt.Sprintf("derived:%s", index.NameInOptions)
-
-	// Store each metric with current timestamp
-	pipe.Set(ctx, fmt.Sprintf("%s:spot", baseKey), fmt.Sprintf("%.2f", metrics.SpotPrice), time.Hour)
-	pipe.Set(ctx, fmt.Sprintf("%s:fair", baseKey), fmt.Sprintf("%.2f", metrics.FairPrice), time.Hour)
-	pipe.Set(ctx, fmt.Sprintf("%s:straddle", baseKey), fmt.Sprintf("%.2f", metrics.StraddlePrice), time.Hour)
-	pipe.Set(ctx, fmt.Sprintf("%s:timestamp", baseKey), fmt.Sprintf("%d", metrics.Timestamp), time.Hour)
-
-	// Execute pipeline
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to store metrics: %w", err)
-	}
-
-	idm.log.Info("Stored index metrics", map[string]interface{}{
-		"index":     index.NameInOptions,
-		"spot":      metrics.SpotPrice,
-		"fair":      metrics.FairPrice,
-		"straddle":  metrics.StraddlePrice,
-		"timestamp": metrics.Timestamp,
-	})
-
+	// Metrics are now calculated and stored during option chain updates in optionchain.OptionChainManager
+	// This method is kept for backward compatibility and potential future use
 	return nil
 }
 
@@ -110,7 +89,7 @@ func (idm *IndexDataManager) calculateIndexMetrics(ctx context.Context, index co
 	}
 	atmStrike := getNearestRound(spotPrice, strikeInterval)
 
-	// TODO: Calculate fair price using futures
+	// Calculate fair price using futures
 	fairPrice := spotPrice // Temporary, need to implement futures calculation
 
 	// Calculate straddle price using ATM options
@@ -122,77 +101,92 @@ func (idm *IndexDataManager) calculateIndexMetrics(ctx context.Context, index co
 	return &IndexMetrics{
 		SpotPrice:     spotPrice,
 		FairPrice:     fairPrice,
-		StraddlePrice: straddlePrice,
+		StraddlePrice: straddlePrice.StraddlePrice,
 		Timestamp:     time.Now().Unix(),
 	}, nil
 }
 
-// calculateStraddlePrice calculates the straddle price for ATM strike
-func (idm *IndexDataManager) calculateStraddlePrice(ctx context.Context, index core.Index, atmStrike float64) (float64, error) {
+// calculateStraddlePrice calculates the straddle price and related metrics for ATM strike
+func (idm *IndexDataManager) calculateStraddlePrice(ctx context.Context, index core.Index, atmStrike float64) (*StraddleMetrics, error) {
+	// Get option chain manager
+	optionChainMgr := optionchain.GetOptionChainManager()
+	if optionChainMgr == nil {
+		return nil, fmt.Errorf("option chain manager not initialized")
+	}
+
+	// Get current expiry from Redis
 	ltpDB := idm.redisCache.GetLTPDB3()
 	if ltpDB == nil {
-		return 0, fmt.Errorf("LTP DB not available")
+		return nil, fmt.Errorf("LTP DB not available")
 	}
 
-	// Get current expiry from Redis or cache
-	// TODO: Implement expiry lookup
-	currentExpiry := "25APR" // Temporary hardcoded value
-
-	// Form CE and PE symbols
-	ceSymbol := fmt.Sprintf("%s%s%.0fCE", index.NameInOptions, currentExpiry, atmStrike)
-	peSymbol := fmt.Sprintf("%s%s%.0fPE", index.NameInOptions, currentExpiry, atmStrike)
-
-	// Get instrument tokens for CE and PE
-	ceKey := fmt.Sprintf("token:%s", ceSymbol)
-	peKey := fmt.Sprintf("token:%s", peSymbol)
-
-	// Get tokens from Redis
-	ceToken, err := ltpDB.Get(ctx, ceKey).Result()
+	// Get current expiry (nearest expiry)
+	expiryKey := fmt.Sprintf("instrument:expiries:%s", index.NameInOptions)
+	expiriesStr, err := ltpDB.Get(ctx, expiryKey).Result()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get CE token: %w", err)
+		return nil, fmt.Errorf("failed to get expiries: %w", err)
 	}
 
-	peToken, err := ltpDB.Get(ctx, peKey).Result()
+	var expiries []string
+	if err := json.Unmarshal([]byte(expiriesStr), &expiries); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal expiries: %w", err)
+	}
+
+	if len(expiries) == 0 {
+		return nil, fmt.Errorf("no expiries found for %s", index.NameInOptions)
+	}
+
+	// Get option chain for nearest expiry
+	chain, err := optionChainMgr.CalculateOptionChain(ctx, index.NameInOptions, expiries[0], 10)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get PE token: %w", err)
+		return nil, fmt.Errorf("failed to get option chain: %w", err)
 	}
 
-	// Get LTP for both options
-	ceLTPKey := fmt.Sprintf("%s_ltp", ceToken)
-	peLTPKey := fmt.Sprintf("%s_ltp", peToken)
+	// Find lowest straddle price and calculate synthetic future
+	var lowestStraddle float64 = math.MaxFloat64
+	var lowestStrike float64
+	var callLTP, putLTP float64
 
-	// Use pipeline for efficient fetching
-	pipe := ltpDB.Pipeline()
-	ceLTPCmd := pipe.Get(ctx, ceLTPKey)
-	peLTPCmd := pipe.Get(ctx, peLTPKey)
-
-	if _, err := pipe.Exec(ctx); err != nil {
-		return 0, fmt.Errorf("failed to get option LTPs: %w", err)
+	for _, item := range chain.Chain {
+		if item.CE != nil && item.PE != nil {
+			straddlePrice := item.CE.LTP + item.PE.LTP
+			if straddlePrice < lowestStraddle {
+				lowestStraddle = straddlePrice
+				lowestStrike = item.Strike
+				callLTP = item.CE.LTP
+				putLTP = item.PE.LTP
+			}
+		}
 	}
 
-	// Parse LTP values
-	var ceLTP, peLTP float64
-	if _, err := fmt.Sscanf(ceLTPCmd.Val(), "%f", &ceLTP); err != nil {
-		return 0, fmt.Errorf("failed to parse CE LTP: %w", err)
-	}
-	if _, err := fmt.Sscanf(peLTPCmd.Val(), "%f", &peLTP); err != nil {
-		return 0, fmt.Errorf("failed to parse PE LTP: %w", err)
+	if lowestStraddle == math.MaxFloat64 {
+		return nil, fmt.Errorf("no valid straddle price found")
 	}
 
-	// Calculate straddle price
-	straddlePrice := ceLTP + peLTP
+	// Calculate synthetic future price
+	// sf = round((strike + call - put), 2)
+	syntheticFuture := math.Round((lowestStrike+callLTP-putLTP)*100) / 100
 
-	idm.log.Debug("Calculated straddle price", map[string]interface{}{
+	metrics := &StraddleMetrics{
+		Strike:        lowestStrike,
+		StraddlePrice: lowestStraddle,
+		FairPrice:     syntheticFuture,
+		CallLTP:       callLTP,
+		PutLTP:        putLTP,
+		Timestamp:     time.Now().Unix(),
+	}
+
+	idm.log.Debug("Calculated straddle metrics", map[string]interface{}{
 		"index":          index.NameInOptions,
-		"atm_strike":     atmStrike,
-		"ce_symbol":      ceSymbol,
-		"pe_symbol":      peSymbol,
-		"ce_ltp":         ceLTP,
-		"pe_ltp":         peLTP,
-		"straddle_price": straddlePrice,
+		"strike":         metrics.Strike,
+		"straddle_price": metrics.StraddlePrice,
+		"fair_price":     metrics.FairPrice,
+		"call_ltp":       metrics.CallLTP,
+		"put_ltp":        metrics.PutLTP,
+		"expiry":         expiries[0],
 	})
 
-	return straddlePrice, nil
+	return metrics, nil
 }
 
 // Helper function to get nearest round number

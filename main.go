@@ -99,6 +99,8 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 
 	scheduler.InitializePositionPolling(ctx)
 
+	scheduler.InitializeIndexOptionChainPolling(ctx)
+
 	// Block until context is cancelled
 	<-ctx.Done()
 	return nil

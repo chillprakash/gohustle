@@ -11,8 +11,9 @@ import (
 )
 
 type RedisCache struct {
-	ltpDB3       *redis.Client
-	positionsDB2 *redis.Client
+	ltpDB3        *redis.Client
+	positionsDB2  *redis.Client
+	timeSeriesDB4 *redis.Client // New client for time series data
 }
 
 var (
@@ -79,32 +80,50 @@ func initializeRedisCache() (*RedisCache, error) {
 		PoolSize:     cfg.Redis.MaxConnections,
 	})
 
+	// Initialize Redis client for time series data (DB 4)
+	timeSeriesDB4 := redis.NewClient(&redis.Options{
+		Addr:         fmt.Sprintf("%s:%s", cfg.Redis.Host, cfg.Redis.Port),
+		Password:     cfg.Redis.Password,
+		DB:           4,                            // Use DB 4 for time series data
+		MinIdleConns: cfg.Redis.MinConnections * 2, // Double the min connections for time series
+		PoolSize:     cfg.Redis.MaxConnections * 2, // Double the pool size for time series
+		ReadTimeout:  200 * time.Millisecond,       // Shorter read timeout
+		WriteTimeout: 200 * time.Millisecond,       // Shorter write timeout
+		MaxRetries:   3,                            // Add retries for resilience
+		PoolTimeout:  300 * time.Millisecond,       // Pool timeout slightly higher than R/W timeout
+	})
+
 	// Test the connections with timeout context
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// Test connections in parallel
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 3) // Increased to 3 for new DB
 	go func() {
 		errChan <- positionsDB2.Ping(ctx).Err()
 	}()
 	go func() {
 		errChan <- ltpDB3.Ping(ctx).Err()
 	}()
+	go func() {
+		errChan <- timeSeriesDB4.Ping(ctx).Err()
+	}()
 
-	// Wait for both pings
-	for i := 0; i < 2; i++ {
+	// Wait for all pings
+	for i := 0; i < 3; i++ { // Changed to 3
 		if err := <-errChan; err != nil {
 			// Clean up on failure
 			positionsDB2.Close()
 			ltpDB3.Close()
+			timeSeriesDB4.Close()
 			return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 		}
 	}
 
 	return &RedisCache{
-		ltpDB3:       ltpDB3,
-		positionsDB2: positionsDB2,
+		ltpDB3:        ltpDB3,
+		positionsDB2:  positionsDB2,
+		timeSeriesDB4: timeSeriesDB4,
 	}, nil
 }
 
@@ -117,15 +136,20 @@ func (r *RedisCache) GetPositionsDB2() *redis.Client {
 	return r.positionsDB2
 }
 
-// Close closes all Redis connection
+// GetTimeSeriesDB returns the Redis client for time series database
+func (r *RedisCache) GetTimeSeriesDB() *redis.Client {
+	return r.timeSeriesDB4
+}
+
+// Close closes all Redis connections
 func (r *RedisCache) Close() error {
 	var errs []error
 
 	// Close connections in parallel
 	var wg sync.WaitGroup
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 3) // Changed to 3
 
-	wg.Add(2)
+	wg.Add(3) // Changed to 3
 	go func() {
 		defer wg.Done()
 		if r.ltpDB3 != nil {
@@ -137,9 +161,18 @@ func (r *RedisCache) Close() error {
 
 	go func() {
 		defer wg.Done()
-		if r.ltpDB3 != nil {
-			if err := r.ltpDB3.Close(); err != nil {
-				errChan <- fmt.Errorf("failed to close Redis DB 3: %w", err)
+		if r.positionsDB2 != nil {
+			if err := r.positionsDB2.Close(); err != nil {
+				errChan <- fmt.Errorf("failed to close Redis DB 2: %w", err)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		if r.timeSeriesDB4 != nil {
+			if err := r.timeSeriesDB4.Close(); err != nil {
+				errChan <- fmt.Errorf("failed to close Time Series DB: %w", err)
 			}
 		}
 	}()

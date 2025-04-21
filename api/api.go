@@ -5,24 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
-	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"gohustle/cache"
-	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
+	"gohustle/optionchain"
 	"gohustle/zerodha"
 
 	pb "gohustle/proto"
 
 	"github.com/gorilla/mux"
-	"github.com/redis/go-redis/v9"
 )
 
 // Server represents the HTTP API server
@@ -615,268 +611,21 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get Redis cache instance
-	redisCache, err := cache.GetRedisCache()
+	// Get option chain manager and calculate chain
+	optionChainMgr := optionchain.GetOptionChainManager()
+	response, err := optionChainMgr.CalculateOptionChain(r.Context(), index, expiry, numStrikes)
 	if err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get Redis cache", err)
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to calculate option chain", err)
 		return
-	}
-
-	// Get LTP DB and Positions DB
-	ltpDB := redisCache.GetLTPDB3()
-	positionsDB := redisCache.GetPositionsDB2()
-	if ltpDB == nil || positionsDB == nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Redis DB initialization failed", nil)
-		return
-	}
-
-	// Get strikes for this index and expiry
-	strikesKey := fmt.Sprintf("strikes:%s_%s", index, expiry)
-	logger.L().Debug("Strikes key", map[string]interface{}{
-		"key": strikesKey,
-	})
-
-	// Get from in-memory cache instead of Redis
-	inMemCache := cache.GetInMemoryCacheInstance()
-	strikesValue, exists := inMemCache.Get(strikesKey)
-	if !exists {
-		SendErrorResponse(w, http.StatusNotFound, "No strikes found for given index and expiry", nil)
-		return
-	}
-
-	allStrikes := strikesValue.([]string)
-	if len(allStrikes) == 0 {
-		SendErrorResponse(w, http.StatusNotFound, "Empty strikes list", nil)
-		return
-	}
-	logger.L().Debug("All strikes", map[string]interface{}{
-		"strikes": allStrikes,
-	})
-
-	kc := zerodha.GetKiteConnect()
-	indices := core.GetIndices()
-	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indices.GetIndexByName(index), allStrikes)
-
-	// Find the middle strike
-	middleIndex := slices.Index(allStrikes, atmStrike_tentative)
-	startIndex := max(0, middleIndex-numStrikes)
-	endIndex := min(len(allStrikes), middleIndex+numStrikes+1)
-
-	// Get the subset of strikes we want to process
-	selectedStrikes := allStrikes[startIndex:endIndex]
-
-	instrumentDetails := make(map[string]string) // map[strike]details
-	ceTokens := make([]string, 0)
-	peTokens := make([]string, 0)
-
-	// First collect all strikes and their instrument tokens
-	for _, strike := range selectedStrikes {
-		expiryKey := fmt.Sprintf("%s_%s_%s", index, expiry, strike)
-		strikeValue, exists := inMemCache.Get(expiryKey)
-		if !exists {
-			SendErrorResponse(w, http.StatusNotFound, "No strike found for given index and expiry", nil)
-			return
-		}
-		details := strikeValue.(string)
-		instrumentDetails[strike] = details
-
-		// Parse CE and PE tokens
-		parts := strings.Split(details, "||")
-		if len(parts) == 2 {
-			// PE token
-			if peTokenParts := strings.Split(parts[0], "|"); len(peTokenParts) == 2 {
-				peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
-				peTokens = append(peTokens, peToken)
-			}
-			// CE token
-			if ceTokenParts := strings.Split(parts[1], "|"); len(ceTokenParts) == 2 {
-				ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
-				ceTokens = append(ceTokens, ceToken)
-			}
-		}
-	}
-
-	// Get underlying index price
-	var indexToken string
-	for _, idx := range indices.GetAllIndices() {
-		if idx.NameInOptions == index {
-			indexToken = idx.InstrumentToken
-			break
-		}
-	}
-	if indexToken == "" {
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid index", nil)
-		return
-	}
-
-	underlyingPrice, err := ltpDB.Get(r.Context(), fmt.Sprintf("%s_ltp", indexToken)).Float64()
-	if err != nil && err != redis.Nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get underlying price", err)
-		return
-	}
-
-	// Create a map to store all instrument data
-	instrumentData := make(map[string]map[string]interface{})
-
-	// Use pipeline to fetch all data at once
-	ltpPipe := ltpDB.Pipeline()
-	posPipe := positionsDB.Pipeline()
-	ltpCmds := make(map[string]*redis.StringCmd)
-	oiCmds := make(map[string]*redis.StringCmd)
-	volumeCmds := make(map[string]*redis.StringCmd)
-	positionCmds := make(map[string]*redis.StringCmd)
-
-	// Queue up all gets for both CE and PE tokens
-	allTokens := append(ceTokens, peTokens...)
-	for _, token := range allTokens {
-		ltpCmds[token] = ltpPipe.Get(r.Context(), fmt.Sprintf("%s_ltp", token))
-		oiCmds[token] = ltpPipe.Get(r.Context(), fmt.Sprintf("%s_oi", token))
-		volumeCmds[token] = ltpPipe.Get(r.Context(), fmt.Sprintf("%s_volume", token))
-	}
-
-	// Execute LTP pipeline
-	_, err = ltpPipe.Exec(r.Context())
-	if err != nil && err != redis.Nil {
-		s.log.Error("Failed to execute LTP pipeline", map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// Queue position gets in separate pipeline
-	for _, token := range allTokens {
-		// Get position quantity directly
-		tokenKey := fmt.Sprintf("position:token:%s", token)
-		positionCmds[token] = posPipe.Get(r.Context(), tokenKey)
-	}
-
-	// Execute positions pipeline
-	_, err = posPipe.Exec(r.Context())
-	if err != nil && err != redis.Nil {
-		s.log.Error("Failed to execute positions pipeline", map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// Process results and build instrumentData map
-	for _, token := range allTokens {
-		data := make(map[string]interface{})
-		data["instrument_token"] = token
-
-		if ltp, err := ltpCmds[token].Float64(); err == nil {
-			data["ltp"] = ltp
-		} else {
-			data["ltp"] = 0.0
-		}
-
-		if oi, err := oiCmds[token].Float64(); err == nil {
-			data["oi"] = int64(oi)
-		} else {
-			data["oi"] = int64(0)
-		}
-
-		if volume, err := volumeCmds[token].Float64(); err == nil {
-			data["volume"] = int64(volume)
-		} else {
-			data["volume"] = int64(0)
-		}
-
-		// Add position quantity to response
-		if qty, err := positionCmds[token].Int64(); err == nil {
-			data["position_qty"] = qty
-		} else {
-			data["position_qty"] = int64(0)
-		}
-
-		data["vwap"] = 0.0 // Default values as per example
-		data["change"] = 0.0
-
-		instrumentData[token] = data
-	}
-
-	// Build option chain with the collected data
-	optionChain := make([]map[string]interface{}, 0)
-	lowestTotal := math.MaxFloat64
-	var atmStrike float64
-
-	// First pass: Calculate CE+PE totals and find the lowest
-	for _, strike := range selectedStrikes {
-		details := instrumentDetails[strike]
-		parts := strings.Split(details, "||")
-		if len(parts) != 2 {
-			continue
-		}
-
-		strikeItem := make(map[string]interface{})
-		strikeFloat, _ := strconv.ParseFloat(strike, 64)
-		strikeItem["strike"] = strikeFloat
-
-		// Add PE data
-		if peTokenParts := strings.Split(parts[0], "|"); len(peTokenParts) == 2 {
-			peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
-			if peData, exists := instrumentData[peToken]; exists {
-				strikeItem["PE"] = peData
-			}
-		}
-
-		// Add CE data
-		if ceTokenParts := strings.Split(parts[1], "|"); len(ceTokenParts) == 2 {
-			ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
-			if ceData, exists := instrumentData[ceToken]; exists {
-				strikeItem["CE"] = ceData
-			}
-		}
-
-		// Calculate CE+PE total if both exist
-		if ce, hasCE := strikeItem["CE"].(map[string]interface{}); hasCE {
-			if pe, hasPE := strikeItem["PE"].(map[string]interface{}); hasPE {
-				ceLTP := ce["ltp"].(float64)
-				peLTP := pe["ltp"].(float64)
-				total := ceLTP + peLTP
-				strikeItem["ce_pe_total"] = total
-
-				// Update lowest total and corresponding strike
-				if total < lowestTotal {
-					lowestTotal = total
-					atmStrike = strikeFloat
-				}
-			}
-		}
-
-		optionChain = append(optionChain, strikeItem)
-	}
-
-	// Second pass: Set is_atm flag based on the strike with lowest CE+PE total
-	for i := range optionChain {
-		if strike, ok := optionChain[i]["strike"].(float64); ok {
-			optionChain[i]["is_atm"] = strike == atmStrike
-		}
 	}
 
 	resp := Response{
 		Success: true,
 		Message: "Option chain retrieved successfully",
-		Data: map[string]interface{}{
-			"underlying_price": underlyingPrice,
-			"chain":            optionChain,
-			"atm_strike":       atmStrike,
-		},
+		Data:    response,
 	}
 
 	SendJSONResponse(w, http.StatusOK, resp)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // handleGetPositions returns detailed analysis of all positions

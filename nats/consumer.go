@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	DefaultConsumerWorkers = 75
-	ChannelBuffer          = 10000000 // Increased from 10000 to 100000 for high-frequency data
+	DefaultConsumerWorkers = 20
+	ChannelBuffer          = 500000 // Increased from 10000 to 100000 for high-frequency data
 	StreamName             = "tick_stream"
 	MaxMsgAge              = 24 * time.Hour
 	MaxBytes               = 1024 * 1024 * 1024 // 1GB max storage
@@ -178,7 +178,7 @@ func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 		"worker_id": workerId,
 	})
 
-	drainTimer := time.NewTicker(10 * time.Millisecond)
+	drainTimer := time.NewTicker(5 * time.Millisecond)
 	defer drainTimer.Stop()
 
 	for {

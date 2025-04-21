@@ -619,10 +619,11 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get LTP DB
+	// Get LTP DB and Positions DB
 	ltpDB := redisCache.GetLTPDB3()
-	if ltpDB == nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "LTP Redis DB is nil", nil)
+	positionsDB := redisCache.GetPositionsDB2()
+	if ltpDB == nil || positionsDB == nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Redis DB initialization failed", nil)
 		return
 	}
 
@@ -715,23 +716,40 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	instrumentData := make(map[string]map[string]interface{})
 
 	// Use pipeline to fetch all data at once
-	pipe := ltpDB.Pipeline()
+	ltpPipe := ltpDB.Pipeline()
+	posPipe := positionsDB.Pipeline()
 	ltpCmds := make(map[string]*redis.StringCmd)
 	oiCmds := make(map[string]*redis.StringCmd)
 	volumeCmds := make(map[string]*redis.StringCmd)
+	positionCmds := make(map[string]*redis.StringCmd)
 
 	// Queue up all gets for both CE and PE tokens
 	allTokens := append(ceTokens, peTokens...)
 	for _, token := range allTokens {
-		ltpCmds[token] = pipe.Get(r.Context(), fmt.Sprintf("%s_ltp", token))
-		oiCmds[token] = pipe.Get(r.Context(), fmt.Sprintf("%s_oi", token))
-		volumeCmds[token] = pipe.Get(r.Context(), fmt.Sprintf("%s_volume", token))
+		ltpCmds[token] = ltpPipe.Get(r.Context(), fmt.Sprintf("%s_ltp", token))
+		oiCmds[token] = ltpPipe.Get(r.Context(), fmt.Sprintf("%s_oi", token))
+		volumeCmds[token] = ltpPipe.Get(r.Context(), fmt.Sprintf("%s_volume", token))
 	}
 
-	// Execute pipeline
-	_, err = pipe.Exec(r.Context())
+	// Execute LTP pipeline
+	_, err = ltpPipe.Exec(r.Context())
 	if err != nil && err != redis.Nil {
-		s.log.Error("Failed to execute pipeline", map[string]interface{}{
+		s.log.Error("Failed to execute LTP pipeline", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Queue position gets in separate pipeline
+	for _, token := range allTokens {
+		// Get position quantity directly
+		tokenKey := fmt.Sprintf("position:token:%s", token)
+		positionCmds[token] = posPipe.Get(r.Context(), tokenKey)
+	}
+
+	// Execute positions pipeline
+	_, err = posPipe.Exec(r.Context())
+	if err != nil && err != redis.Nil {
+		s.log.Error("Failed to execute positions pipeline", map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
@@ -757,6 +775,13 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 			data["volume"] = int64(volume)
 		} else {
 			data["volume"] = int64(0)
+		}
+
+		// Add position quantity to response
+		if qty, err := positionCmds[token].Int64(); err == nil {
+			data["position_qty"] = qty
+		} else {
+			data["position_qty"] = int64(0)
 		}
 
 		data["vwap"] = 0.0 // Default values as per example
@@ -835,39 +860,6 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	SendJSONResponse(w, http.StatusOK, resp)
-}
-
-// getOptionData retrieves option data from Redis
-func getOptionData(ctx context.Context, ltpDB *redis.Client, token string) (map[string]interface{}, error) {
-	pipe := ltpDB.Pipeline()
-
-	// Queue up all the gets
-	ltpCmd := pipe.Get(ctx, fmt.Sprintf("%s_ltp", token))
-	oiCmd := pipe.Get(ctx, fmt.Sprintf("%s_oi", token))
-	volumeCmd := pipe.Get(ctx, fmt.Sprintf("%s_volume", token))
-
-	// Execute pipeline
-	_, err := pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		return nil, err
-	}
-
-	// Parse results
-	data := map[string]interface{}{
-		"instrument_token": token,
-	}
-
-	if ltp, err := ltpCmd.Float64(); err == nil {
-		data["ltp"] = ltp
-	}
-	if oi, err := oiCmd.Int64(); err == nil {
-		data["oi"] = oi
-	}
-	if volume, err := volumeCmd.Int64(); err == nil {
-		data["volume"] = volume
-	}
-
-	return data, nil
 }
 
 func min(a, b int) int {

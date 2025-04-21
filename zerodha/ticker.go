@@ -153,6 +153,10 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		return
 	}
 
+	if indexName != "SENSEX" {
+		return
+	}
+
 	// Convert to protobuf
 	protoTick := &pb.TickData{
 		// Basic info

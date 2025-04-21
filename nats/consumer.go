@@ -17,8 +17,13 @@ import (
 )
 
 const (
-	DefaultConsumerWorkers = 8
-	ChannelBuffer          = 10000 // Buffer size for message channel
+	DefaultConsumerWorkers = 50
+	ChannelBuffer          = 10000000 // Increased from 10000 to 100000 for high-frequency data
+	StreamName             = "tick_stream"
+	MaxMsgAge              = 24 * time.Hour
+	MaxBytes               = 1024 * 1024 * 1024 // 1GB max storage
+	PendingMsgsLimit       = 1000
+	TicksSubject           = "ticks"
 )
 
 var (
@@ -31,13 +36,14 @@ var (
 type TickConsumer struct {
 	nats          *NATSHelper
 	log           *logger.Logger
-	workerCount   int
+	workerCount   int // Change back to int since DefaultConsumerWorkers is int
 	subscriptions []*nats.Subscription
 	subMu         sync.Mutex
 	wg            sync.WaitGroup
 	metrics       *consumerMetrics
 	done          chan struct{}
 	msgChan       chan *nats.Msg
+	batchChan     chan []*nats.Msg
 }
 
 type consumerMetrics struct {
@@ -99,6 +105,7 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 		"worker_count": c.workerCount,
 		"subject":      subject,
 		"queue_group":  queue,
+		"buffer_size":  ChannelBuffer,
 	})
 
 	workerCtx, cancel := context.WithCancel(context.Background())
@@ -106,21 +113,33 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 	// Start metrics logging
 	go c.logMetrics(workerCtx)
 
-	// Single subscription to receive messages
-	sub, err := c.nats.QueueSubscribe(workerCtx, subject, queue, func(msg *nats.Msg) {
+	// Get JetStream context
+	js := c.nats.js
+	if js == nil {
+		return fmt.Errorf("JetStream context not available")
+	}
+
+	// Subscribe using JetStream
+	sub, err := js.QueueSubscribe(subject, queue, func(msg *nats.Msg) {
 		select {
 		case <-workerCtx.Done():
 			return
 		case c.msgChan <- msg:
 			// Message queued successfully
+			msg.Ack()
 		default:
-			// Channel full - log warning and skip message
-			c.log.Error("Message channel full - dropping message", map[string]interface{}{
-				"subject": msg.Subject,
-			})
+			// Channel full - increment error and log with more details
 			c.incrementErrorCount()
+			c.log.Error("Message channel full - dropping message", map[string]interface{}{
+				"subject":      msg.Subject,
+				"channel_size": ChannelBuffer,
+				"pending_msgs": len(c.msgChan),
+				"worker_count": c.workerCount,
+				"error_count":  c.metrics.errorCount,
+			})
+			msg.Term() // Tell server we won't process this message
 		}
-	})
+	}, nats.Durable(queue), nats.ManualAck())
 
 	if err != nil {
 		return fmt.Errorf("failed to create subscription: %w", err)
@@ -250,12 +269,11 @@ func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
 
 	instrumentToken := fmt.Sprintf("%d", tick.InstrumentToken)
 	requiredKeys := map[string]interface{}{
-		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
-		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
-		fmt.Sprintf("%s_total_sell_quantity", instrumentToken):  tick.TotalSellQuantity,
-		fmt.Sprintf("%s_total_buy_quantity", instrumentToken):   tick.TotalBuyQuantity,
-		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
-		fmt.Sprintf("%s_change", instrumentToken):               tick.NetChange,
+		fmt.Sprintf("%s_ltp", instrumentToken):    tick.LastPrice,
+		fmt.Sprintf("%s_volume", instrumentToken): tick.VolumeTraded,
+		fmt.Sprintf("%s_oi", instrumentToken):     tick.Oi,
+		fmt.Sprintf("%s_vwap", instrumentToken):   tick.AverageTradePrice,
+		fmt.Sprintf("%s_change", instrumentToken): tick.NetChange,
 	}
 
 	redisData := make(map[string]interface{})

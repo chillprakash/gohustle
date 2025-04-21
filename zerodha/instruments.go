@@ -669,7 +669,7 @@ func min(a, b int) int {
 }
 
 // CreateLookUpforFileStore creates a lookup map for index tokens vs Index name for lookup during websocke
-func (k *KiteConnect) CreateLookUpforStoringFileFromWebsockets(ctx context.Context) {
+func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx context.Context) {
 	log := logger.L()
 	log.Info("Initializing lookup maps for File Store", nil)
 
@@ -699,9 +699,10 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsockets(ctx context.Conte
 		if inst.InstrumentType != "CE" && inst.InstrumentType != "PE" {
 			continue
 		}
-
+		strike_key := fmt.Sprintf("strike:%s", inst.InstrumentToken)
 		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
 			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
+			cache.Set(strike_key, inst.StrikePrice, 7*24*time.Hour)
 			continue
 		}
 	}

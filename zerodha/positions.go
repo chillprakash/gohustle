@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 	sync "sync"
 
 	"gohustle/cache"
@@ -16,6 +18,46 @@ import (
 type PositionManager struct {
 	kite *KiteConnect
 	log  *logger.Logger
+}
+
+// PositionSummary represents the summary of all positions
+type PositionSummary struct {
+	TotalCallValue float64 `json:"total_call_value"`
+	TotalPutValue  float64 `json:"total_put_value"`
+	TotalValue     float64 `json:"total_value"`
+}
+
+// MoveStep represents a possible position adjustment step
+type MoveStep struct {
+	Strike  float64  `json:"strike"`
+	Premium float64  `json:"premium"`
+	Steps   []string `json:"steps"`
+}
+
+// MoveSuggestions represents possible position adjustments
+type MoveSuggestions struct {
+	Away   []MoveStep `json:"away"`
+	Closer []MoveStep `json:"closer"`
+}
+
+// DetailedPosition represents a position with additional analysis
+type DetailedPosition struct {
+	Strike       float64         `json:"strike"`
+	OptionType   string          `json:"option_type"` // CE or PE
+	Quantity     int64           `json:"quantity"`
+	AveragePrice float64         `json:"average_price"`
+	SellPrice    float64         `json:"sell_price"`
+	LTP          float64         `json:"ltp"`
+	Diff         float64         `json:"diff"`
+	VWAP         float64         `json:"vwap"`
+	Value        float64         `json:"value"`
+	Moves        MoveSuggestions `json:"moves"`
+}
+
+// PositionAnalysis represents the complete position analysis
+type PositionAnalysis struct {
+	Summary   PositionSummary    `json:"summary"`
+	Positions []DetailedPosition `json:"positions"`
 }
 
 var (
@@ -120,4 +162,176 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 		}
 	}
 	return nil
+}
+
+// GetPositionAnalysis returns detailed analysis of all positions
+func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAnalysis, error) {
+	positions, err := pm.GetOpenPositions(ctx)
+	inmemoryCache := cache.GetInMemoryCacheInstance()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get positions: %w", err)
+	}
+
+	// Get Redis cache for LTP data
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+	ltpDB := redisCache.GetLTPDB3()
+
+	analysis := &PositionAnalysis{
+		Summary:   PositionSummary{},
+		Positions: make([]DetailedPosition, 0),
+	}
+
+	// Process each position
+	for _, pos := range positions.Net {
+		// Skip non-option positions
+		if !isOptionPosition(pos.Tradingsymbol) {
+			continue
+		}
+
+		// Get current LTP
+		ltpKey := fmt.Sprintf("%d_ltp", pos.InstrumentToken)
+		ltp, err := ltpDB.Get(ctx, ltpKey).Float64()
+		if err != nil {
+			pm.log.Error("Failed to get LTP", map[string]interface{}{
+				"token": pos.InstrumentToken,
+				"error": err.Error(),
+			})
+			ltp = pos.LastPrice
+		}
+
+		optionType := getOptionType(pos.Tradingsymbol)
+		strike_key := fmt.Sprintf("strike:%s", pos.InstrumentToken)
+		strikePrice, ok := inmemoryCache.Get(strike_key)
+		if !ok {
+			pm.log.Error("Failed to get strike price", map[string]interface{}{
+				"token": pos.InstrumentToken,
+			})
+			continue
+		}
+
+		// Type assert the strike price to float64
+		strikePriceFloat, ok := strikePrice.(float64)
+		if !ok {
+			pm.log.Error("Invalid strike price type", map[string]interface{}{
+				"token": pos.InstrumentToken,
+				"type":  fmt.Sprintf("%T", strikePrice),
+			})
+			continue
+		}
+
+		detailedPos := DetailedPosition{
+			Strike:       strikePriceFloat,
+			OptionType:   optionType,
+			Quantity:     int64(pos.Quantity),
+			AveragePrice: pos.AveragePrice,
+			SellPrice:    pos.SellPrice,
+			LTP:          ltp,
+			Diff:         ltp - pos.AveragePrice,
+			VWAP:         0,
+			Value:        math.Abs(float64(pos.Quantity) * pos.AveragePrice),
+		}
+
+		// Calculate moves
+		detailedPos.Moves = pm.calculateMoves(ctx, pos)
+
+		// Update summary
+		if optionType == "CE" {
+			analysis.Summary.TotalCallValue += detailedPos.Value
+		} else {
+			analysis.Summary.TotalPutValue += detailedPos.Value
+		}
+
+		analysis.Positions = append(analysis.Positions, detailedPos)
+	}
+
+	analysis.Summary.TotalValue = analysis.Summary.TotalCallValue + analysis.Summary.TotalPutValue
+	return analysis, nil
+}
+
+// Helper functions
+
+func isOptionPosition(symbol string) bool {
+	return len(symbol) > 2 && (strings.HasSuffix(symbol, "CE") || strings.HasSuffix(symbol, "PE"))
+}
+
+func getOptionType(symbol string) string {
+	if strings.HasSuffix(symbol, "CE") {
+		return "CE"
+	}
+	return "PE"
+}
+
+func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.Position) MoveSuggestions {
+	moves := MoveSuggestions{
+		Away:   make([]MoveStep, 0),
+		Closer: make([]MoveStep, 0),
+	}
+
+	// Calculate steps for position adjustment
+	steps := []string{"1/4", "1/2", "1"}
+
+	// Add nearby strikes (this is a simplified version - you might want to add more logic)
+	strikeGap := 50.0 // Assuming 50-point strikes
+
+	// Extract strike price from trading symbol
+	inmemoryCache := cache.GetInMemoryCacheInstance()
+	strikePrice, ok := inmemoryCache.Get(fmt.Sprintf("%d", pos.InstrumentToken))
+	if !ok {
+		pm.log.Error("Failed to get strike price for moves calculation", map[string]interface{}{
+			"token": pos.InstrumentToken,
+		})
+		return moves
+	}
+
+	strike, ok := strikePrice.(float64)
+	if !ok {
+		pm.log.Error("Invalid strike price type for moves calculation", map[string]interface{}{
+			"token": pos.InstrumentToken,
+			"type":  fmt.Sprintf("%T", strikePrice),
+		})
+		return moves
+	}
+
+	// Away moves (2 strikes)
+	for i := 1; i <= 2; i++ {
+		if strings.HasSuffix(pos.Tradingsymbol, "CE") {
+			newStrike := strike + (strikeGap * float64(i))
+			moves.Away = append(moves.Away, MoveStep{
+				Strike:  newStrike,
+				Premium: pos.LastPrice * 0.8, // Simplified premium calculation
+				Steps:   steps,
+			})
+		} else {
+			newStrike := strike - (strikeGap * float64(i))
+			moves.Away = append(moves.Away, MoveStep{
+				Strike:  newStrike,
+				Premium: pos.LastPrice * 0.8,
+				Steps:   steps,
+			})
+		}
+	}
+
+	// Closer moves (2 strikes)
+	for i := 1; i <= 2; i++ {
+		if strings.HasSuffix(pos.Tradingsymbol, "CE") {
+			newStrike := strike - (strikeGap * float64(i))
+			moves.Closer = append(moves.Closer, MoveStep{
+				Strike:  newStrike,
+				Premium: pos.LastPrice * 1.2,
+				Steps:   steps,
+			})
+		} else {
+			newStrike := strike + (strikeGap * float64(i))
+			moves.Closer = append(moves.Closer, MoveStep{
+				Strike:  newStrike,
+				Premium: pos.LastPrice * 1.2,
+				Steps:   steps,
+			})
+		}
+	}
+
+	return moves
 }

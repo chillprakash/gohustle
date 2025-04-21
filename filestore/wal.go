@@ -26,7 +26,7 @@ const (
 
 // TickWriter handles writing to a single index's tick data file
 type TickWriter struct {
-	index      string
+	indexName  string
 	currentDay string
 	file       *os.File
 	bufWriter  *bufio.Writer
@@ -60,27 +60,27 @@ func GetTickStore() *TickStore {
 }
 
 // getTickFilePath returns the path for the current tick file
-func getTickFilePath(baseDir, index, date string) string {
+func getTickFilePath(baseDir, indexName, date string) string {
 	filename := fmt.Sprintf("%s_%s%s", TickFilePrefix, date, TickFileSuffix)
-	return filepath.Join(baseDir, index, filename)
+	return filepath.Join(baseDir, indexName, filename)
 }
 
 // newTickWriter creates a new tick writer for an index
-func newTickWriter(index, baseDir string) (*TickWriter, error) {
+func newTickWriter(indexName, baseDir string) (*TickWriter, error) {
 	w := &TickWriter{
-		index:      index,
+		indexName:  indexName,
 		currentDay: time.Now().Format("2006-01-02"),
 		log:        logger.L(),
 	}
 
 	// Create directory if it doesn't exist
-	dir := filepath.Join(baseDir, index)
+	dir := filepath.Join(baseDir, indexName)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create tick directory: %w", err)
 	}
 
 	// Open file in append mode
-	filePath := getTickFilePath(baseDir, index, w.currentDay)
+	filePath := getTickFilePath(baseDir, indexName, w.currentDay)
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open tick file: %w", err)
@@ -90,7 +90,7 @@ func newTickWriter(index, baseDir string) (*TickWriter, error) {
 	w.bufWriter = bufio.NewWriterSize(file, BufferSize)
 
 	w.log.Info("Opened tick file", map[string]interface{}{
-		"index": index,
+		"index": indexName,
 		"path":  filePath,
 	})
 
@@ -145,12 +145,12 @@ func (w *TickWriter) rotate(newDay string) error {
 	if err := w.Close(); err != nil {
 		w.log.Error("Failed to close current file during rotation", map[string]interface{}{
 			"error": err.Error(),
-			"index": w.index,
+			"index": w.indexName,
 		})
 	}
 
 	w.currentDay = newDay
-	filePath := getTickFilePath(filepath.Dir(filepath.Dir(w.file.Name())), w.index, newDay)
+	filePath := getTickFilePath(filepath.Dir(filepath.Dir(w.file.Name())), w.indexName, newDay)
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
 	if err != nil {
@@ -161,7 +161,7 @@ func (w *TickWriter) rotate(newDay string) error {
 	w.bufWriter = bufio.NewWriterSize(file, BufferSize)
 
 	w.log.Info("Rotated to new file", map[string]interface{}{
-		"index": w.index,
+		"index": w.indexName,
 		"path":  filePath,
 	})
 
@@ -180,14 +180,14 @@ func (w *TickWriter) Close() error {
 	if err := w.bufWriter.Flush(); err != nil {
 		w.log.Error("Failed to flush buffer during close", map[string]interface{}{
 			"error": err.Error(),
-			"index": w.index,
+			"index": w.indexName,
 		})
 	}
 
 	if err := w.file.Close(); err != nil {
 		w.log.Error("Failed to close file", map[string]interface{}{
 			"error": err.Error(),
-			"index": w.index,
+			"index": w.indexName,
 		})
 		return err
 	}

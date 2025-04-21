@@ -12,18 +12,12 @@ import (
 )
 
 const (
-	DefaultURL           = "nats://localhost:4222"
-	ReconnectWait        = 2 * time.Second
-	MaxReconnectAttempts = 5
-	PingInterval         = 30 * time.Second
-	MaxPingOutstanding   = 2
-
-	// JetStream configuration
-	StreamName             = "TICKS"
-	TicksSubject           = "ticks"
-	MaxMsgAge              = 30 * time.Minute
-	MaxBytes               = 1 * 1024 * 1024 * 1024 // 1GB
-	PublishAsyncMaxPending = 16384
+	DefaultURL             = "nats://localhost:4222"
+	ReconnectWait          = 2 * time.Second
+	MaxReconnectAttempts   = 5
+	PingInterval           = 30 * time.Second
+	MaxPingOutstanding     = 2
+	PublishAsyncMaxPending = 256 * 1024 // 256K pending messages
 )
 
 // NATSHelper manages NATS connections
@@ -149,6 +143,8 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		nats.DisconnectErrHandler(n.handleDisconnect),
 		nats.ReconnectHandler(n.handleReconnect),
 		nats.ErrorHandler(n.handleError),
+		nats.NoEcho(),
+		nats.UseOldRequestStyle(),
 	}
 
 	// Connect to NATS
@@ -165,8 +161,10 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		"url": nc.ConnectedUrl(),
 	})
 
-	// Initialize JetStream
-	js, err := nc.JetStream(nats.PublishAsyncMaxPending(PublishAsyncMaxPending))
+	// Initialize JetStream with higher limits
+	js, err := nc.JetStream(
+		nats.PublishAsyncMaxPending(PublishAsyncMaxPending),
+	)
 	if err != nil {
 		n.log.Error("Failed to create JetStream context", map[string]interface{}{
 			"error": err.Error(),
@@ -174,8 +172,67 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to create JetStream context: %w", err)
 	}
 
+	// Check if stream exists first
+	stream, err := js.StreamInfo("TICKS")
+	if err != nil && err != nats.ErrStreamNotFound {
+		n.log.Error("Failed to get stream info", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return fmt.Errorf("failed to get stream info: %w", err)
+	}
+
+	// Create or update the stream
+	streamConfig := &nats.StreamConfig{
+		Name:       "TICKS",
+		Subjects:   []string{"ticks.>"},
+		Storage:    nats.FileStorage,
+		MaxAge:     30 * time.Minute,
+		MaxBytes:   8 * 1024 * 1024 * 1024, // 8GB
+		Replicas:   1,
+		Discard:    nats.DiscardOld,
+		MaxMsgs:    -1,
+		MaxMsgSize: 8 * 1024 * 1024, // 8MB max message size
+	}
+
+	// If stream exists, preserve its retention policy
+	if stream != nil {
+		streamConfig.Retention = stream.Config.Retention
+	} else {
+		// New stream gets WorkQueue policy
+		streamConfig.Retention = nats.WorkQueuePolicy
+	}
+
+	if stream == nil {
+		// Create new stream
+		if _, err := js.AddStream(streamConfig); err != nil {
+			n.log.Error("Failed to create stream", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return fmt.Errorf("failed to create stream: %w", err)
+		}
+		n.log.Info("Stream created successfully", map[string]interface{}{
+			"name":      streamConfig.Name,
+			"retention": streamConfig.Retention,
+		})
+	} else {
+		// Update existing stream
+		if _, err := js.UpdateStream(streamConfig); err != nil {
+			n.log.Error("Failed to update stream", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return fmt.Errorf("failed to update stream: %w", err)
+		}
+		n.log.Info("Stream updated successfully", map[string]interface{}{
+			"name":      streamConfig.Name,
+			"retention": streamConfig.Retention,
+		})
+	}
+
 	n.js = js
-	n.log.Info("JetStream context created successfully", nil)
+	n.log.Info("JetStream context and stream setup complete", map[string]interface{}{
+		"pub_async_max_pending": PublishAsyncMaxPending,
+		"stream":                streamConfig.Name,
+	})
 
 	return nil
 }

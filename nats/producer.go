@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	PublishChannelSize = 10000                 // Large buffer
-	DefaultWorkers     = 4                     // Many workers
+	PublishChannelSize = 1000000               // Large buffer
+	DefaultWorkers     = 15                    // Many workers
 	MaxBatchSize       = 200                   // Large batch size
 	BatchTimeout       = 50 * time.Millisecond // Quick batching
 )

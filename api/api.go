@@ -196,6 +196,9 @@ func (s *Server) setupRoutes() {
 	// Option chain endpoint
 	s.router.HandleFunc("/api/option-chain", s.handleGetOptionChain).Methods("GET", "OPTIONS")
 
+	// Positions endpoint
+	s.router.HandleFunc("/api/positions", s.handleGetPositions).Methods("GET", "OPTIONS")
+
 	// API version 1 routes
 	v1 := s.router.PathPrefix("/api/v1").Subrouter()
 
@@ -874,4 +877,26 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// handleGetPositions returns detailed analysis of all positions
+func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
+	pm := zerodha.GetPositionManager()
+	if pm == nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Position manager not initialized", nil)
+		return
+	}
+
+	analysis, err := pm.GetPositionAnalysis(r.Context())
+	if err != nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get position analysis", err)
+		return
+	}
+
+	resp := Response{
+		Success: true,
+		Data:    analysis,
+	}
+
+	SendJSONResponse(w, http.StatusOK, resp)
 }

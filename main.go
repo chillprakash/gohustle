@@ -55,7 +55,7 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
 
 	// Create lookup map with expiry vs token map
-	kiteConnect.CreateLookUpforStoringFileFromWebsockets(ctx)
+	kiteConnect.CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx)
 
 	kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetIndicesToSubscribeForIntraday())
 

@@ -84,15 +84,20 @@ func (s *Server) Start(ctx context.Context) error {
 	s.server = &http.Server{
 		Addr:         ":" + s.port,
 		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  60 * time.Second,  // Increased from 15s to 60s
+		WriteTimeout: 60 * time.Second,  // Increased from 15s to 60s
+		IdleTimeout:  120 * time.Second, // Increased from 60s to 120s
 	}
 
 	// Start the server in a goroutine
 	go func() {
 		s.log.Info("Starting API server", map[string]interface{}{
 			"port": s.port,
+			"timeouts": map[string]string{
+				"read":  "60s",
+				"write": "60s",
+				"idle":  "120s",
+			},
 		})
 
 		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

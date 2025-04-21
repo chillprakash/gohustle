@@ -172,6 +172,10 @@ func (m *OptionChainManager) GetLatestChain(index, expiry string) *OptionChainRe
 
 // storeTimeSeriesMetrics stores the calculated metrics in Redis using sorted sets
 func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index string, chain []*StrikeData, underlyingPrice float64) error {
+	// Create a context with longer timeout for Redis operations
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second) // Increased timeout for Redis operations
+	defer cancel()
+
 	// Get time series DB
 	redisCache, err := cache.GetRedisCache()
 	if err != nil {
@@ -223,8 +227,8 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 	pipe.ZAdd(ctx, fmt.Sprintf("%s:call", baseKey), redis.Z{Score: float64(timestamp), Member: callLTP})
 	pipe.ZAdd(ctx, fmt.Sprintf("%s:put", baseKey), redis.Z{Score: float64(timestamp), Member: putLTP})
 
-	// Set expiry for all keys (10 hours)
-	expiry := 10 * time.Hour
+	// Set expiry for all keys (24 hours)
+	expiry := 24 * time.Hour // Increased from 10 hours to 24 hours
 	pipe.Expire(ctx, fmt.Sprintf("%s:spot", baseKey), expiry)
 	pipe.Expire(ctx, fmt.Sprintf("%s:fair", baseKey), expiry)
 	pipe.Expire(ctx, fmt.Sprintf("%s:straddle", baseKey), expiry)
@@ -232,8 +236,8 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 	pipe.Expire(ctx, fmt.Sprintf("%s:call", baseKey), expiry)
 	pipe.Expire(ctx, fmt.Sprintf("%s:put", baseKey), expiry)
 
-	// Cleanup old data (keep last 10 hours)
-	oldTimestamp := time.Now().Add(-10*time.Hour).UnixNano() / int64(time.Millisecond)
+	// Cleanup old data (keep last 24 hours)
+	oldTimestamp := time.Now().Add(-24*time.Hour).UnixNano() / int64(time.Millisecond)
 	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:spot", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
 	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:fair", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
 	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:straddle", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
@@ -262,17 +266,28 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 
 // CalculateOptionChain calculates the option chain for given parameters
 func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, expiry string, strikesCount int) (*OptionChainResponse, error) {
+	// Create a context with longer timeout for the entire operation
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second) // Increased timeout for entire calculation
+	defer cancel()
+
 	// Get Redis and in-memory cache instances
 	redisCache, err := cache.GetRedisCache()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
 	}
 
+	// Configure Redis client timeouts
 	ltpDB := redisCache.GetLTPDB3()
 	positionsDB := redisCache.GetPositionsDB2()
 	if ltpDB == nil || positionsDB == nil {
 		return nil, fmt.Errorf("redis initialization failed")
 	}
+
+	// Set Redis operation timeouts
+	ltpDB.Options().WriteTimeout = 10 * time.Second // Increased from default
+	ltpDB.Options().ReadTimeout = 10 * time.Second  // Increased from default
+	positionsDB.Options().WriteTimeout = 10 * time.Second
+	positionsDB.Options().ReadTimeout = 10 * time.Second
 
 	inMemCache := cache.GetInMemoryCacheInstance()
 

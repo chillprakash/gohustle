@@ -179,7 +179,7 @@ func InitializeIndexOptionChainPolling(ctx context.Context) {
 				nearestExpiry := dates[0]
 
 				// Calculate option chain for this index and expiry
-				_, err := optionChainMgr.CalculateOptionChain(ctx, index.NameInOptions, nearestExpiry, 5)
+				_, err := optionChainMgr.CalculateOptionChain(ctx, index.NameInOptions, nearestExpiry, 25)
 				if err != nil {
 					logger.L().Error("Failed to calculate option chain", map[string]interface{}{
 						"index":  index.NameInOptions,

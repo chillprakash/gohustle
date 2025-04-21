@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	DefaultConsumerWorkers = 50
+	DefaultConsumerWorkers = 75
 	ChannelBuffer          = 10000000 // Increased from 10000 to 100000 for high-frequency data
 	StreamName             = "tick_stream"
 	MaxMsgAge              = 24 * time.Hour
@@ -268,12 +268,17 @@ func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
 	defer cancel()
 
 	instrumentToken := fmt.Sprintf("%d", tick.InstrumentToken)
+
 	requiredKeys := map[string]interface{}{
-		fmt.Sprintf("%s_ltp", instrumentToken):    tick.LastPrice,
-		fmt.Sprintf("%s_volume", instrumentToken): tick.VolumeTraded,
-		fmt.Sprintf("%s_oi", instrumentToken):     tick.Oi,
-		fmt.Sprintf("%s_vwap", instrumentToken):   tick.AverageTradePrice,
-		fmt.Sprintf("%s_change", instrumentToken): tick.NetChange,
+		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
+		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
+		fmt.Sprintf("%s_oi", instrumentToken):                   tick.Oi,
+		fmt.Sprintf("%s_oi_day_high", instrumentToken):          tick.OiDayHigh,
+		fmt.Sprintf("%s_oi_day_low", instrumentToken):           tick.OiDayLow,
+		fmt.Sprintf("%s_total_sell_quantity", instrumentToken):  tick.TotalSellQuantity,
+		fmt.Sprintf("%s_total_buy_quantity", instrumentToken):   tick.TotalBuyQuantity,
+		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
+		fmt.Sprintf("%s_change", instrumentToken):               tick.NetChange,
 	}
 
 	redisData := make(map[string]interface{})
@@ -295,13 +300,6 @@ func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
 		if _, err := pipe.Exec(ctx); err != nil {
 			return fmt.Errorf("failed to execute Redis pipeline for token %s: %w", instrumentToken, err)
 		}
-
-		c.log.Debug("Successfully stored LTP data in Redis", map[string]interface{}{
-			"token":    instrumentToken,
-			"keys_set": len(redisData),
-			"ltp":      tick.LastPrice,
-			"volume":   tick.VolumeTraded,
-		})
 	}
 
 	return nil
@@ -340,6 +338,8 @@ func convertToString(v interface{}) string {
 	case int32:
 		return fmt.Sprintf("%d", v)
 	case int64:
+		return fmt.Sprintf("%d", v)
+	case uint32:
 		return fmt.Sprintf("%d", v)
 	case float64:
 		return fmt.Sprintf("%f", v)

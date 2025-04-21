@@ -149,43 +149,38 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	if err != nil {
 		log.Error("Failed to get index name", map[string]interface{}{
 			"error": err.Error(),
+			"token": tick.InstrumentToken,
 		})
 		return
 	}
 
-	if indexName != "SENSEX" {
-		return
-	}
-
-	// Convert to protobuf
+	// Convert to protobuf with proper type conversions
 	protoTick := &pb.TickData{
 		// Basic info
-		IndexName:       indexName,
 		InstrumentToken: tick.InstrumentToken,
 		IsTradable:      tick.IsTradable,
 		IsIndex:         tick.IsIndex,
 		Mode:            tick.Mode,
+		IndexName:       indexName,
 
-		// Timestamps
+		// Timestamps - Convert time.Time to Unix timestamp
 		Timestamp:        tick.Timestamp.Unix(),
 		LastTradeTime:    tick.LastTradeTime.Unix(),
 		TickRecievedTime: time.Now().Unix(),
 
-		// Additional metadata
-
-		// TargetFile: instrumentInfo.TargetFile,
-
-		// Price and quantity
+		// Price and quantity - Direct conversions as types match
 		LastPrice:          tick.LastPrice,
 		LastTradedQuantity: tick.LastTradedQuantity,
 		TotalBuyQuantity:   tick.TotalBuyQuantity,
 		TotalSellQuantity:  tick.TotalSellQuantity,
 		VolumeTraded:       tick.VolumeTraded,
-		TotalBuy:           uint32(tick.TotalBuy),
-		TotalSell:          uint32(tick.TotalSell),
 		AverageTradePrice:  tick.AverageTradePrice,
 
-		// OI related
+		// Convert integer fields
+		TotalBuy:  tick.TotalBuy,
+		TotalSell: tick.TotalSell,
+
+		// OI related fields
 		Oi:        tick.OI,
 		OiDayHigh: tick.OIDayHigh,
 		OiDayLow:  tick.OIDayLow,
@@ -204,19 +199,25 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 			Buy:  convertDepthItems(tick.Depth.Buy[:]),
 			Sell: convertDepthItems(tick.Depth.Sell[:]),
 		},
+
+		// Additional metadata for tracking
+		TickStoredInDbTime: time.Now().Unix(),
 	}
 
-	// Use hierarchical subject pattern
+	// Use hierarchical subject pattern for NATS
 	subject := fmt.Sprintf("ticks.%s", indexName)
-	// Publish asynchronously - don't block on errors
-	if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
-		log.Error("Failed to queue tick for publishing", map[string]interface{}{
-			"error": err.Error(),
-			"token": tick.InstrumentToken,
-		})
-		// Continue processing even if publish fails
-	}
 
+	// Publish asynchronously
+	if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
+		log.Error("Failed to publish tick", map[string]interface{}{
+			"error":        err.Error(),
+			"token":        tick.InstrumentToken,
+			"index":        indexName,
+			"last_price":   tick.LastPrice,
+			"total_volume": tick.VolumeTraded,
+		})
+		return
+	}
 }
 
 func (k *KiteConnect) onError(err error) {
@@ -253,7 +254,7 @@ func (k *KiteConnect) onNoReconnect(attempt int) {
 	})
 }
 
-// Helper function to convert depth items
+// Helper function to convert depth items with proper type handling
 func convertDepthItems(items []models.DepthItem) []*pb.TickData_DepthItem {
 	result := make([]*pb.TickData_DepthItem, len(items))
 	for i, item := range items {

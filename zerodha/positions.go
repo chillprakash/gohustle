@@ -62,12 +62,7 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	// Store day positions
-	if err := pm.storePositionsInRedis(ctx, "day", positions.Day); err != nil {
-		return err
-	}
-
-	// Store net positions
+	// Store net positions alone
 	if err := pm.storePositionsInRedis(ctx, "net", positions.Net); err != nil {
 		return err
 	}
@@ -85,6 +80,7 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 	positionsRedis := redisCache.GetPositionsDB2()
 
 	for _, pos := range positions {
+		// Store full position details
 		key := fmt.Sprintf("position:%s:%s:%s", category, pos.Tradingsymbol, pos.Product)
 
 		// Convert position to JSON
@@ -97,12 +93,29 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 			continue
 		}
 
-		// Store in Redis with 24-hour expiry
+		// Store full position in Redis
 		err = positionsRedis.HSet(ctx, "positions", key, string(posJSON)).Err()
 		if err != nil {
 			pm.log.Error("Failed to store position in Redis", map[string]interface{}{
 				"symbol": pos.Tradingsymbol,
 				"error":  err.Error(),
+			})
+			continue
+		}
+
+		// Store instrument token to quantity mapping
+		tokenKey := fmt.Sprintf("position:token:%d", pos.InstrumentToken)
+		err = positionsRedis.Set(ctx, tokenKey, pos.Quantity, 0).Err()
+		if err != nil {
+			pm.log.Error("Failed to store token quantity in Redis", map[string]interface{}{
+				"token":    pos.InstrumentToken,
+				"quantity": pos.Quantity,
+				"error":    err.Error(),
+			})
+		} else {
+			pm.log.Info("Stored token quantity", map[string]interface{}{
+				"token":    pos.InstrumentToken,
+				"quantity": pos.Quantity,
 			})
 		}
 	}

@@ -413,7 +413,7 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		recordCount:      0,
 		uncompressedSize: 0,
 		closed:           false,
-		flushSize:        10000,
+		flushSize:        250000,
 	}, nil
 }
 

@@ -322,7 +322,7 @@ func (s *Server) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Write records in batches
-	const batchSize = 10000
+	const batchSize = 100000
 	for i := 0; i < len(records); i += batchSize {
 		end := i + batchSize
 		if end > len(records) {

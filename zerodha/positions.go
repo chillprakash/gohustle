@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	sync "sync"
 
@@ -203,18 +204,34 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		}
 
 		optionType := getOptionType(pos.Tradingsymbol)
-		strike_key := fmt.Sprintf("strike:%s", pos.InstrumentToken)
+		strike_key := fmt.Sprintf("strike:%d", pos.InstrumentToken)
 		strikePrice, ok := inmemoryCache.Get(strike_key)
 		if !ok {
 			pm.log.Error("Failed to get strike price", map[string]interface{}{
-				"token": pos.InstrumentToken,
+				"token":  pos.InstrumentToken,
+				"symbol": pos.Tradingsymbol,
+				"key":    strike_key,
 			})
 			continue
 		}
 
-		// Type assert the strike price to float64
-		strikePriceFloat, ok := strikePrice.(float64)
-		if !ok {
+		// Convert strike price to float64 based on type
+		var strikePriceFloat float64
+		switch v := strikePrice.(type) {
+		case float64:
+			strikePriceFloat = v
+		case string:
+			var err error
+			strikePriceFloat, err = strconv.ParseFloat(v, 64)
+			if err != nil {
+				pm.log.Error("Failed to parse strike price", map[string]interface{}{
+					"token":  pos.InstrumentToken,
+					"strike": v,
+					"error":  err.Error(),
+				})
+				continue
+			}
+		default:
 			pm.log.Error("Invalid strike price type", map[string]interface{}{
 				"token": pos.InstrumentToken,
 				"type":  fmt.Sprintf("%T", strikePrice),
@@ -278,16 +295,33 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 
 	// Extract strike price from trading symbol
 	inmemoryCache := cache.GetInMemoryCacheInstance()
-	strikePrice, ok := inmemoryCache.Get(fmt.Sprintf("%d", pos.InstrumentToken))
+	strike_key := fmt.Sprintf("strike:%d", pos.InstrumentToken)
+	strikePrice, ok := inmemoryCache.Get(strike_key)
 	if !ok {
 		pm.log.Error("Failed to get strike price for moves calculation", map[string]interface{}{
-			"token": pos.InstrumentToken,
+			"token":  pos.InstrumentToken,
+			"symbol": pos.Tradingsymbol,
+			"key":    strike_key,
 		})
 		return moves
 	}
 
-	strike, ok := strikePrice.(float64)
-	if !ok {
+	var strike float64
+	switch v := strikePrice.(type) {
+	case float64:
+		strike = v
+	case string:
+		var err error
+		strike, err = strconv.ParseFloat(v, 64)
+		if err != nil {
+			pm.log.Error("Failed to parse strike price for moves calculation", map[string]interface{}{
+				"token":  pos.InstrumentToken,
+				"strike": v,
+				"error":  err.Error(),
+			})
+			return moves
+		}
+	default:
 		pm.log.Error("Invalid strike price type for moves calculation", map[string]interface{}{
 			"token": pos.InstrumentToken,
 			"type":  fmt.Sprintf("%T", strikePrice),

@@ -41,6 +41,18 @@ type Response struct {
 	Error   string      `json:"error,omitempty"`
 }
 
+// GeneralResponse represents the response structure for general market information
+type GeneralResponse struct {
+	LotSizes map[string]int `json:"lot_sizes"`
+}
+
+// LotSizes contains the standard lot sizes for each index
+var LotSizes = map[string]int{
+	"NIFTY":     75,
+	"BANKNIFTY": 30,
+	"SENSEX":    20,
+}
+
 var (
 	instance *Server
 	once     sync.Once
@@ -257,6 +269,9 @@ func (s *Server) setupRoutes() {
 	// Data export endpoints
 	export := v1.PathPrefix("/export").Subrouter()
 	export.HandleFunc("/wal-to-parquet", s.handleWalToParquet).Methods("POST", "OPTIONS")
+
+	// General endpoint
+	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET", "OPTIONS")
 }
 
 // Health check handler
@@ -906,4 +921,16 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 	}
 
 	SendJSONResponse(w, http.StatusOK, resp)
+}
+
+// handleGeneral handles the /general endpoint that returns general market information
+func (s *Server) handleGeneral(w http.ResponseWriter, r *http.Request) {
+	response := Response{
+		Success: true,
+		Data: GeneralResponse{
+			LotSizes: LotSizes,
+		},
+	}
+
+	SendJSONResponse(w, http.StatusOK, response)
 }

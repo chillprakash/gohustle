@@ -7,7 +7,6 @@ import (
 	"gohustle/core"
 	"gohustle/logger"
 	"gohustle/zerodha"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,6 +43,9 @@ type OptionChainManager struct {
 	subscribers map[string][]chan *OptionChainResponse // key: "index:expiry"
 	subMutex    sync.RWMutex
 
+	// Metrics manager for time series data
+	metricsManager *MetricsManager
+
 	// Context for cleanup
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -79,12 +81,13 @@ type OptionChainResponse struct {
 func NewOptionChainManager(ctx context.Context) *OptionChainManager {
 	ctx, cancel := context.WithCancel(ctx)
 	mgr := &OptionChainManager{
-		log:           logger.L(),
-		broadcastChan: make(chan *OptionChainResponse, 100),
-		latestData:    make(map[string]*OptionChainResponse),
-		subscribers:   make(map[string][]chan *OptionChainResponse),
-		ctx:           ctx,
-		cancel:        cancel,
+		log:            logger.L(),
+		broadcastChan:  make(chan *OptionChainResponse, 100),
+		latestData:     make(map[string]*OptionChainResponse),
+		subscribers:    make(map[string][]chan *OptionChainResponse),
+		metricsManager: NewMetricsManager(),
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	// Start broadcast handler
@@ -170,10 +173,10 @@ func (m *OptionChainManager) GetLatestChain(index, expiry string) *OptionChainRe
 	return m.latestData[key]
 }
 
-// storeTimeSeriesMetrics stores the calculated metrics in Redis using sorted sets
+// storeTimeSeriesMetrics stores the calculated metrics in Redis using sorted sets for different intervals
 func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index string, chain []*StrikeData, underlyingPrice float64) error {
 	// Create a context with longer timeout for Redis operations
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second) // Increased timeout for Redis operations
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	// Get time series DB
@@ -187,63 +190,23 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 		return fmt.Errorf("time series DB not available")
 	}
 
-	// Find lowest straddle price and calculate synthetic future
-	var lowestStraddle float64 = math.MaxFloat64
-	var lowestStrike float64
-	var callLTP, putLTP float64
+	// Calculate metrics once
+	metrics := m.metricsManager.calculateMetrics(chain, underlyingPrice)
+	now := time.Unix(0, metrics.Timestamp*int64(time.Millisecond))
 
-	for _, item := range chain {
-		if item.CE != nil && item.PE != nil {
-			straddlePrice := item.CE.LTP + item.PE.LTP
-			if straddlePrice < lowestStraddle {
-				lowestStraddle = straddlePrice
-				lowestStrike = item.Strike
-				callLTP = item.CE.LTP
-				putLTP = item.PE.LTP
-			}
+	// Create a pipeline for batch operations
+	pipe := tsDB.Pipeline()
+
+	logger.L().Info("Calculated metrics", map[string]interface{}{
+		"metrics": metrics,
+	})
+	// Store metrics for each configured interval
+	for _, interval := range m.metricsManager.intervals {
+		if m.metricsManager.shouldStoreForInterval(now, interval.Duration) {
+			baseKey := fmt.Sprintf("metrics:%s:%s", interval.Name, index)
+			m.metricsManager.storeMetricsInPipeline(pipe, baseKey, metrics, interval.TTL)
 		}
 	}
-
-	if lowestStraddle == math.MaxFloat64 {
-		return fmt.Errorf("no valid straddle price found")
-	}
-
-	// Calculate synthetic future price
-	// sf = round((strike + call - put), 2)
-	syntheticFuture := math.Round((lowestStrike+callLTP-putLTP)*100) / 100
-
-	// Current timestamp in milliseconds
-	timestamp := time.Now().UnixNano() / int64(time.Millisecond)
-
-	// Store metrics using ZADD
-	pipe := tsDB.Pipeline()
-	baseKey := fmt.Sprintf("metrics:%s", index)
-
-	// Add data points using ZADD
-	pipe.ZAdd(ctx, fmt.Sprintf("%s:spot", baseKey), redis.Z{Score: float64(timestamp), Member: underlyingPrice})
-	pipe.ZAdd(ctx, fmt.Sprintf("%s:fair", baseKey), redis.Z{Score: float64(timestamp), Member: syntheticFuture})
-	pipe.ZAdd(ctx, fmt.Sprintf("%s:straddle", baseKey), redis.Z{Score: float64(timestamp), Member: lowestStraddle})
-	pipe.ZAdd(ctx, fmt.Sprintf("%s:strike", baseKey), redis.Z{Score: float64(timestamp), Member: lowestStrike})
-	pipe.ZAdd(ctx, fmt.Sprintf("%s:call", baseKey), redis.Z{Score: float64(timestamp), Member: callLTP})
-	pipe.ZAdd(ctx, fmt.Sprintf("%s:put", baseKey), redis.Z{Score: float64(timestamp), Member: putLTP})
-
-	// Set expiry for all keys (24 hours)
-	expiry := 24 * time.Hour // Increased from 10 hours to 24 hours
-	pipe.Expire(ctx, fmt.Sprintf("%s:spot", baseKey), expiry)
-	pipe.Expire(ctx, fmt.Sprintf("%s:fair", baseKey), expiry)
-	pipe.Expire(ctx, fmt.Sprintf("%s:straddle", baseKey), expiry)
-	pipe.Expire(ctx, fmt.Sprintf("%s:strike", baseKey), expiry)
-	pipe.Expire(ctx, fmt.Sprintf("%s:call", baseKey), expiry)
-	pipe.Expire(ctx, fmt.Sprintf("%s:put", baseKey), expiry)
-
-	// Cleanup old data (keep last 24 hours)
-	oldTimestamp := time.Now().Add(-24*time.Hour).UnixNano() / int64(time.Millisecond)
-	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:spot", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
-	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:fair", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
-	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:straddle", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
-	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:strike", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
-	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:call", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
-	pipe.ZRemRangeByScore(ctx, fmt.Sprintf("%s:put", baseKey), "0", fmt.Sprintf("%d", oldTimestamp))
 
 	// Execute pipeline
 	if _, err := pipe.Exec(ctx); err != nil {
@@ -252,13 +215,12 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 
 	m.log.Info("Stored time series metrics", map[string]interface{}{
 		"index":     index,
-		"timestamp": timestamp,
-		"spot":      underlyingPrice,
-		"fair":      syntheticFuture,
-		"straddle":  lowestStraddle,
-		"strike":    lowestStrike,
-		"call_ltp":  callLTP,
-		"put_ltp":   putLTP,
+		"timestamp": metrics.Timestamp,
+		"spot":      metrics.UnderlyingPrice,
+		"fair":      metrics.SyntheticFuture,
+		"straddle":  metrics.LowestStraddle,
+		"call_ltp":  metrics.CallLTP,
+		"put_ltp":   metrics.PutLTP,
 	})
 
 	return nil
@@ -497,10 +459,6 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 			"expiry": expiry,
 		})
 	}
-	logger.L().Info("Option chain calculated", map[string]interface{}{
-		"index":  index,
-		"expiry": expiry,
-	})
 	return response, nil
 }
 

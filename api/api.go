@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	pb "gohustle/proto"
 
 	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 )
 
 // Server represents the HTTP API server
@@ -164,6 +166,37 @@ type OptionChainItem struct {
 	IsATM     bool        `json:"is_atm"`
 }
 
+// TimeSeriesMetricsRequest represents the request parameters for fetching time series metrics
+type TimeSeriesMetricsRequest struct {
+	Index    string `json:"index"`
+	Interval string `json:"interval"` // Valid values: 5s, 10s, 20s, 30s
+	Count    int    `json:"count"`    // Number of latest entries to fetch (max 1000)
+}
+
+// ValidIntervals contains the list of valid interval values and their durations
+var ValidIntervals = map[string]time.Duration{
+	"5s":  5 * time.Second,
+	"10s": 10 * time.Second,
+	"20s": 20 * time.Second,
+	"30s": 30 * time.Second,
+}
+
+// ValidDurations contains the list of valid duration values and their time.Duration equivalents
+var ValidDurations = map[string]time.Duration{
+	"5m":  5 * time.Minute,
+	"10m": 10 * time.Minute,
+	"15m": 15 * time.Minute,
+	"30m": 30 * time.Minute,
+}
+
+// TimeSeriesMetricsResponse represents a single data point in the time series
+type TimeSeriesMetricsResponse struct {
+	Timestamp       int64   `json:"timestamp"`
+	UnderlyingPrice float64 `json:"underlying_price"`
+	SyntheticFuture float64 `json:"synthetic_future"`
+	LowestStraddle  float64 `json:"straddle"`
+}
+
 // CORSMiddleware adds CORS headers to responses
 func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +245,9 @@ func (s *Server) setupRoutes() {
 	// Data export endpoints
 	export := v1.PathPrefix("/export").Subrouter()
 	export.HandleFunc("/wal-to-parquet", s.handleWalToParquet).Methods("POST", "OPTIONS")
+
+	// Time series metrics endpoint
+	s.router.HandleFunc("/api/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")
 
 	// Add more routes as needed
 }
@@ -672,6 +708,194 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	resp := Response{
 		Success: true,
 		Data:    analysis,
+	}
+
+	SendJSONResponse(w, http.StatusOK, resp)
+}
+
+// Helper function to convert Redis Z member to float64
+func convertRedisZMemberToFloat64(member interface{}) float64 {
+	switch v := member.(type) {
+	case float64:
+		return v
+	case string:
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	case int64:
+		return float64(v)
+	case int:
+		return float64(v)
+	}
+	return 0
+}
+
+// handleGetTimeSeriesMetrics handles requests for time series metrics
+func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	index := r.URL.Query().Get("index")
+	interval := r.URL.Query().Get("interval")
+	countStr := r.URL.Query().Get("count")
+
+	// Validate required parameters
+	if index == "" {
+		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: index", nil)
+		return
+	}
+	if interval == "" {
+		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: interval", nil)
+		return
+	}
+	if countStr == "" {
+		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: count", nil)
+		return
+	}
+
+	// Parse and validate count
+	count, err := strconv.Atoi(countStr)
+	if err != nil {
+		SendErrorResponse(w, http.StatusBadRequest, "Invalid count parameter. Must be an integer.", nil)
+		return
+	}
+	if count <= 0 {
+		SendErrorResponse(w, http.StatusBadRequest, "Count must be greater than 0", nil)
+		return
+	}
+	if count > 1000 {
+		SendErrorResponse(w, http.StatusBadRequest, "Count cannot exceed 1000", nil)
+		return
+	}
+
+	// Validate interval
+	_, ok := ValidIntervals[interval]
+	if !ok {
+		SendErrorResponse(w, http.StatusBadRequest, "Invalid interval. Valid values are: 5s, 10s, 20s, 30s", nil)
+		return
+	}
+
+	// Get Redis cache instance
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get Redis cache", err)
+		return
+	}
+
+	tsDB := redisCache.GetTimeSeriesDB()
+	if tsDB == nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Time series DB not available", nil)
+		return
+	}
+
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// Prepare base key
+	baseKey := fmt.Sprintf("metrics:%s:%s", interval, index)
+
+	// Create pipeline for data fetch
+	pipe := tsDB.Pipeline()
+
+	// Get latest N entries for each metric using ZREVRANGE
+	spotCmd := pipe.ZRevRangeWithScores(ctx, fmt.Sprintf("%s:spot", baseKey), 0, int64(count-1))
+	fairCmd := pipe.ZRevRangeWithScores(ctx, fmt.Sprintf("%s:fair", baseKey), 0, int64(count-1))
+	straddleCmd := pipe.ZRevRangeWithScores(ctx, fmt.Sprintf("%s:straddle", baseKey), 0, int64(count-1))
+
+	// Execute pipeline
+	if _, err := pipe.Exec(ctx); err != nil {
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to fetch metrics", err)
+		return
+	}
+
+	// Get results with error handling
+	spots, err := spotCmd.Result()
+	if err != nil {
+		s.log.Error("Failed to get spot metrics", map[string]interface{}{
+			"error": err.Error(),
+			"key":   fmt.Sprintf("%s:spot", baseKey),
+		})
+	}
+
+	fairs, err := fairCmd.Result()
+	if err != nil {
+		s.log.Error("Failed to get fair metrics", map[string]interface{}{
+			"error": err.Error(),
+			"key":   fmt.Sprintf("%s:fair", baseKey),
+		})
+	}
+
+	straddles, err := straddleCmd.Result()
+	if err != nil {
+		s.log.Error("Failed to get straddle metrics", map[string]interface{}{
+			"error": err.Error(),
+			"key":   fmt.Sprintf("%s:straddle", baseKey),
+		})
+	}
+
+	// Log the results count
+	s.log.Info("Redis query results", map[string]interface{}{
+		"spots":     len(spots),
+		"fairs":     len(fairs),
+		"straddles": len(straddles),
+	})
+
+	// Create map to store metrics by timestamp
+	metricsMap := make(map[int64]*TimeSeriesMetricsResponse)
+
+	// Helper function to add metric to map
+	addMetricToMap := func(z redis.Z, field string) {
+		timestamp := int64(z.Score)
+		if _, exists := metricsMap[timestamp]; !exists {
+			metricsMap[timestamp] = &TimeSeriesMetricsResponse{Timestamp: timestamp}
+		}
+
+		value := convertRedisZMemberToFloat64(z.Member)
+
+		switch field {
+		case "spot":
+			metricsMap[timestamp].UnderlyingPrice = value
+		case "fair":
+			metricsMap[timestamp].SyntheticFuture = value
+		case "straddle":
+			metricsMap[timestamp].LowestStraddle = value
+		}
+	}
+
+	// Process all metrics
+	if len(spots) > 0 {
+		for _, z := range spots {
+			addMetricToMap(z, "spot")
+		}
+	}
+	if len(fairs) > 0 {
+		for _, z := range fairs {
+			addMetricToMap(z, "fair")
+		}
+	}
+	if len(straddles) > 0 {
+		for _, z := range straddles {
+			addMetricToMap(z, "straddle")
+		}
+	}
+
+	// Convert map to slice and sort by timestamp (newest first)
+	validMetrics := make([]*TimeSeriesMetricsResponse, 0, len(metricsMap))
+	for _, metric := range metricsMap {
+		validMetrics = append(validMetrics, metric)
+	}
+	sort.Slice(validMetrics, func(i, j int) bool {
+		return validMetrics[i].Timestamp > validMetrics[j].Timestamp
+	})
+
+	resp := Response{
+		Success: true,
+		Message: "Time series metrics retrieved successfully",
+		Data: map[string]interface{}{
+			"interval":        interval,
+			"requested_count": count,
+			"returned_count":  len(validMetrics),
+			"metrics":         validMetrics,
+		},
 	}
 
 	SendJSONResponse(w, http.StatusOK, resp)

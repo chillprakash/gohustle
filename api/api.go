@@ -221,20 +221,31 @@ func (s *Server) setupRoutes() {
 	// Add CORS middleware to the router
 	s.router.Use(s.CORSMiddleware)
 
+	// Auth routes (no authentication required)
+	s.router.HandleFunc("/api/auth/login", s.handleLogin).Methods("POST", "OPTIONS")
+	s.router.HandleFunc("/api/auth/logout", s.handleLogout).Methods("POST", "OPTIONS")
+
+	// Create authenticated router
+	authenticatedRouter := s.router.PathPrefix("/api").Subrouter()
+	authenticatedRouter.Use(s.AuthMiddleware)
+
 	// Health check endpoint
-	s.router.HandleFunc("/api/health", s.handleHealthCheck).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/health", s.handleHealthCheck).Methods("GET", "OPTIONS")
 
 	// Expiries endpoint
-	s.router.HandleFunc("/api/expiries", s.handleGetExpiries).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/expiries", s.handleGetExpiries).Methods("GET", "OPTIONS")
 
 	// Option chain endpoint
-	s.router.HandleFunc("/api/option-chain", s.handleGetOptionChain).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/option-chain", s.handleGetOptionChain).Methods("GET", "OPTIONS")
 
 	// Positions endpoint
-	s.router.HandleFunc("/api/positions", s.handleGetPositions).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/positions", s.handleGetPositions).Methods("GET", "OPTIONS")
+
+	// Time series metrics endpoint
+	authenticatedRouter.HandleFunc("/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")
 
 	// API version 1 routes
-	v1 := s.router.PathPrefix("/api/v1").Subrouter()
+	v1 := authenticatedRouter.PathPrefix("/v1").Subrouter()
 
 	// Market data endpoints
 	market := v1.PathPrefix("/market").Subrouter()
@@ -245,11 +256,6 @@ func (s *Server) setupRoutes() {
 	// Data export endpoints
 	export := v1.PathPrefix("/export").Subrouter()
 	export.HandleFunc("/wal-to-parquet", s.handleWalToParquet).Methods("POST", "OPTIONS")
-
-	// Time series metrics endpoint
-	s.router.HandleFunc("/api/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")
-
-	// Add more routes as needed
 }
 
 // Health check handler

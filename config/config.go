@@ -10,8 +10,9 @@ import (
 	"gohustle/logger"
 )
 
+// Config holds all configuration settings
 type Config struct {
-	Redis     RedisConfig     `json:"redis"`
+	Redis     RedisConfig     `json:"redis" yaml:"redis"`
 	Kite      KiteConfig      `json:"kite"`
 	Telegram  TelegramConfig  `json:"telegram"`
 	Indices   IndicesConfig   `json:"indices"`
@@ -19,6 +20,13 @@ type Config struct {
 	DuckDB    DuckDBConfig    `json:"duckdb"`
 	Timescale TimescaleConfig `json:"timescale"`
 	API       APIConfig       `json:"api"`
+	Auth      AuthConfig      `json:"auth"`
+}
+
+// AuthConfig holds authentication settings
+type AuthConfig struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 
 // API configuration

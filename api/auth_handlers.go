@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"gohustle/auth"
+	"gohustle/config"
 	"net/http"
 )
 
@@ -20,6 +21,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		SendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+		return
+	}
+
+	// Get config for credentials
+	cfg := config.GetConfig()
+	if cfg.Auth.Username != req.Username || cfg.Auth.Password != req.Password {
+		SendErrorResponse(w, http.StatusUnauthorized, "Invalid credentials", nil)
 		return
 	}
 
@@ -48,6 +56,20 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	resp := Response{
 		Success: true,
 		Message: "Logout successful",
+	}
+
+	SendJSONResponse(w, http.StatusOK, resp)
+}
+
+// handleAuthCheck returns current auth configuration (debug endpoint)
+func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
+	cfg := config.GetConfig()
+	resp := Response{
+		Success: true,
+		Message: "Auth configuration",
+		Data: map[string]interface{}{
+			"configured_username": cfg.Auth.Username,
+		},
 	}
 
 	SendJSONResponse(w, http.StatusOK, resp)

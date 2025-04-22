@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"gohustle/api"
+	"gohustle/auth"
 	"gohustle/config"
 	"gohustle/core"
 	"gohustle/filestore"
@@ -161,6 +162,20 @@ func main() {
 	defer os.Remove("app.pid")
 
 	cfg := config.GetConfig()
+
+	// Initialize auth system
+	if err := auth.Initialize(auth.Config{
+		Username: cfg.Auth.Username,
+		Password: cfg.Auth.Password,
+	}); err != nil {
+		logger.L().Fatal("Failed to initialize auth system", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	logger.L().Info("Auth system initialized", map[string]interface{}{
+		"username": cfg.Auth.Username,
+	})
 
 	// Create error and done channels
 	errChan := make(chan error, 2) // Increased to 2 to handle both data processing and API server errors

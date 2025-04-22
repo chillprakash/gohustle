@@ -224,6 +224,7 @@ func (s *Server) setupRoutes() {
 	// Auth routes (no authentication required)
 	s.router.HandleFunc("/api/auth/login", s.handleLogin).Methods("POST", "OPTIONS")
 	s.router.HandleFunc("/api/auth/logout", s.handleLogout).Methods("POST", "OPTIONS")
+	s.router.HandleFunc("/api/auth/check", s.handleAuthCheck).Methods("GET", "OPTIONS") // Debug endpoint
 
 	// Create authenticated router
 	authenticatedRouter := s.router.PathPrefix("/api").Subrouter()

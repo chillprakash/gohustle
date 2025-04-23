@@ -1,12 +1,13 @@
 package optionchain
 
 import (
-	"context"
-	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"gohustle/db"
 	"gohustle/logger"
+	"gohustle/types"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -30,8 +31,7 @@ type MetricsData struct {
 	UnderlyingPrice float64
 	SyntheticFuture float64
 	LowestStraddle  float64
-	CallLTP         float64
-	PutLTP          float64
+	ATMStrike       float64
 }
 
 // NewMetricsManager creates a new instance of MetricsManager with default intervals
@@ -56,32 +56,53 @@ func (m *MetricsManager) shouldStoreForInterval(timestamp time.Time, duration ti
 }
 
 // storeMetricsInPipeline adds commands to the Redis pipeline for storing metrics
-func (m *MetricsManager) storeMetricsInPipeline(pipe redis.Pipeliner, baseKey string, data *MetricsData, ttl time.Duration) {
-	// Only store non-zero values
-	if data.UnderlyingPrice > 0 {
-		pipe.ZAdd(context.Background(), fmt.Sprintf("%s:spot", baseKey),
-			redis.Z{Score: float64(data.Timestamp), Member: fmt.Sprintf("%.2f", data.UnderlyingPrice)})
-		pipe.Expire(context.Background(), fmt.Sprintf("%s:spot", baseKey), ttl)
+func (m *MetricsManager) storeMetricsInPipeline(pipe redis.Pipeliner, baseKey string, data *types.MetricsData, ttl time.Duration) {
+	// Get metrics store instance
+	metricsStore, err := db.GetMetricsStore()
+	if err != nil {
+		logger.L().Error("Failed to get metrics store", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
 	}
 
-	if data.SyntheticFuture > 0 {
-		pipe.ZAdd(context.Background(), fmt.Sprintf("%s:fair", baseKey),
-			redis.Z{Score: float64(data.Timestamp), Member: fmt.Sprintf("%.2f", data.SyntheticFuture)})
-		pipe.Expire(context.Background(), fmt.Sprintf("%s:fair", baseKey), ttl)
+	// Extract index and interval from baseKey (format: metrics:interval:index)
+	parts := strings.Split(baseKey, ":")
+	if len(parts) != 3 {
+		logger.L().Error("Invalid base key format", map[string]interface{}{
+			"base_key": baseKey,
+		})
+		return
 	}
 
-	if data.LowestStraddle > 0 {
-		pipe.ZAdd(context.Background(), fmt.Sprintf("%s:straddle", baseKey),
-			redis.Z{Score: float64(data.Timestamp), Member: fmt.Sprintf("%.2f", data.LowestStraddle)})
-		pipe.Expire(context.Background(), fmt.Sprintf("%s:straddle", baseKey), ttl)
+	interval := parts[1]
+	index := parts[2]
+
+	// Store metrics in SQLite
+	if err := metricsStore.StoreMetrics(index, interval, data); err != nil {
+		logger.L().Error("Failed to store metrics", map[string]interface{}{
+			"error":    err.Error(),
+			"index":    index,
+			"interval": interval,
+		})
+		return
 	}
+
+	// Run cleanup in a goroutine to avoid blocking
+	go func() {
+		if err := metricsStore.CleanupOldMetrics(ttl); err != nil {
+			logger.L().Error("Failed to cleanup old metrics", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}()
 }
 
 // calculateMetrics calculates all required metrics from the option chain data
-func (m *MetricsManager) calculateMetrics(chain []*StrikeData, underlyingPrice float64) *MetricsData {
+func (m *MetricsManager) calculateMetrics(chain []*StrikeData, underlyingPrice float64) *types.MetricsData {
 	var straddle float64
 	var callLTP, putLTP float64
-
+	var atmStrike float64
 	// Find ATM strike data
 	for _, item := range chain {
 		if item.IsATM && item.CE != nil && item.PE != nil {
@@ -92,6 +113,7 @@ func (m *MetricsManager) calculateMetrics(chain []*StrikeData, underlyingPrice f
 				"ce_pe_total": item.CEPETotal,
 			})
 			straddle = item.CEPETotal
+			atmStrike = item.Strike
 			callLTP = item.CE.LTP
 			putLTP = item.PE.LTP
 			break
@@ -104,12 +126,11 @@ func (m *MetricsManager) calculateMetrics(chain []*StrikeData, underlyingPrice f
 		syntheticFuture = underlyingPrice + callLTP - putLTP
 	}
 
-	return &MetricsData{
+	return &types.MetricsData{
 		Timestamp:       time.Now().UnixNano() / int64(time.Millisecond),
 		UnderlyingPrice: underlyingPrice,
 		SyntheticFuture: syntheticFuture,
 		LowestStraddle:  straddle,
-		CallLTP:         callLTP,
-		PutLTP:          putLTP,
+		ATMStrike:       atmStrike,
 	}
 }

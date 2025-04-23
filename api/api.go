@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
 
 	"gohustle/cache"
+	"gohustle/db"
 	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/optionchain"
@@ -20,7 +20,6 @@ import (
 	pb "gohustle/proto"
 
 	"github.com/gorilla/mux"
-	"github.com/redis/go-redis/v9"
 )
 
 // Server represents the HTTP API server
@@ -207,6 +206,7 @@ type TimeSeriesMetricsResponse struct {
 	UnderlyingPrice float64 `json:"underlying_price"`
 	SyntheticFuture float64 `json:"synthetic_future"`
 	LowestStraddle  float64 `json:"straddle"`
+	ATMStrike       float64 `json:"atm_strike"`
 }
 
 // CORSMiddleware adds CORS headers to responses
@@ -795,119 +795,39 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Get Redis cache instance
-	redisCache, err := cache.GetRedisCache()
+	// Get metrics store instance
+	metricsStore, err := db.GetMetricsStore()
 	if err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get Redis cache", err)
+		s.log.Error("Failed to get metrics store", map[string]interface{}{
+			"error": err.Error(),
+		})
+		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get metrics store", err)
 		return
 	}
 
-	tsDB := redisCache.GetTimeSeriesDB()
-	if tsDB == nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Time series DB not available", nil)
-		return
-	}
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	defer cancel()
-
-	// Prepare base key
-	baseKey := fmt.Sprintf("metrics:%s:%s", interval, index)
-
-	// Create pipeline for data fetch
-	pipe := tsDB.Pipeline()
-
-	// Get latest N entries for each metric using ZREVRANGE
-	spotCmd := pipe.ZRevRangeWithScores(ctx, fmt.Sprintf("%s:spot", baseKey), 0, int64(count-1))
-	fairCmd := pipe.ZRevRangeWithScores(ctx, fmt.Sprintf("%s:fair", baseKey), 0, int64(count-1))
-	straddleCmd := pipe.ZRevRangeWithScores(ctx, fmt.Sprintf("%s:straddle", baseKey), 0, int64(count-1))
-
-	// Execute pipeline
-	if _, err := pipe.Exec(ctx); err != nil {
+	// Fetch metrics from SQLite
+	metrics, err := metricsStore.GetMetrics(index, interval, count)
+	if err != nil {
+		s.log.Error("Failed to fetch metrics", map[string]interface{}{
+			"error":    err.Error(),
+			"index":    index,
+			"interval": interval,
+		})
 		SendErrorResponse(w, http.StatusInternalServerError, "Failed to fetch metrics", err)
 		return
 	}
 
-	// Get results with error handling
-	spots, err := spotCmd.Result()
-	if err != nil {
-		s.log.Error("Failed to get spot metrics", map[string]interface{}{
-			"error": err.Error(),
-			"key":   fmt.Sprintf("%s:spot", baseKey),
+	// Convert to response format
+	validMetrics := make([]*TimeSeriesMetricsResponse, 0, len(metrics))
+	for _, metric := range metrics {
+		validMetrics = append(validMetrics, &TimeSeriesMetricsResponse{
+			Timestamp:       metric.Timestamp,
+			UnderlyingPrice: metric.UnderlyingPrice,
+			SyntheticFuture: metric.SyntheticFuture,
+			LowestStraddle:  metric.LowestStraddle,
+			ATMStrike:       metric.ATMStrike,
 		})
 	}
-
-	fairs, err := fairCmd.Result()
-	if err != nil {
-		s.log.Error("Failed to get fair metrics", map[string]interface{}{
-			"error": err.Error(),
-			"key":   fmt.Sprintf("%s:fair", baseKey),
-		})
-	}
-
-	straddles, err := straddleCmd.Result()
-	if err != nil {
-		s.log.Error("Failed to get straddle metrics", map[string]interface{}{
-			"error": err.Error(),
-			"key":   fmt.Sprintf("%s:straddle", baseKey),
-		})
-	}
-
-	// Log the results count
-	s.log.Info("Redis query results", map[string]interface{}{
-		"spots":     len(spots),
-		"fairs":     len(fairs),
-		"straddles": len(straddles),
-	})
-
-	// Create map to store metrics by timestamp
-	metricsMap := make(map[int64]*TimeSeriesMetricsResponse)
-
-	// Helper function to add metric to map
-	addMetricToMap := func(z redis.Z, field string) {
-		timestamp := int64(z.Score)
-		if _, exists := metricsMap[timestamp]; !exists {
-			metricsMap[timestamp] = &TimeSeriesMetricsResponse{Timestamp: timestamp}
-		}
-
-		value := convertRedisZMemberToFloat64(z.Member)
-
-		switch field {
-		case "spot":
-			metricsMap[timestamp].UnderlyingPrice = value
-		case "fair":
-			metricsMap[timestamp].SyntheticFuture = value
-		case "straddle":
-			metricsMap[timestamp].LowestStraddle = value
-		}
-	}
-
-	// Process all metrics
-	if len(spots) > 0 {
-		for _, z := range spots {
-			addMetricToMap(z, "spot")
-		}
-	}
-	if len(fairs) > 0 {
-		for _, z := range fairs {
-			addMetricToMap(z, "fair")
-		}
-	}
-	if len(straddles) > 0 {
-		for _, z := range straddles {
-			addMetricToMap(z, "straddle")
-		}
-	}
-
-	// Convert map to slice and sort by timestamp (newest first)
-	validMetrics := make([]*TimeSeriesMetricsResponse, 0, len(metricsMap))
-	for _, metric := range metricsMap {
-		validMetrics = append(validMetrics, metric)
-	}
-	sort.Slice(validMetrics, func(i, j int) bool {
-		return validMetrics[i].Timestamp > validMetrics[j].Timestamp
-	})
 
 	resp := Response{
 		Success: true,

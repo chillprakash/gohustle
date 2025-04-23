@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"gohustle/cache"
 	"gohustle/core"
+	"gohustle/db"
 	"gohustle/logger"
 	"gohustle/zerodha"
 	"strconv"
@@ -173,44 +174,68 @@ func (m *OptionChainManager) GetLatestChain(index, expiry string) *OptionChainRe
 	return m.latestData[key]
 }
 
-// storeTimeSeriesMetrics stores the calculated metrics in Redis using sorted sets for different intervals
+// storeTimeSeriesMetrics stores the calculated metrics for different intervals
 func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index string, chain []*StrikeData, underlyingPrice float64) error {
-	// Create a context with longer timeout for Redis operations
+	// Create a context with timeout for database operations
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-
-	// Get time series DB
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		return fmt.Errorf("failed to get Redis cache: %w", err)
-	}
-
-	tsDB := redisCache.GetTimeSeriesDB()
-	if tsDB == nil {
-		return fmt.Errorf("time series DB not available")
-	}
 
 	// Calculate metrics once
 	metrics := m.metricsManager.calculateMetrics(chain, underlyingPrice)
 	now := time.Unix(0, metrics.Timestamp*int64(time.Millisecond))
 
-	// Create a pipeline for batch operations
-	pipe := tsDB.Pipeline()
+	// Create error channel to collect errors from goroutines
+	errChan := make(chan error, len(m.metricsManager.intervals))
+	var wg sync.WaitGroup
 
-	logger.L().Info("Calculated metrics", map[string]interface{}{
-		"metrics": metrics,
-	})
 	// Store metrics for each configured interval
 	for _, interval := range m.metricsManager.intervals {
 		if m.metricsManager.shouldStoreForInterval(now, interval.Duration) {
-			baseKey := fmt.Sprintf("metrics:%s:%s", interval.Name, index)
-			m.metricsManager.storeMetricsInPipeline(pipe, baseKey, metrics, interval.TTL)
+			wg.Add(1)
+			go func(interval IntervalConfig) {
+				defer wg.Done()
+
+				// Get metrics store instance
+				metricsStore, err := db.GetMetricsStore()
+				if err != nil {
+					errChan <- fmt.Errorf("failed to get metrics store for interval %s: %w", interval.Name, err)
+					return
+				}
+
+				// Store metrics in SQLite
+				if err := metricsStore.StoreMetrics(index, interval.Name, metrics); err != nil {
+					errChan <- fmt.Errorf("failed to store metrics for interval %s: %w", interval.Name, err)
+					return
+				}
+
+				// Run cleanup in a separate goroutine
+				go func() {
+					if err := metricsStore.CleanupOldMetrics(interval.TTL); err != nil {
+						m.log.Error("Failed to cleanup old metrics", map[string]interface{}{
+							"error":    err.Error(),
+							"interval": interval.Name,
+						})
+					}
+				}()
+			}(interval)
 		}
 	}
 
-	// Execute pipeline
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to store time series metrics: %w", err)
+	// Wait for all goroutines to complete
+	go func() {
+		wg.Wait()
+		close(errChan)
+	}()
+
+	// Collect any errors
+	var errors []string
+	for err := range errChan {
+		errors = append(errors, err.Error())
+	}
+
+	// If there were any errors, return them combined
+	if len(errors) > 0 {
+		return fmt.Errorf("errors storing metrics: %s", strings.Join(errors, "; "))
 	}
 
 	m.log.Info("Stored time series metrics", map[string]interface{}{
@@ -219,8 +244,6 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 		"spot":      metrics.UnderlyingPrice,
 		"fair":      metrics.SyntheticFuture,
 		"straddle":  metrics.LowestStraddle,
-		"call_ltp":  metrics.CallLTP,
-		"put_ltp":   metrics.PutLTP,
 	})
 
 	return nil
@@ -418,7 +441,8 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 			total := strikeData.CE.LTP + strikeData.PE.LTP
 			strikeData.CEPETotal = total
 
-			if total < lowestTotal {
+			// Only consider for ATM strike if both CE and PE have valid prices
+			if strikeData.CE.LTP > 0 && strikeData.PE.LTP > 0 && total < lowestTotal {
 				lowestTotal = total
 				atmStrike = strikeFloat
 			}

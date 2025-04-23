@@ -15,6 +15,7 @@ import (
 	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/optionchain"
+	"gohustle/types"
 	"gohustle/zerodha"
 
 	pb "gohustle/proto"
@@ -179,9 +180,13 @@ type OptionChainItem struct {
 
 // TimeSeriesMetricsRequest represents the request parameters for fetching time series metrics
 type TimeSeriesMetricsRequest struct {
-	Index    string `json:"index"`
-	Interval string `json:"interval"` // Valid values: 5s, 10s, 20s, 30s
-	Count    int    `json:"count"`    // Number of latest entries to fetch (max 1000)
+	Index              string `json:"index"`                          // Required: Index name (e.g., "BANKNIFTY")
+	Interval           string `json:"interval,omitempty"`             // Required for historical mode: 5s, 10s, 20s, 30s
+	Count              int    `json:"count,omitempty"`                // Required for historical mode: Number of points to fetch
+	Mode               string `json:"mode,omitempty"`                 // Optional: "historical" or "realtime", defaults to "historical"
+	SinceTimestamp     string `json:"since_timestamp,omitempty"`      // Optional: Get data after this timestamp
+	UntilTimestamp     string `json:"until_timestamp,omitempty"`      // Optional: Get data before this timestamp
+	LastKnownTimestamp string `json:"last_known_timestamp,omitempty"` // Optional: Only get points newer than this (for realtime mode)
 }
 
 // ValidIntervals contains the list of valid interval values and their durations
@@ -754,44 +759,24 @@ func convertRedisZMemberToFloat64(member interface{}) float64 {
 
 // handleGetTimeSeriesMetrics handles requests for time series metrics
 func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Request) {
-	// Parse query parameters
-	index := r.URL.Query().Get("index")
-	interval := r.URL.Query().Get("interval")
-	countStr := r.URL.Query().Get("count")
+	// Parse query parameters into request struct
+	req := TimeSeriesMetricsRequest{
+		Index:              r.URL.Query().Get("index"),
+		Interval:           r.URL.Query().Get("interval"),
+		Mode:               r.URL.Query().Get("mode"),
+		SinceTimestamp:     r.URL.Query().Get("since_timestamp"),
+		UntilTimestamp:     r.URL.Query().Get("until_timestamp"),
+		LastKnownTimestamp: r.URL.Query().Get("last_known_timestamp"),
+	}
 
-	// Validate required parameters
-	if index == "" {
+	// Set default mode if not specified
+	if req.Mode == "" {
+		req.Mode = "historical"
+	}
+
+	// Validate index (required for all modes)
+	if req.Index == "" {
 		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: index", nil)
-		return
-	}
-	if interval == "" {
-		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: interval", nil)
-		return
-	}
-	if countStr == "" {
-		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: count", nil)
-		return
-	}
-
-	// Parse and validate count
-	count, err := strconv.Atoi(countStr)
-	if err != nil {
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid count parameter. Must be an integer.", nil)
-		return
-	}
-	if count <= 0 {
-		SendErrorResponse(w, http.StatusBadRequest, "Count must be greater than 0", nil)
-		return
-	}
-	if count > 1000 {
-		SendErrorResponse(w, http.StatusBadRequest, "Count cannot exceed 1000", nil)
-		return
-	}
-
-	// Validate interval
-	_, ok := ValidIntervals[interval]
-	if !ok {
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid interval. Valid values are: 5s, 10s, 20s, 30s", nil)
 		return
 	}
 
@@ -805,13 +790,92 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Fetch metrics from SQLite
-	metrics, err := metricsStore.GetMetrics(index, interval, count)
+	var metrics []*types.MetricsData
+
+	switch req.Mode {
+	case "realtime":
+		// Handle real-time mode
+		if req.LastKnownTimestamp != "" {
+			// Parse last known timestamp
+			lastKnown, err := strconv.ParseInt(req.LastKnownTimestamp, 10, 64)
+			if err != nil {
+				SendErrorResponse(w, http.StatusBadRequest, "Invalid last_known_timestamp format", err)
+				return
+			}
+			// Get only newer points
+			metrics, err = metricsStore.GetMetricsAfterTimestamp(req.Index, lastKnown)
+		} else {
+			// Get latest point only
+			metrics, err = metricsStore.GetMetrics(req.Index, "5s", 1) // Use shortest interval for real-time
+		}
+
+	case "historical":
+		// Validate historical mode parameters
+		if req.Interval == "" {
+			SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter for historical mode: interval", nil)
+			return
+		}
+
+		// Validate interval
+		if _, ok := ValidIntervals[req.Interval]; !ok {
+			SendErrorResponse(w, http.StatusBadRequest, "Invalid interval. Valid values are: 5s, 10s, 20s, 30s", nil)
+			return
+		}
+
+		// Parse count if provided
+		if countStr := r.URL.Query().Get("count"); countStr != "" {
+			count, err := strconv.Atoi(countStr)
+			if err != nil {
+				SendErrorResponse(w, http.StatusBadRequest, "Invalid count parameter. Must be an integer.", nil)
+				return
+			}
+			if count <= 0 {
+				SendErrorResponse(w, http.StatusBadRequest, "Count must be greater than 0", nil)
+				return
+			}
+			if count > 1000 {
+				SendErrorResponse(w, http.StatusBadRequest, "Count cannot exceed 1000", nil)
+				return
+			}
+			req.Count = count
+		}
+
+		// Handle time range if provided
+		var startTime, endTime int64
+		if req.SinceTimestamp != "" {
+			startTime, err = strconv.ParseInt(req.SinceTimestamp, 10, 64)
+			if err != nil {
+				SendErrorResponse(w, http.StatusBadRequest, "Invalid since_timestamp format", err)
+				return
+			}
+		}
+		if req.UntilTimestamp != "" {
+			endTime, err = strconv.ParseInt(req.UntilTimestamp, 10, 64)
+			if err != nil {
+				SendErrorResponse(w, http.StatusBadRequest, "Invalid until_timestamp format", err)
+				return
+			}
+		}
+
+		if startTime > 0 && endTime > 0 {
+			metrics, err = metricsStore.GetMetricsInTimeRange(req.Index, req.Interval, startTime, endTime)
+		} else if req.Count > 0 {
+			metrics, err = metricsStore.GetMetrics(req.Index, req.Interval, req.Count)
+		} else {
+			// Default to last 50 points if no time range or count specified
+			metrics, err = metricsStore.GetMetrics(req.Index, req.Interval, 50)
+		}
+
+	default:
+		SendErrorResponse(w, http.StatusBadRequest, "Invalid mode. Must be 'historical' or 'realtime'", nil)
+		return
+	}
+
 	if err != nil {
 		s.log.Error("Failed to fetch metrics", map[string]interface{}{
-			"error":    err.Error(),
-			"index":    index,
-			"interval": interval,
+			"error": err.Error(),
+			"mode":  req.Mode,
+			"index": req.Index,
 		})
 		SendErrorResponse(w, http.StatusInternalServerError, "Failed to fetch metrics", err)
 		return
@@ -833,8 +897,10 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		Success: true,
 		Message: "Time series metrics retrieved successfully",
 		Data: map[string]interface{}{
-			"interval":        interval,
-			"requested_count": count,
+			"mode":            req.Mode,
+			"index":           req.Index,
+			"interval":        req.Interval,
+			"requested_count": req.Count,
 			"returned_count":  len(validMetrics),
 			"metrics":         validMetrics,
 		},

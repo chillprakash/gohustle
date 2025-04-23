@@ -11,9 +11,9 @@ import (
 
 	"gohustle/api"
 	"gohustle/auth"
+	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/core"
-	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/nats"
 	"gohustle/scheduler"
@@ -134,130 +134,164 @@ func startAPIServer(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
-func initializeProcess() (context.Context, context.CancelFunc, chan os.Signal, error) {
-	// No need to pass logger anymore
+// initialize performs initial setup for the application
+func initialize() error {
+	// Write PID file
 	pid := os.Getpid()
 	if err := os.WriteFile("app.pid", []byte(fmt.Sprintf("%d", pid)), 0644); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to write PID file: %w", err)
+		return fmt.Errorf("failed to write PID file: %w", err)
 	}
 
-	// Set up signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	return ctx, cancel, sigChan, nil
-}
-
-func main() {
-	logger.L().Info("Application starting...", nil)
-
-	ctx, cancel, sigChan, err := initializeProcess()
-	if err != nil {
-		logger.L().Fatal("Failed to initialize process", map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-	defer cancel()
-	defer os.Remove("app.pid")
-
+	// Get configuration
 	cfg := config.GetConfig()
+	if cfg == nil {
+		return fmt.Errorf("failed to load configuration")
+	}
 
-	// Initialize auth system
+	// Initialize auth system with default credentials if not set in config
+	username := cfg.Auth.Username
+	if username == "" {
+		username = "admin"
+	}
+	password := cfg.Auth.Password
+	if password == "" {
+		password = "admin"
+	}
+
 	if err := auth.Initialize(auth.Config{
-		Username: cfg.Auth.Username,
-		Password: cfg.Auth.Password,
+		Username: username,
+		Password: password,
 	}); err != nil {
-		logger.L().Fatal("Failed to initialize auth system", map[string]interface{}{
-			"error": err.Error(),
-		})
+		return fmt.Errorf("failed to initialize auth system: %w", err)
 	}
 
 	logger.L().Info("Auth system initialized", map[string]interface{}{
-		"username": cfg.Auth.Username,
+		"username": username,
 	})
 
-	// Create error and done channels
-	errChan := make(chan error, 2) // Increased to 2 to handle both data processing and API server errors
-	shutdownComplete := make(chan struct{})
+	return nil
+}
 
-	// Start data processing in a goroutine
-	go func() {
-		if err := startDataProcessing(ctx, cfg); err != nil {
-			errChan <- err
+// cleanup performs cleanup operations before shutdown
+func cleanup(ctx context.Context) error {
+	// Get API server and shut it down
+	apiServer := api.GetAPIServer()
+	if err := apiServer.Shutdown(); err != nil {
+		return fmt.Errorf("error shutting down API server: %w", err)
+	}
+
+	// Close NATS connections
+	natsHelper := nats.GetNATSHelper()
+	natsHelper.Shutdown()
+
+	// Close Redis connections
+	redisCache, err := cache.GetRedisCache()
+	if err == nil && redisCache != nil {
+		if err := redisCache.Close(); err != nil {
+			logger.L().Error("Error closing Redis connections", map[string]interface{}{
+				"error": err.Error(),
+			})
 		}
-	}()
+	}
 
-	// Start API server in a goroutine
-	go func() {
-		if err := startAPIServer(ctx, cfg); err != nil {
-			errChan <- err
-		}
-	}()
-
-	// Wait for either error or shutdown signal
-	var shutdownErr error
-	select {
-	case err := <-errChan:
-		logger.L().Error("Application error", map[string]interface{}{
+	// Remove PID file
+	if err := os.Remove("app.pid"); err != nil {
+		logger.L().Error("Error removing PID file", map[string]interface{}{
 			"error": err.Error(),
-		})
-		shutdownErr = err
-	case sig := <-sigChan:
-		logger.L().Info("Received shutdown signal", map[string]interface{}{
-			"signal": sig.String(),
 		})
 	}
 
-	// Start graceful shutdown with timeout
-	logger.L().Info("Starting graceful shutdown")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer shutdownCancel()
+	return nil
+}
 
+func main() {
+	log := logger.L()
+	log.Info("Starting application", nil)
+
+	// Initialize process
+	if err := initialize(); err != nil {
+		log.Fatal("Failed to initialize", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Get configuration
+	cfg := config.GetConfig()
+	if cfg == nil {
+		log.Fatal("Failed to load configuration", nil)
+	}
+
+	// Initialize Redis cache
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		log.Fatal("Failed to initialize Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Verify Redis connections
+	if err := redisCache.Ping(); err != nil {
+		log.Fatal("Failed to connect to Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Create error and done channels
+	errChan := make(chan error, 2)
+	done := make(chan bool)
+
+	// Create root context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Start data processing
 	go func() {
+		if err := startDataProcessing(ctx, cfg); err != nil {
+			errChan <- fmt.Errorf("failed to start data processing: %w", err)
+		}
+	}()
+
+	// Start API server
+	go func() {
+		if err := startAPIServer(ctx, cfg); err != nil {
+			errChan <- fmt.Errorf("failed to start API server: %w", err)
+		}
+	}()
+
+	// Handle shutdown
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+
+		log.Info("Shutdown signal received", nil)
+
+		// Create context with timeout for graceful shutdown
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+
 		// Cancel the main context to initiate shutdown
 		cancel()
 
-		// Get ParquetStore instance and close all writers
-		store := filestore.GetParquetStore()
-		if err := store.Close(); err != nil {
-			logger.L().Error("Error closing Parquet store", map[string]interface{}{
-				"error": err.Error(),
-			})
-			shutdownErr = err
-		}
-
-		// Close NATS connections
-		natsHelper := nats.GetNATSHelper()
-		natsHelper.Shutdown()
-
-		// Get API server and shut it down
-		apiServer := api.GetAPIServer()
-		if err := apiServer.Shutdown(); err != nil {
-			logger.L().Error("Error shutting down API server", map[string]interface{}{
+		// Cleanup and shutdown
+		if err := cleanup(shutdownCtx); err != nil {
+			log.Error("Error during cleanup", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}
 
-		close(shutdownComplete)
+		close(done)
 	}()
 
-	// Wait for shutdown to complete or timeout
+	// Wait for error or done signal
 	select {
-	case <-shutdownComplete:
-		if shutdownErr != nil {
-			logger.L().Error("Shutdown completed with errors", map[string]interface{}{
-				"error": shutdownErr.Error(),
-			})
-			os.Exit(1)
-		}
-		logger.L().Info("Clean shutdown successful", nil)
-	case <-shutdownCtx.Done():
-		logger.L().Error("Shutdown timed out, forcing exit", nil)
-		os.Exit(1)
+	case err := <-errChan:
+		log.Fatal("Application error", map[string]interface{}{
+			"error": err.Error(),
+		})
+	case <-done:
+		log.Info("Application shutdown complete", nil)
 	}
-
-	os.Exit(0)
 }
 
 // Helper function to convert string tokens to uint32

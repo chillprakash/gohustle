@@ -127,3 +127,68 @@ func (m *MetricsStore) CleanupOldMetrics(retentionPeriod time.Duration) error {
 	_, err := m.db.Exec("DELETE FROM metrics WHERE timestamp < ?", cutoff)
 	return err
 }
+
+// GetMetricsAfterTimestamp retrieves metrics newer than the specified timestamp
+func (m *MetricsStore) GetMetricsAfterTimestamp(indexName string, timestamp int64) ([]*types.MetricsData, error) {
+	rows, err := m.db.Query(`
+		SELECT timestamp, underlying_price, synthetic_future, lowest_straddle, atm_strike
+		FROM metrics
+		WHERE index_name = ? AND timestamp > ?
+		ORDER BY timestamp ASC
+	`, indexName, timestamp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query metrics after timestamp: %w", err)
+	}
+	defer rows.Close()
+
+	var metrics []*types.MetricsData
+	for rows.Next() {
+		var m types.MetricsData
+		if err := rows.Scan(
+			&m.Timestamp,
+			&m.UnderlyingPrice,
+			&m.SyntheticFuture,
+			&m.LowestStraddle,
+			&m.ATMStrike,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan metric row: %w", err)
+		}
+		metrics = append(metrics, &m)
+	}
+
+	return metrics, nil
+}
+
+// GetMetricsInTimeRange retrieves metrics within the specified time range
+func (m *MetricsStore) GetMetricsInTimeRange(indexName, interval string, startTime, endTime int64) ([]*types.MetricsData, error) {
+	rows, err := m.db.Query(`
+		SELECT timestamp, underlying_price, synthetic_future, lowest_straddle, atm_strike
+		FROM metrics
+		WHERE index_name = ? 
+		AND interval = ?
+		AND timestamp >= ? 
+		AND timestamp <= ?
+		ORDER BY timestamp DESC
+	`, indexName, interval, startTime, endTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query metrics in time range: %w", err)
+	}
+	defer rows.Close()
+
+	var metrics []*types.MetricsData
+	for rows.Next() {
+		var m types.MetricsData
+		if err := rows.Scan(
+			&m.Timestamp,
+			&m.UnderlyingPrice,
+			&m.SyntheticFuture,
+			&m.LowestStraddle,
+			&m.ATMStrike,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan metric row: %w", err)
+		}
+		metrics = append(metrics, &m)
+	}
+
+	return metrics, nil
+}

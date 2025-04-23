@@ -238,7 +238,7 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 		return fmt.Errorf("errors storing metrics: %s", strings.Join(errors, "; "))
 	}
 
-	m.log.Info("Stored time series metrics", map[string]interface{}{
+	m.log.Debug("Stored time series metrics", map[string]interface{}{
 		"index":     index,
 		"timestamp": metrics.Timestamp,
 		"spot":      metrics.UnderlyingPrice,
@@ -255,35 +255,59 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second) // Increased timeout for entire calculation
 	defer cancel()
 
-	// Get Redis and in-memory cache instances
+	// Get Redis cache instance with initialization check
 	redisCache, err := cache.GetRedisCache()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
+		m.log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("redis cache not initialized: %w", err)
 	}
 
-	// Configure Redis client timeouts
+	// Verify Redis DBs are initialized
 	ltpDB := redisCache.GetLTPDB3()
 	positionsDB := redisCache.GetPositionsDB2()
 	if ltpDB == nil || positionsDB == nil {
-		return nil, fmt.Errorf("redis initialization failed")
+		m.log.Error("Redis DBs not initialized", map[string]interface{}{
+			"ltpDB_nil":       ltpDB == nil,
+			"positionsDB_nil": positionsDB == nil,
+		})
+		return nil, fmt.Errorf("redis databases not properly initialized")
 	}
 
-	// Set Redis operation timeouts
-	ltpDB.Options().WriteTimeout = 10 * time.Second // Increased from default
-	ltpDB.Options().ReadTimeout = 10 * time.Second  // Increased from default
+	// Configure Redis client timeouts
+	ltpDB.Options().WriteTimeout = 10 * time.Second
+	ltpDB.Options().ReadTimeout = 10 * time.Second
 	positionsDB.Options().WriteTimeout = 10 * time.Second
 	positionsDB.Options().ReadTimeout = 10 * time.Second
 
+	// Get in-memory cache instance
 	inMemCache := cache.GetInMemoryCacheInstance()
+	if inMemCache == nil {
+		return nil, fmt.Errorf("in-memory cache not initialized")
+	}
 
 	// Get strikes for this index and expiry
 	strikesKey := fmt.Sprintf("strikes:%s_%s", index, expiry)
 	strikesValue, exists := inMemCache.Get(strikesKey)
 	if !exists {
+		m.log.Error("No strikes found", map[string]interface{}{
+			"index":  index,
+			"expiry": expiry,
+		})
 		return nil, fmt.Errorf("no strikes found for index %s and expiry %s", index, expiry)
 	}
 
-	allStrikes := strikesValue.([]string)
+	allStrikes, ok := strikesValue.([]string)
+	if !ok {
+		m.log.Error("Invalid strikes data type", map[string]interface{}{
+			"index":  index,
+			"expiry": expiry,
+			"type":   fmt.Sprintf("%T", strikesValue),
+		})
+		return nil, fmt.Errorf("invalid strikes data type")
+	}
+
 	if len(allStrikes) == 0 {
 		return nil, fmt.Errorf("empty strikes list")
 	}

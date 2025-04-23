@@ -106,7 +106,7 @@ func (m *MetricsManager) calculateMetrics(chain []*StrikeData, underlyingPrice f
 	// Find ATM strike data
 	for _, item := range chain {
 		if item.IsATM && item.CE != nil && item.PE != nil {
-			logger.L().Info("Found ATM strike data", map[string]interface{}{
+			logger.L().Debug("Found ATM strike data", map[string]interface{}{
 				"strike":      item.Strike,
 				"ce_ltp":      item.CE.LTP,
 				"pe_ltp":      item.PE.LTP,

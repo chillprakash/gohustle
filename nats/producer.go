@@ -351,7 +351,7 @@ func (p *TickProducer) publishBatch(ctx context.Context, batch *batchJob) {
 	elapsedMs := time.Since(startTime).Milliseconds()
 	if elapsedMs > 100 {
 		// Log slow batches
-		p.log.Info("Batch publishing completed", map[string]interface{}{
+		p.log.Debug("Batch publishing completed", map[string]interface{}{
 			"size":         batchSize,
 			"success":      successCount,
 			"failed":       batchSize - successCount,

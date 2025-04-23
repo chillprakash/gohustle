@@ -217,37 +217,46 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 
 	// Store expiries in memory cache
 	for instrument, dates := range expiries {
-		// Convert dates to string format
+		// Get today's date truncated to start of day
+		today := time.Now().Truncate(24 * time.Hour)
+
+		// Filter and convert valid dates to string format
 		dateStrs := make([]string, 0, len(dates))
 		for _, date := range dates {
-			dateStrs = append(dateStrs, date.Format("2006-01-02"))
-		}
-
-		// Key for instrument expiries
-		key := fmt.Sprintf("instrument:expiries:%s", instrument)
-
-		// Store dates as string slice
-		cache.Set(key, dateStrs, 7*24*time.Hour) // Cache for 7 days
-
-		// Find and store nearest expiry
-		var nearestExpiry string
-		for _, dateStr := range dateStrs {
-			date, _ := time.Parse("2006-01-02", dateStr)
-			if date.Before(now) {
-				continue
-			}
-			if nearestExpiry == "" || date.Before(now) {
-				nearestExpiry = dateStr
+			// Only include dates equal to or after today
+			if !date.Before(today) {
+				dateStrs = append(dateStrs, date.Format("2006-01-02"))
 			}
 		}
 
-		if nearestExpiry != "" {
-			nearestKey := fmt.Sprintf("instrument:nearest_expiry:%s", instrument)
-			cache.Set(nearestKey, nearestExpiry, 7*24*time.Hour)
-			log.Info("Stored nearest expiry for instrument", map[string]interface{}{
-				"instrument": instrument,
-				"expiry":     nearestExpiry,
-			})
+		// Only proceed if we have valid future dates
+		if len(dateStrs) > 0 {
+			// Key for instrument expiries
+			key := fmt.Sprintf("instrument:expiries:%s", instrument)
+
+			// Store dates as string slice
+			cache.Set(key, dateStrs, 7*24*time.Hour) // Cache for 7 days
+
+			// Find and store nearest expiry
+			var nearestExpiry string
+			for _, dateStr := range dateStrs {
+				date, _ := time.Parse("2006-01-02", dateStr)
+				if date.Before(now) {
+					continue
+				}
+				if nearestExpiry == "" || date.Before(now) {
+					nearestExpiry = dateStr
+				}
+			}
+
+			if nearestExpiry != "" {
+				nearestKey := fmt.Sprintf("instrument:nearest_expiry:%s", instrument)
+				cache.Set(nearestKey, nearestExpiry, 7*24*time.Hour)
+				log.Info("Stored nearest expiry for instrument", map[string]interface{}{
+					"instrument": instrument,
+					"expiry":     nearestExpiry,
+				})
+			}
 		}
 	}
 

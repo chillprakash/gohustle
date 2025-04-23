@@ -295,33 +295,16 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 
 	// Extract strike price from trading symbol
 	inmemoryCache := cache.GetInMemoryCacheInstance()
-	strike_key := fmt.Sprintf("strike:%d", pos.InstrumentToken)
-	strikePrice, ok := inmemoryCache.Get(strike_key)
+	strikePrice, ok := inmemoryCache.Get(fmt.Sprintf("%d", pos.InstrumentToken))
 	if !ok {
 		pm.log.Error("Failed to get strike price for moves calculation", map[string]interface{}{
-			"token":  pos.InstrumentToken,
-			"symbol": pos.Tradingsymbol,
-			"key":    strike_key,
+			"token": pos.InstrumentToken,
 		})
 		return moves
 	}
 
-	var strike float64
-	switch v := strikePrice.(type) {
-	case float64:
-		strike = v
-	case string:
-		var err error
-		strike, err = strconv.ParseFloat(v, 64)
-		if err != nil {
-			pm.log.Error("Failed to parse strike price for moves calculation", map[string]interface{}{
-				"token":  pos.InstrumentToken,
-				"strike": v,
-				"error":  err.Error(),
-			})
-			return moves
-		}
-	default:
+	strike, ok := strikePrice.(float64)
+	if !ok {
 		pm.log.Error("Invalid strike price type for moves calculation", map[string]interface{}{
 			"token": pos.InstrumentToken,
 			"type":  fmt.Sprintf("%T", strikePrice),

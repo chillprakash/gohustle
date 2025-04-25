@@ -58,10 +58,10 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	// Create lookup map with expiry vs token map
 	kiteConnect.CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx)
 
-	kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetIndicesToSubscribeForIntraday())
+	kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetAllIndices())
 
 	// Get upcoming expiry tokens for configured indices
-	tokens, err := kiteConnect.GetUpcomingExpiryTokensForIndices(ctx, indices.GetIndicesToSubscribeForIntraday())
+	tokens, err := kiteConnect.GetUpcomingExpiryTokensForIndices(ctx, indices.GetAllIndices())
 	if err != nil {
 		return fmt.Errorf("failed to get upcoming expiry tokens: %w", err)
 	}

@@ -17,7 +17,7 @@ const (
 	MaxReconnectAttempts   = 3
 	PingInterval           = 20 * time.Second
 	MaxPingOutstanding     = 2
-	PublishAsyncMaxPending = 128 * 1024
+	PublishAsyncMaxPending = 10000
 )
 
 // NATSHelper manages NATS connections
@@ -187,11 +187,11 @@ func (n *NATSHelper) Connect(ctx context.Context) error {
 		Subjects:   []string{"ticks.>"},
 		Storage:    nats.FileStorage,
 		MaxAge:     30 * time.Minute,
-		MaxBytes:   8 * 1024 * 1024 * 1024, // 8GB
+		MaxBytes:   50 * 1024 * 1024, // 50MB
 		Replicas:   1,
 		Discard:    nats.DiscardOld,
 		MaxMsgs:    -1,
-		MaxMsgSize: 8 * 1024 * 1024, // 8MB max message size
+		MaxMsgSize: 10 * 1024, // 10KB max message size
 	}
 
 	// If stream exists, preserve its retention policy

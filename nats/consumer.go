@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	DefaultConsumerWorkers = 20
-	ChannelBuffer          = 500000 // Increased from 10000 to 100000 for high-frequency data
+	DefaultConsumerWorkers = 10
+	ChannelBuffer          = 50000 // Increased from 10000 to 100000 for high-frequency data
 	StreamName             = "tick_stream"
 	MaxMsgAge              = 24 * time.Hour
 	MaxBytes               = 1024 * 1024 * 1024 // 1GB max storage

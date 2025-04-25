@@ -215,8 +215,19 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 	cache := cache.GetInMemoryCacheInstance()
 	now := time.Now().Truncate(24 * time.Hour)
 
+	// Get allowed indices from core package
+	allowedIndices := core.GetIndices().GetAllNames()
+
 	// Store expiries in memory cache
 	for instrument, dates := range expiries {
+		// Filter: only process instruments in our allowed list
+		if !slices.Contains(allowedIndices, instrument) {
+			log.Info("Skipping instrument not in allowed list", map[string]interface{}{
+				"instrument": instrument,
+			})
+			continue
+		}
+
 		// Get today's date truncated to start of day
 		today := time.Now().Truncate(24 * time.Hour)
 
@@ -260,16 +271,18 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 		}
 	}
 
-	// Store list of instruments
+	// Store list of instruments (only allowed ones)
 	instrumentsKey := "instrument:expiries:list"
-	instruments := make([]string, 0, len(expiries))
+	instruments := make([]string, 0)
 	for instrument := range expiries {
-		instruments = append(instruments, instrument)
+		if slices.Contains(allowedIndices, instrument) {
+			instruments = append(instruments, instrument)
+		}
 	}
 	cache.Set(instrumentsKey, instruments, 7*24*time.Hour)
 
 	log.Info("Successfully stored expiries in memory cache", map[string]interface{}{
-		"instruments_count": len(expiries),
+		"instruments_count": len(instruments),
 		"expiries":          formatExpiryMapForLog(expiries),
 	})
 

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -18,19 +20,19 @@ import (
 	"gohustle/types"
 	"gohustle/zerodha"
 
-	pb "gohustle/proto"
-
 	"github.com/gorilla/mux"
 )
 
 // Server represents the HTTP API server
 type Server struct {
-	router *mux.Router
-	server *http.Server
-	port   string
-	ctx    context.Context
-	cancel context.CancelFunc
-	log    *logger.Logger
+	router       *mux.Router
+	server       *http.Server
+	port         string
+	ctx          context.Context
+	cancel       context.CancelFunc
+	log          *logger.Logger
+	tickStore    *filestore.TickStore
+	parquetStore *filestore.ParquetStore
 }
 
 // Response is a standard API response structure
@@ -74,11 +76,13 @@ func GetAPIServer() *Server {
 	once.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		instance = &Server{
-			router: mux.NewRouter(),
-			port:   "8080", // Default port, can be changed
-			ctx:    ctx,
-			cancel: cancel,
-			log:    logger.L(),
+			router:       mux.NewRouter(),
+			port:         "8080", // Default port, can be changed
+			ctx:          ctx,
+			cancel:       cancel,
+			log:          logger.L(),
+			tickStore:    filestore.GetTickStore(),
+			parquetStore: filestore.GetParquetStore(),
 		}
 		// Initialize routes
 		instance.setupRoutes()
@@ -98,9 +102,9 @@ func (s *Server) Start(ctx context.Context) error {
 	s.server = &http.Server{
 		Addr:         ":" + s.port,
 		Handler:      s.router,
-		ReadTimeout:  300 * time.Second, // Increased from 15s to 60s
-		WriteTimeout: 300 * time.Second, // Increased from 15s to 60s
-		IdleTimeout:  600 * time.Second, // Increased from 60s to 120s
+		ReadTimeout:  2400 * time.Second, // Reduced from 300s
+		WriteTimeout: 2400 * time.Second, // Reduced from 300s
+		IdleTimeout:  2400 * time.Second, // Reduced from 600s
 	}
 
 	// Start the server in a goroutine
@@ -108,8 +112,8 @@ func (s *Server) Start(ctx context.Context) error {
 		s.log.Info("Starting API server", map[string]interface{}{
 			"port": s.port,
 			"timeouts": map[string]string{
-				"read":  "60s",
-				"write": "60s",
+				"read":  "30s",
+				"write": "30s",
 				"idle":  "120s",
 			},
 		})
@@ -337,254 +341,133 @@ func (s *Server) handleGetMarketStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-// handleWalToParquet handles the conversion of WAL data to Parquet format
-func (s *Server) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
-	var req WalToParquetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err)
-		return
-	}
-
-	// Validate request
-	if err := validateWalToParquetRequest(&req); err != nil {
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid request parameters", err)
-		return
-	}
-
-	// Get tick store instance
-	tickStore := filestore.GetTickStore()
-
-	// Start conversion
-	startTime := time.Now()
-
-	// Read ticks from WAL
-	ticks, err := tickStore.ReadTicks(req.IndexName, req.Date)
-	if err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to read ticks from WAL", err)
-		return
-	}
-
-	if len(ticks) == 0 {
-		SendErrorResponse(w, http.StatusNotFound, fmt.Sprintf("No ticks found for index %s on date %s", req.IndexName, req.Date), nil)
-		return
-	}
-
-	// Convert protobuf ticks to parquet records
-	records := make([]filestore.TickRecord, len(ticks))
-	for i, tick := range ticks {
-		records[i] = convertProtoTickToParquetRecord(tick)
-	}
-
-	// Get parquet store instance
-	parquetStore := filestore.GetParquetStore()
-
-	// Write to parquet file
-	writer, err := parquetStore.GetOrCreateWriter(req.ParquetPath)
-	if err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to create Parquet writer", err)
-		return
-	}
-
-	// Write records in batches
-	const batchSize = 100000
-	for i := 0; i < len(records); i += batchSize {
-		end := i + batchSize
-		if end > len(records) {
-			end = len(records)
-		}
-		if err := parquetStore.WriteBatch(req.IndexName, records[i:end]); err != nil {
-			SendErrorResponse(w, http.StatusInternalServerError, "Failed to write batch to Parquet file", err)
-			return
-		}
-	}
-
-	// Get file info for response
-	stats, err := writer.GetStats()
-	if err != nil {
-		s.log.Error("Failed to get Parquet file stats", map[string]interface{}{
-			"error": err.Error(),
-			"path":  req.ParquetPath,
-		})
-	}
-
-	s.log.Info("Parquet file stats", map[string]interface{}{
-		"path":  req.ParquetPath,
-		"stats": stats,
+// Helper functions for HTTP responses
+func sendErrorResponse(w http.ResponseWriter, message string, code int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": message,
 	})
-
-	resp := Response{
-		Success: true,
-		Message: "WAL to Parquet conversion successful",
-		Data: map[string]interface{}{
-			"records_count":     len(records),
-			"uncompressed_size": stats.UncompressedSize,
-			"compressed_size":   stats.CompressedSize,
-			"compression_ratio": stats.CompressionRatio,
-			"conversion_time":   time.Since(startTime).String(),
-			"parquet_path":      req.ParquetPath,
-		},
-	}
-
-	SendJSONResponse(w, http.StatusOK, resp)
 }
 
-// validateWalToParquetRequest validates the request parameters
-func validateWalToParquetRequest(req *WalToParquetRequest) error {
-	if req.IndexName == "" {
-		return fmt.Errorf("index_name is required")
+func sendJSONResponse(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+// Add after imports
+func (s *Server) readRawParquetSamples(filePath string, numSamples int) error {
+	s.log.Info("Reading parquet file samples", map[string]interface{}{
+		"file":        filePath,
+		"num_samples": numSamples,
+	})
+
+	// Use the existing parquet store to read samples
+	store := filestore.GetParquetStore()
+	samples, err := store.ReadSamples(filePath, numSamples)
+	if err != nil {
+		return fmt.Errorf("failed to read parquet samples: %w", err)
 	}
 
-	if req.Date == "" {
-		return fmt.Errorf("date is required")
-	}
-
-	// Validate date format (YYYY-MM-DD)
-	if _, err := time.Parse("2006-01-02", req.Date); err != nil {
-		return fmt.Errorf("invalid date format, expected YYYY-MM-DD")
-	}
-
-	if req.ParquetPath == "" {
-		return fmt.Errorf("parquet_path is required")
-	}
-
-	// Set default values if not provided
-	if req.Compression == "" {
-		req.Compression = "SNAPPY" // Default compression
-	}
-
-	if req.RowGroupSize == 0 {
-		req.RowGroupSize = 100000 // Default to 100k rows per group
+	// Log each sample
+	for i, sample := range samples {
+		s.log.Info("Sample record", map[string]interface{}{
+			"index":         i + 1,
+			"timestamp":     sample.ExchangeTimestamp.Time.Unix(),
+			"instrument":    sample.InstrumentToken,
+			"last_price":    sample.LastPrice,
+			"volume":        sample.VolumeTraded,
+			"received_time": sample.ExchangeTimestamp.Time.Unix(),
+		})
 	}
 
 	return nil
 }
 
-// convertProtoTickToParquetRecord converts a protobuf tick to a parquet record
-func convertProtoTickToParquetRecord(tick *pb.TickData) filestore.TickRecord {
-	record := filestore.TickRecord{
-		InstrumentToken:    int64(tick.InstrumentToken),
-		IsTradable:         tick.IsTradable,
-		IsIndex:            tick.IsIndex,
-		Mode:               tick.Mode,
-		LastPrice:          tick.LastPrice,
-		LastTradedQuantity: int32(tick.LastTradedQuantity),
-		AverageTradePrice:  tick.AverageTradePrice,
-		VolumeTraded:       int32(tick.VolumeTraded),
-		TotalBuyQuantity:   int32(tick.TotalBuyQuantity),
-		TotalSellQuantity:  int32(tick.TotalSellQuantity),
-		TotalBuy:           int32(tick.TotalBuy),
-		TotalSell:          int32(tick.TotalSell),
-		NetChange:          tick.NetChange,
+// Update handleWalToParquet to use the method
+func (s *Server) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
+	// Parse request
+	var req WalToParquetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	// Convert timestamps
-	record.Timestamp.Time = time.Unix(0, tick.Timestamp)
-	record.Timestamp.Valid = true
-
-	if tick.LastTradeTime > 0 {
-		record.LastTradeTime.Time = time.Unix(0, tick.LastTradeTime)
-		record.LastTradeTime.Valid = true
+	// Validate required fields
+	if req.IndexName == "" {
+		sendErrorResponse(w, "index_name is required", http.StatusBadRequest)
+		return
+	}
+	if req.Date == "" {
+		sendErrorResponse(w, "date is required", http.StatusBadRequest)
+		return
 	}
 
-	if tick.TickRecievedTime > 0 {
-		record.TickReceivedTime.Time = time.Unix(0, tick.TickRecievedTime)
-		record.TickReceivedTime.Valid = true
+	// Create output directory if not specified
+	if req.ParquetPath == "" {
+		req.ParquetPath = filepath.Join(filestore.DefaultParquetDir, fmt.Sprintf("%s_%s.parquet", req.IndexName, req.Date))
 	}
 
-	if tick.TickStoredInDbTime > 0 {
-		record.TickStoredInDbTime.Time = time.Unix(0, tick.TickStoredInDbTime)
-		record.TickStoredInDbTime.Valid = true
+	// Ensure output directory exists
+	if err := os.MkdirAll(filepath.Dir(req.ParquetPath), 0755); err != nil {
+		sendErrorResponse(w, fmt.Sprintf("failed to create output directory: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	// Convert OHLC data
-	if tick.Ohlc != nil {
-		record.OhlcOpen = tick.Ohlc.Open
-		record.OhlcHigh = tick.Ohlc.High
-		record.OhlcLow = tick.Ohlc.Low
-		record.OhlcClose = tick.Ohlc.Close
+	// Create Arrow converter
+	converter := filestore.NewArrowConverter()
+
+	// Start conversion with timeout context
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+
+	// Create error channel for monitoring conversion
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- converter.ConvertWALToParquet(req.IndexName, req.Date, req.ParquetPath)
+	}()
+
+	// Wait for completion or timeout
+	select {
+	case err := <-errChan:
+		if err != nil {
+			s.log.Error("Failed to convert WAL to Parquet", map[string]interface{}{
+				"error": err.Error(),
+				"index": req.IndexName,
+				"date":  req.Date,
+			})
+			sendErrorResponse(w, fmt.Sprintf("conversion failed: %v", err), http.StatusInternalServerError)
+			return
+		}
+	case <-ctx.Done():
+		sendErrorResponse(w, "operation timed out after 10 minutes", http.StatusGatewayTimeout)
+		return
 	}
 
-	// Convert market depth data
-	if tick.Depth != nil {
-		// Buy side
-		if len(tick.Depth.Buy) >= 1 {
-			record.DepthBuyPrice1 = tick.Depth.Buy[0].Price
-			record.DepthBuyQuantity1 = int32(tick.Depth.Buy[0].Quantity)
-			record.DepthBuyOrders1 = int32(tick.Depth.Buy[0].Orders)
-		}
-		if len(tick.Depth.Buy) >= 2 {
-			record.DepthBuyPrice2 = tick.Depth.Buy[1].Price
-			record.DepthBuyQuantity2 = int32(tick.Depth.Buy[1].Quantity)
-			record.DepthBuyOrders2 = int32(tick.Depth.Buy[1].Orders)
-		}
-		if len(tick.Depth.Buy) >= 3 {
-			record.DepthBuyPrice3 = tick.Depth.Buy[2].Price
-			record.DepthBuyQuantity3 = int32(tick.Depth.Buy[2].Quantity)
-			record.DepthBuyOrders3 = int32(tick.Depth.Buy[2].Orders)
-		}
-		if len(tick.Depth.Buy) >= 4 {
-			record.DepthBuyPrice4 = tick.Depth.Buy[3].Price
-			record.DepthBuyQuantity4 = int32(tick.Depth.Buy[3].Quantity)
-			record.DepthBuyOrders4 = int32(tick.Depth.Buy[3].Orders)
-		}
-		if len(tick.Depth.Buy) >= 5 {
-			record.DepthBuyPrice5 = tick.Depth.Buy[4].Price
-			record.DepthBuyQuantity5 = int32(tick.Depth.Buy[4].Quantity)
-			record.DepthBuyOrders5 = int32(tick.Depth.Buy[4].Orders)
-		}
-
-		// Sell side
-		if len(tick.Depth.Sell) >= 1 {
-			record.DepthSellPrice1 = tick.Depth.Sell[0].Price
-			record.DepthSellQuantity1 = int32(tick.Depth.Sell[0].Quantity)
-			record.DepthSellOrders1 = int32(tick.Depth.Sell[0].Orders)
-		}
-		if len(tick.Depth.Sell) >= 2 {
-			record.DepthSellPrice2 = tick.Depth.Sell[1].Price
-			record.DepthSellQuantity2 = int32(tick.Depth.Sell[1].Quantity)
-			record.DepthSellOrders2 = int32(tick.Depth.Sell[1].Orders)
-		}
-		if len(tick.Depth.Sell) >= 3 {
-			record.DepthSellPrice3 = tick.Depth.Sell[2].Price
-			record.DepthSellQuantity3 = int32(tick.Depth.Sell[2].Quantity)
-			record.DepthSellOrders3 = int32(tick.Depth.Sell[2].Orders)
-		}
-		if len(tick.Depth.Sell) >= 4 {
-			record.DepthSellPrice4 = tick.Depth.Sell[3].Price
-			record.DepthSellQuantity4 = int32(tick.Depth.Sell[3].Quantity)
-			record.DepthSellOrders4 = int32(tick.Depth.Sell[3].Orders)
-		}
-		if len(tick.Depth.Sell) >= 5 {
-			record.DepthSellPrice5 = tick.Depth.Sell[4].Price
-			record.DepthSellQuantity5 = int32(tick.Depth.Sell[4].Quantity)
-			record.DepthSellOrders5 = int32(tick.Depth.Sell[4].Orders)
-		}
+	// After successful conversion, read and print raw samples
+	if err := s.readRawParquetSamples(req.ParquetPath, 5); err != nil {
+		s.log.Error("Failed to read raw samples", map[string]interface{}{
+			"error": err.Error(),
+			"path":  req.ParquetPath,
+		})
 	}
 
-	return record
-}
-
-// SendJSONResponse is a helper function to send a JSON response
-func SendJSONResponse(w http.ResponseWriter, status int, resp interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
-}
-
-// SendErrorResponse is a helper function to send an error response
-func SendErrorResponse(w http.ResponseWriter, status int, message string, err error) {
+	// Send success response
 	resp := Response{
-		Success: false,
-		Message: message,
+		Success: true,
+		Message: "Successfully converted WAL to Parquet using Arrow",
+		Data: map[string]interface{}{
+			"output_file": req.ParquetPath,
+		},
 	}
 
-	if err != nil {
-		resp.Error = err.Error()
-	}
+	s.log.Info("Successfully converted WAL to Parquet", map[string]interface{}{
+		"index":       req.IndexName,
+		"date":        req.Date,
+		"output_file": req.ParquetPath,
+	})
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(resp)
+	sendJSONResponse(w, resp)
 }
 
 // handleGetExpiries returns the expiry dates for all indices from in-memory cache
@@ -595,13 +478,13 @@ func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
 	instrumentsKey := "instrument:expiries:list"
 	instrumentsValue, exists := cache.Get(instrumentsKey)
 	if !exists {
-		SendErrorResponse(w, http.StatusNotFound, "No instruments found in cache", nil)
+		sendErrorResponse(w, "No instruments found in cache", http.StatusNotFound)
 		return
 	}
 
 	instruments, ok := instrumentsValue.([]string)
 	if !ok {
-		SendErrorResponse(w, http.StatusInternalServerError, "Invalid data type for instruments in cache", nil)
+		sendErrorResponse(w, "Invalid data type for instruments in cache", http.StatusInternalServerError)
 		return
 	}
 
@@ -632,7 +515,7 @@ func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(expiriesMap) == 0 {
-		SendErrorResponse(w, http.StatusNotFound, "No expiry dates found", nil)
+		sendErrorResponse(w, "No expiry dates found", http.StatusNotFound)
 		return
 	}
 
@@ -642,7 +525,7 @@ func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
 		Data:    expiriesMap,
 	}
 
-	SendJSONResponse(w, http.StatusOK, resp)
+	sendJSONResponse(w, resp)
 }
 
 // handleGetOptionChain returns the option chain for a specific index and expiry
@@ -655,11 +538,11 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	// Validate required parameters
 	if index == "" {
-		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: index", nil)
+		sendErrorResponse(w, "Missing required parameter: index", http.StatusBadRequest)
 		return
 	}
 	if expiry == "" {
-		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: expiry", nil)
+		sendErrorResponse(w, "Missing required parameter: expiry", http.StatusBadRequest)
 		return
 	}
 
@@ -669,14 +552,14 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		var err error
 		numStrikes, err = strconv.Atoi(strikes_count)
 		if err != nil {
-			SendErrorResponse(w, http.StatusBadRequest, "Invalid value for strikes parameter. Must be an integer.", nil)
+			sendErrorResponse(w, "Invalid value for strikes parameter. Must be an integer.", http.StatusBadRequest)
 			return
 		}
 	}
 
 	// Validate expiry date format
 	if _, err := time.Parse("2006-01-02", expiry); err != nil {
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid expiry date format. Use YYYY-MM-DD", nil)
+		sendErrorResponse(w, "Invalid expiry date format. Use YYYY-MM-DD", http.StatusBadRequest)
 		return
 	}
 
@@ -696,7 +579,7 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 					Message: "Option chain retrieved from memory",
 					Data:    response,
 				}
-				SendJSONResponse(w, http.StatusOK, resp)
+				sendJSONResponse(w, resp)
 				return
 			}
 		}
@@ -705,7 +588,7 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	// If we don't have fresh data, calculate new
 	response, err = optionChainMgr.CalculateOptionChain(r.Context(), index, expiry, numStrikes)
 	if err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to calculate option chain", err)
+		sendErrorResponse(w, "Failed to calculate option chain", http.StatusInternalServerError)
 		return
 	}
 
@@ -715,20 +598,20 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		Data:    response,
 	}
 
-	SendJSONResponse(w, http.StatusOK, resp)
+	sendJSONResponse(w, resp)
 }
 
 // handleGetPositions returns detailed analysis of all positions
 func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	pm := zerodha.GetPositionManager()
 	if pm == nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Position manager not initialized", nil)
+		sendErrorResponse(w, "Position manager not initialized", http.StatusInternalServerError)
 		return
 	}
 
 	analysis, err := pm.GetPositionAnalysis(r.Context())
 	if err != nil {
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get position analysis", err)
+		sendErrorResponse(w, "Failed to get position analysis", http.StatusInternalServerError)
 		return
 	}
 
@@ -737,7 +620,7 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 		Data:    analysis,
 	}
 
-	SendJSONResponse(w, http.StatusOK, resp)
+	sendJSONResponse(w, resp)
 }
 
 // Helper function to convert Redis Z member to float64
@@ -776,7 +659,7 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 
 	// Validate index (required for all modes)
 	if req.Index == "" {
-		SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter: index", nil)
+		sendErrorResponse(w, "Missing required parameter: index", http.StatusBadRequest)
 		return
 	}
 
@@ -786,7 +669,7 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		s.log.Error("Failed to get metrics store", map[string]interface{}{
 			"error": err.Error(),
 		})
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to get metrics store", err)
+		sendErrorResponse(w, "Failed to get metrics store", http.StatusInternalServerError)
 		return
 	}
 
@@ -799,7 +682,7 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 			// Parse last known timestamp
 			lastKnown, err := strconv.ParseInt(req.LastKnownTimestamp, 10, 64)
 			if err != nil {
-				SendErrorResponse(w, http.StatusBadRequest, "Invalid last_known_timestamp format", err)
+				sendErrorResponse(w, "Invalid last_known_timestamp format", http.StatusBadRequest)
 				return
 			}
 			// Get only newer points
@@ -812,13 +695,13 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 	case "historical":
 		// Validate historical mode parameters
 		if req.Interval == "" {
-			SendErrorResponse(w, http.StatusBadRequest, "Missing required parameter for historical mode: interval", nil)
+			sendErrorResponse(w, "Missing required parameter for historical mode: interval", http.StatusBadRequest)
 			return
 		}
 
 		// Validate interval
 		if _, ok := ValidIntervals[req.Interval]; !ok {
-			SendErrorResponse(w, http.StatusBadRequest, "Invalid interval. Valid values are: 5s, 10s, 20s, 30s", nil)
+			sendErrorResponse(w, "Invalid interval. Valid values are: 5s, 10s, 20s, 30s", http.StatusBadRequest)
 			return
 		}
 
@@ -826,15 +709,15 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		if countStr := r.URL.Query().Get("count"); countStr != "" {
 			count, err := strconv.Atoi(countStr)
 			if err != nil {
-				SendErrorResponse(w, http.StatusBadRequest, "Invalid count parameter. Must be an integer.", nil)
+				sendErrorResponse(w, "Invalid count parameter. Must be an integer.", http.StatusBadRequest)
 				return
 			}
 			if count <= 0 {
-				SendErrorResponse(w, http.StatusBadRequest, "Count must be greater than 0", nil)
+				sendErrorResponse(w, "Count must be greater than 0", http.StatusBadRequest)
 				return
 			}
 			if count > 1000 {
-				SendErrorResponse(w, http.StatusBadRequest, "Count cannot exceed 1000", nil)
+				sendErrorResponse(w, "Count cannot exceed 1000", http.StatusBadRequest)
 				return
 			}
 			req.Count = count
@@ -845,14 +728,14 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		if req.SinceTimestamp != "" {
 			startTime, err = strconv.ParseInt(req.SinceTimestamp, 10, 64)
 			if err != nil {
-				SendErrorResponse(w, http.StatusBadRequest, "Invalid since_timestamp format", err)
+				sendErrorResponse(w, "Invalid since_timestamp format", http.StatusBadRequest)
 				return
 			}
 		}
 		if req.UntilTimestamp != "" {
 			endTime, err = strconv.ParseInt(req.UntilTimestamp, 10, 64)
 			if err != nil {
-				SendErrorResponse(w, http.StatusBadRequest, "Invalid until_timestamp format", err)
+				sendErrorResponse(w, "Invalid until_timestamp format", http.StatusBadRequest)
 				return
 			}
 		}
@@ -867,7 +750,7 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		}
 
 	default:
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid mode. Must be 'historical' or 'realtime'", nil)
+		sendErrorResponse(w, "Invalid mode. Must be 'historical' or 'realtime'", http.StatusBadRequest)
 		return
 	}
 
@@ -877,7 +760,7 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 			"mode":  req.Mode,
 			"index": req.Index,
 		})
-		SendErrorResponse(w, http.StatusInternalServerError, "Failed to fetch metrics", err)
+		sendErrorResponse(w, "Failed to fetch metrics", http.StatusInternalServerError)
 		return
 	}
 
@@ -906,7 +789,7 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		},
 	}
 
-	SendJSONResponse(w, http.StatusOK, resp)
+	sendJSONResponse(w, resp)
 }
 
 // handleGeneral handles the /general endpoint that returns general market information
@@ -918,5 +801,5 @@ func (s *Server) handleGeneral(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	SendJSONResponse(w, http.StatusOK, response)
+	sendJSONResponse(w, response)
 }

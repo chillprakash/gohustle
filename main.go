@@ -96,6 +96,7 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 		"total_tokens":        len(allTokens),
 	})
 
+	// temp_tokens := []uint32{256265}
 	kiteConnect.InitializeTickersWithTokens(allTokens)
 
 	scheduler.InitializePositionPolling(ctx)

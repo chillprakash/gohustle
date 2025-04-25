@@ -2,9 +2,9 @@ package api
 
 import (
 	"encoding/json"
-	"gohustle/auth"
-	"gohustle/config"
 	"net/http"
+
+	"gohustle/auth"
 )
 
 type LoginRequest struct {
@@ -16,61 +16,74 @@ type LoginResponse struct {
 	Token string `json:"token"`
 }
 
-// handleLogin processes login requests
+// handleLogin handles user login
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		SendErrorResponse(w, http.StatusBadRequest, "Invalid request body", err)
+	var creds auth.Credentials
+	if err := decodeJSONBody(w, r, &creds); err != nil {
+		sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// Get config for credentials
-	cfg := config.GetConfig()
-	if cfg.Auth.Username != req.Username || cfg.Auth.Password != req.Password {
-		SendErrorResponse(w, http.StatusUnauthorized, "Invalid credentials", nil)
+	// Validate credentials
+	if !auth.ValidateCredentials(creds.Username, creds.Password) {
+		sendErrorResponse(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
-	// Generate JWT token
-	token, err := auth.GenerateToken(req.Username, req.Password)
+	// Generate token
+	token, err := auth.GenerateToken(creds.Username)
 	if err != nil {
-		SendErrorResponse(w, http.StatusUnauthorized, "Invalid credentials", nil)
+		sendErrorResponse(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
 
+	// Send response
 	resp := Response{
 		Success: true,
 		Message: "Login successful",
-		Data: LoginResponse{
-			Token: token,
+		Data: map[string]string{
+			"token": token,
 		},
 	}
-
-	SendJSONResponse(w, http.StatusOK, resp)
+	sendJSONResponse(w, resp)
 }
 
-// handleLogout processes logout requests (client-side only)
+// handleLogout handles user logout
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	// Since JWT is stateless, logout is handled client-side
-	// by removing the token. We just send a success response.
+	// Get token from Authorization header
+	token := r.Header.Get("Authorization")
+	if token == "" {
+		sendErrorResponse(w, "No token provided", http.StatusBadRequest)
+		return
+	}
+
+	// Invalidate token
+	auth.InvalidateToken(token)
+
 	resp := Response{
 		Success: true,
 		Message: "Logout successful",
 	}
-
-	SendJSONResponse(w, http.StatusOK, resp)
+	sendJSONResponse(w, resp)
 }
 
-// handleAuthCheck returns current auth configuration (debug endpoint)
+// handleAuthCheck is a debug endpoint to check authentication status
 func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
-	cfg := config.GetConfig()
 	resp := Response{
 		Success: true,
-		Message: "Auth configuration",
+		Message: "Authentication check successful",
 		Data: map[string]interface{}{
-			"configured_username": cfg.Auth.Username,
+			"authenticated": true,
+			"user":          r.Context().Value(auth.UserContextKey),
 		},
 	}
+	sendJSONResponse(w, resp)
+}
 
-	SendJSONResponse(w, http.StatusOK, resp)
+// Helper function to decode JSON body
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v interface{}) error {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		return err
+	}
+	return nil
 }

@@ -1,45 +1,35 @@
 package api
 
 import (
-	"gohustle/auth"
+	"context"
 	"net/http"
 	"strings"
+
+	"gohustle/auth"
 )
 
-// AuthMiddleware checks for valid JWT token
+// AuthMiddleware checks for valid JWT token in Authorization header
 func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for login endpoint and OPTIONS requests
-		if r.URL.Path == "/api/auth/login" || r.Method == "OPTIONS" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		// Get token from Authorization header
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
-			SendErrorResponse(w, http.StatusUnauthorized, "No authorization header", nil)
+			sendErrorResponse(w, "No token provided", http.StatusUnauthorized)
 			return
 		}
 
-		// Remove 'Bearer ' prefix
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		if tokenString == authHeader {
-			SendErrorResponse(w, http.StatusUnauthorized, "Invalid authorization header format", nil)
-			return
-		}
+		// Remove Bearer prefix if present
+		token := strings.TrimPrefix(authHeader, "Bearer ")
 
 		// Validate token
-		_, err := auth.ValidateToken(tokenString)
+		username, err := auth.ValidateToken(token)
 		if err != nil {
-			SendErrorResponse(w, http.StatusUnauthorized, "Invalid token", err)
+			sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
 
-		// Add claims to request context
-		ctx := r.Context()
-		r = r.WithContext(ctx)
-
-		next.ServeHTTP(w, r)
+		// Add username to context
+		ctx := context.WithValue(r.Context(), auth.UserContextKey, username)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

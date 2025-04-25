@@ -157,51 +157,12 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	// Convert to protobuf with proper type conversions
 	protoTick := &pb.TickData{
 		// Basic info
-		InstrumentToken: tick.InstrumentToken,
-		IsTradable:      tick.IsTradable,
-		IsIndex:         tick.IsIndex,
-		Mode:            tick.Mode,
-		IndexName:       indexName,
-
-		// Timestamps - Convert time.Time to Unix timestamp
-		Timestamp:        tick.Timestamp.Unix(),
-		LastTradeTime:    tick.LastTradeTime.Unix(),
-		TickRecievedTime: time.Now().Unix(),
-
-		// Price and quantity - Direct conversions as types match
-		LastPrice:          tick.LastPrice,
-		LastTradedQuantity: tick.LastTradedQuantity,
-		TotalBuyQuantity:   tick.TotalBuyQuantity,
-		TotalSellQuantity:  tick.TotalSellQuantity,
-		VolumeTraded:       tick.VolumeTraded,
-		AverageTradePrice:  tick.AverageTradePrice,
-
-		// Convert integer fields
-		TotalBuy:  tick.TotalBuy,
-		TotalSell: tick.TotalSell,
-
-		// OI related fields
-		Oi:        tick.OI,
-		OiDayHigh: tick.OIDayHigh,
-		OiDayLow:  tick.OIDayLow,
-		NetChange: tick.NetChange,
-
-		// OHLC data
-		Ohlc: &pb.TickData_OHLC{
-			Open:  tick.OHLC.Open,
-			High:  tick.OHLC.High,
-			Low:   tick.OHLC.Low,
-			Close: tick.OHLC.Close,
-		},
-
-		// Market depth
-		Depth: &pb.TickData_MarketDepth{
-			Buy:  convertDepthItems(tick.Depth.Buy[:]),
-			Sell: convertDepthItems(tick.Depth.Sell[:]),
-		},
-
-		// Additional metadata for tracking
-		TickStoredInDbTime: time.Now().Unix(),
+		InstrumentToken:       tick.InstrumentToken,
+		ExchangeUnixTimestamp: tick.Timestamp.Unix(),
+		LastPrice:             tick.LastPrice,
+		VolumeTraded:          tick.VolumeTraded,
+		AverageTradePrice:     tick.AverageTradePrice,
+		OpenInterest:          tick.OI,
 	}
 
 	// Use hierarchical subject pattern for NATS
@@ -252,19 +213,6 @@ func (k *KiteConnect) onNoReconnect(attempt int) {
 	log.Error("Ticker max reconnect attempts reached", map[string]interface{}{
 		"attempts": attempt,
 	})
-}
-
-// Helper function to convert depth items with proper type handling
-func convertDepthItems(items []models.DepthItem) []*pb.TickData_DepthItem {
-	result := make([]*pb.TickData_DepthItem, len(items))
-	for i, item := range items {
-		result[i] = &pb.TickData_DepthItem{
-			Price:    item.Price,
-			Quantity: uint32(item.Quantity),
-			Orders:   uint32(item.Orders),
-		}
-	}
-	return result
 }
 
 // Helper function to convert string tokens to uint32

@@ -2,6 +2,7 @@ package filestore
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"gohustle/cache"
 	"gohustle/logger"
 	pb "gohustle/proto"
 
@@ -54,6 +56,14 @@ func GetTickStore() *TickStore {
 			writers: make(map[string]*TickWriter),
 			log:     logger.L(),
 			baseDir: TickDataDirBase,
+		}
+
+		// Create base directory if it doesn't exist
+		if err := os.MkdirAll(tickStoreInstance.baseDir, 0755); err != nil {
+			tickStoreInstance.log.Error("Failed to create tick data directory", map[string]interface{}{
+				"error": err.Error(),
+				"path":  tickStoreInstance.baseDir,
+			})
 		}
 	})
 	return tickStoreInstance
@@ -199,7 +209,10 @@ func (w *TickWriter) Close() error {
 
 // WriteTick writes a tick to the appropriate index's file
 func (ts *TickStore) WriteTick(tick *pb.TickData) error {
-	index := tick.IndexName
+	index, err := ts.GetIndexNameFromTokenFromStore(context.Background(), fmt.Sprintf("%d", tick.InstrumentToken))
+	if err != nil {
+		return fmt.Errorf("failed to get index name from token: %w", err)
+	}
 
 	// Fast path: check if writer exists
 	ts.mu.RLock()
@@ -224,6 +237,25 @@ func (ts *TickStore) WriteTick(tick *pb.TickData) error {
 	}
 
 	return writer.Write(tick)
+}
+
+// GetIndexNameFromToken retrieves the index name for a given instrument token from cache
+func (k *TickStore) GetIndexNameFromTokenFromStore(ctx context.Context, instrumentToken string) (string, error) {
+	cache := cache.GetInMemoryCacheInstance()
+
+	// Get index name from cache
+	indexName, exists := cache.Get(instrumentToken)
+	if !exists {
+		return "", fmt.Errorf("no index found for instrument token: %s", instrumentToken)
+	}
+
+	// Type assert the interface{} to string
+	indexNameStr, ok := indexName.(string)
+	if !ok {
+		return "", fmt.Errorf("invalid cache value type for instrument token: %s", instrumentToken)
+	}
+
+	return indexNameStr, nil
 }
 
 // Close closes all tick writers
@@ -295,4 +327,59 @@ func (ts *TickStore) ReadTicks(index, date string) ([]*pb.TickData, error) {
 	}
 
 	return ticks, nil
+}
+
+// StreamTicks reads ticks from WAL and sends them to the provided channel
+func (ts *TickStore) StreamTicks(indexName, date string, tickChan chan<- *pb.TickData) error {
+	filePath := getTickFilePath(ts.baseDir, indexName, date)
+
+	// Open file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to open tick file: %w", err)
+	}
+	defer file.Close()
+
+	// Create buffered reader
+	reader := bufio.NewReaderSize(file, BufferSize)
+
+	// Read records
+	for {
+		// Read length
+		var length uint32
+		if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("failed to read length: %w", err)
+		}
+
+		// Read checksum
+		var checksum uint32
+		if err := binary.Read(reader, binary.BigEndian, &checksum); err != nil {
+			return fmt.Errorf("failed to read checksum: %w", err)
+		}
+
+		// Read data
+		data := make([]byte, length)
+		if _, err := io.ReadFull(reader, data); err != nil {
+			return fmt.Errorf("failed to read data: %w", err)
+		}
+
+		// Verify checksum
+		if crc32.ChecksumIEEE(data) != checksum {
+			return fmt.Errorf("checksum mismatch")
+		}
+
+		// Unmarshal tick
+		tick := &pb.TickData{}
+		if err := proto.Unmarshal(data, tick); err != nil {
+			return fmt.Errorf("failed to unmarshal tick: %w", err)
+		}
+
+		// Send tick to channel
+		tickChan <- tick
+	}
+
+	return nil
 }

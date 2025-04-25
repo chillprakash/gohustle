@@ -1,6 +1,7 @@
 package filestore
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"github.com/apache/arrow/go/v14/arrow/memory"
 	"github.com/apache/arrow/go/v14/parquet"
 	"github.com/apache/arrow/go/v14/parquet/compress"
+	"github.com/apache/arrow/go/v14/parquet/file"
 	"github.com/apache/arrow/go/v14/parquet/pqarrow"
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -54,6 +56,14 @@ func GetParquetStore() *ParquetStore {
 			writers:    make(map[string]*ParquetWriter),
 			log:        logger.L(),
 			currentDay: time.Now().Format("2006-01-02"),
+		}
+
+		// Create data directory if it doesn't exist
+		if err := os.MkdirAll(DefaultParquetDir, 0755); err != nil {
+			parquetStoreInstance.log.Error("Failed to create parquet directory", map[string]interface{}{
+				"error": err.Error(),
+				"path":  DefaultParquetDir,
+			})
 		}
 	})
 
@@ -108,33 +118,39 @@ func (ps *ParquetStore) rotateFile(index string, currentDay string) error {
 	return nil
 }
 
-// GetOrCreateWriter gets existing writer or creates new one for the index
-func (ps *ParquetStore) GetOrCreateWriter(index string) (*ParquetWriter, error) {
-	currentDay := time.Now().Format("2006-01-02")
-
+// GetOrCreateWriter gets existing writer or creates new one for the given path
+func (ps *ParquetStore) GetOrCreateWriter(path string) (*ParquetWriter, error) {
 	ps.writersMu.RLock()
-	writer, exists := ps.writers[index]
-	if exists && ps.currentDay == currentDay {
+	writer, exists := ps.writers[path]
+	if exists {
 		ps.writersMu.RUnlock()
 		return writer, nil
 	}
 	ps.writersMu.RUnlock()
 
-	// Need to create or rotate writer
+	// Need to create new writer
 	ps.writersMu.Lock()
 	defer ps.writersMu.Unlock()
 
 	// Double check after acquiring write lock
-	if writer, exists := ps.writers[index]; exists && ps.currentDay == currentDay {
+	if writer, exists := ps.writers[path]; exists {
 		return writer, nil
 	}
 
-	// Rotate file if day changed
-	if err := ps.rotateFile(index, currentDay); err != nil {
-		return nil, fmt.Errorf("failed to rotate file: %w", err)
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	return ps.writers[index], nil
+	// Create new writer
+	writer, err := NewParquetWriter(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create writer: %w", err)
+	}
+
+	ps.writers[path] = writer
+	return writer, nil
 }
 
 // WriteTick writes a single tick to the appropriate daily file
@@ -158,10 +174,44 @@ func (ps *ParquetStore) WriteBatch(index string, records []TickRecord) error {
 		return fmt.Errorf("failed to get writer: %w", err)
 	}
 
-	for _, record := range records {
-		if err := writer.Write(record); err != nil {
-			return fmt.Errorf("failed to write record: %w", err)
+	// Write records in smaller batches to avoid memory issues
+	const batchSize = 10000
+	totalRecords := len(records)
+	processedRecords := 0
+
+	for i := 0; i < totalRecords; i += batchSize {
+		end := i + batchSize
+		if end > totalRecords {
+			end = totalRecords
 		}
+
+		// Write current batch
+		for _, record := range records[i:end] {
+			if err := writer.Write(record); err != nil {
+				return fmt.Errorf("failed to write record: %w", err)
+			}
+			processedRecords++
+		}
+
+		// Force flush after each batch
+		if err := writer.flush(); err != nil {
+			return fmt.Errorf("failed to flush batch: %w", err)
+		}
+
+		// Log progress
+		if processedRecords%100000 == 0 {
+			ps.log.Info("Writing progress", map[string]interface{}{
+				"index":             index,
+				"processed_records": processedRecords,
+				"total_records":     totalRecords,
+				"percent_complete":  float64(processedRecords) / float64(totalRecords) * 100,
+			})
+		}
+	}
+
+	// Final flush to ensure all records are written
+	if err := writer.flush(); err != nil {
+		return fmt.Errorf("failed to flush final batch: %w", err)
 	}
 
 	return nil
@@ -197,70 +247,13 @@ type WriterStats struct {
 
 // TickRecord represents a single tick record for parquet writing
 type TickRecord struct {
-	ID              int64
-	InstrumentToken int64
-	Timestamp       pgtype.Timestamp
-	IsTradable      bool
-	IsIndex         bool
-	Mode            string
-
-	// Price information
-	LastPrice          float64
-	LastTradedQuantity int32
-	AverageTradePrice  float64
-	VolumeTraded       int32
-	TotalBuyQuantity   int32
-	TotalSellQuantity  int32
-	TotalBuy           int32
-	TotalSell          int32
-
-	// OHLC
-	OhlcOpen  float64
-	OhlcHigh  float64
-	OhlcLow   float64
-	OhlcClose float64
-
-	// Market Depth - Buy
-	DepthBuyPrice1    float64
-	DepthBuyQuantity1 int32
-	DepthBuyOrders1   int32
-	DepthBuyPrice2    float64
-	DepthBuyQuantity2 int32
-	DepthBuyOrders2   int32
-	DepthBuyPrice3    float64
-	DepthBuyQuantity3 int32
-	DepthBuyOrders3   int32
-	DepthBuyPrice4    float64
-	DepthBuyQuantity4 int32
-	DepthBuyOrders4   int32
-	DepthBuyPrice5    float64
-	DepthBuyQuantity5 int32
-	DepthBuyOrders5   int32
-
-	// Market Depth - Sell
-	DepthSellPrice1    float64
-	DepthSellQuantity1 int32
-	DepthSellOrders1   int32
-	DepthSellPrice2    float64
-	DepthSellQuantity2 int32
-	DepthSellOrders2   int32
-	DepthSellPrice3    float64
-	DepthSellQuantity3 int32
-	DepthSellOrders3   int32
-	DepthSellPrice4    float64
-	DepthSellQuantity4 int32
-	DepthSellOrders4   int32
-	DepthSellPrice5    float64
-	DepthSellQuantity5 int32
-	DepthSellOrders5   int32
-
-	// Additional fields
-	LastTradeTime pgtype.Timestamp
-	NetChange     float64
-
-	// Metadata
-	TickReceivedTime   pgtype.Timestamp
-	TickStoredInDbTime pgtype.Timestamp
+	ID                int64
+	InstrumentToken   int64
+	ExchangeTimestamp pgtype.Timestamp
+	LastPrice         float64
+	OpenInterest      int32
+	VolumeTraded      int32
+	AverageTradePrice float64
 }
 
 type ParquetWriter struct {
@@ -280,22 +273,11 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		return nil, fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// Open file in append mode or create if doesn't exist
-	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
+	// Always create a new file, overwriting any existing one
+	// This ensures proper Parquet file format from start to end
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-
-	// Get file info to check if it's new
-	fi, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, fmt.Errorf("failed to stat file: %w", err)
-	}
-
-	// If file exists and not empty, we need to handle existing data
-	if fi.Size() > 0 {
-		log.Printf("File %s exists with size %d bytes, data will be appended", filePath, fi.Size())
 	}
 
 	// Define metadata for SQL compatibility
@@ -320,56 +302,11 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		[]arrow.Field{
 			{Name: "id", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
 			{Name: "instrument_token", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
-			{Name: "timestamp", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
-			{Name: "is_tradable", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
-			{Name: "is_index", Type: arrow.FixedWidthTypes.Boolean, Nullable: false},
-			{Name: "mode", Type: arrow.BinaryTypes.String, Nullable: false},
+			{Name: "exchange_unix_timestamp", Type: arrow.PrimitiveTypes.Int64, Nullable: false},
 			{Name: "last_price", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "last_traded_quantity", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "average_trade_price", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
+			{Name: "open_interest", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
 			{Name: "volume_traded", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "total_buy_quantity", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "total_sell_quantity", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "total_buy", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "total_sell", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "ohlc_open", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "ohlc_high", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "ohlc_low", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "ohlc_close", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_buy_price_1", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_buy_quantity_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_orders_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_price_2", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_buy_quantity_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_orders_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_price_3", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_buy_quantity_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_orders_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_price_4", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_buy_quantity_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_orders_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_price_5", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_buy_quantity_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_buy_orders_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_price_1", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_sell_quantity_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_orders_1", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_price_2", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_sell_quantity_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_orders_2", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_price_3", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_sell_quantity_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_orders_3", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_price_4", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_sell_quantity_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_orders_4", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_price_5", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "depth_sell_quantity_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "depth_sell_orders_5", Type: arrow.PrimitiveTypes.Int32, Nullable: false},
-			{Name: "last_trade_time", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: true},
-			{Name: "net_change", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
-			{Name: "tick_received_time", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
-			{Name: "tick_stored_in_db_time", Type: arrow.FixedWidthTypes.Timestamp_us, Nullable: false},
+			{Name: "average_trade_price", Type: arrow.PrimitiveTypes.Float64, Nullable: false},
 		},
 		&metadata,
 	)
@@ -386,6 +323,7 @@ func NewParquetWriter(filePath string) (*ParquetWriter, error) {
 		parquet.WithMaxRowGroupLength(128*1024*1024),       // 128MB row groups
 		parquet.WithCreatedBy("GoHustle"),
 		parquet.WithVersion(parquet.V2_LATEST),
+		parquet.WithBatchSize(1024), // Smaller batch size for better memory usage
 	)
 
 	// Create Arrow writer properties with SQL compatibility options
@@ -427,9 +365,15 @@ func (w *ParquetWriter) Write(record TickRecord) error {
 		return fmt.Errorf("instrument token is required")
 	}
 
-	if !record.Timestamp.Valid {
+	if !record.ExchangeTimestamp.Valid {
 		return fmt.Errorf("timestamp is required")
 	}
+
+	// Debug timestamp
+	log.Printf("Writing timestamp - Original: %v, Unix: %d, UnixNano: %d",
+		record.ExchangeTimestamp.Time,
+		record.ExchangeTimestamp.Time.Unix(),
+		record.ExchangeTimestamp.Time.UnixNano())
 
 	// Estimate uncompressed size (rough approximation)
 	// Each numeric field ~8 bytes, string ~32 bytes, timestamp ~8 bytes
@@ -439,96 +383,15 @@ func (w *ParquetWriter) Write(record TickRecord) error {
 	// Basic fields
 	w.recordBldr.Field(0).(*array.Int64Builder).Append(record.ID)
 	w.recordBldr.Field(1).(*array.Int64Builder).Append(record.InstrumentToken)
-	w.recordBldr.Field(2).(*array.TimestampBuilder).Append(arrow.Timestamp(record.Timestamp.Time.UnixMicro()))
-	w.recordBldr.Field(3).(*array.BooleanBuilder).Append(record.IsTradable)
-	w.recordBldr.Field(4).(*array.BooleanBuilder).Append(record.IsIndex)
-	w.recordBldr.Field(5).(*array.StringBuilder).Append(record.Mode)
 
-	// Price information
-	w.recordBldr.Field(6).(*array.Float64Builder).Append(record.LastPrice)
-	w.recordBldr.Field(7).(*array.Int32Builder).Append(record.LastTradedQuantity)
-	w.recordBldr.Field(8).(*array.Float64Builder).Append(record.AverageTradePrice)
-	w.recordBldr.Field(9).(*array.Int32Builder).Append(record.VolumeTraded)
-	w.recordBldr.Field(10).(*array.Int32Builder).Append(record.TotalBuyQuantity)
-	w.recordBldr.Field(11).(*array.Int32Builder).Append(record.TotalSellQuantity)
-	w.recordBldr.Field(12).(*array.Int32Builder).Append(record.TotalBuy)
-	w.recordBldr.Field(13).(*array.Int32Builder).Append(record.TotalSell)
+	// Convert timestamp to Unix seconds
+	unixTimestamp := record.ExchangeTimestamp.Time.Unix()
+	w.recordBldr.Field(2).(*array.Int64Builder).Append(unixTimestamp)
 
-	// OHLC
-	w.recordBldr.Field(14).(*array.Float64Builder).Append(record.OhlcOpen)
-	w.recordBldr.Field(15).(*array.Float64Builder).Append(record.OhlcHigh)
-	w.recordBldr.Field(16).(*array.Float64Builder).Append(record.OhlcLow)
-	w.recordBldr.Field(17).(*array.Float64Builder).Append(record.OhlcClose)
-
-	// Market Depth - Buy Level 1
-	w.recordBldr.Field(18).(*array.Float64Builder).Append(record.DepthBuyPrice1)
-	w.recordBldr.Field(19).(*array.Int32Builder).Append(record.DepthBuyQuantity1)
-	w.recordBldr.Field(20).(*array.Int32Builder).Append(record.DepthBuyOrders1)
-
-	// Market Depth - Buy Level 2
-	w.recordBldr.Field(21).(*array.Float64Builder).Append(record.DepthBuyPrice2)
-	w.recordBldr.Field(22).(*array.Int32Builder).Append(record.DepthBuyQuantity2)
-	w.recordBldr.Field(23).(*array.Int32Builder).Append(record.DepthBuyOrders2)
-
-	// Market Depth - Buy Level 3
-	w.recordBldr.Field(24).(*array.Float64Builder).Append(record.DepthBuyPrice3)
-	w.recordBldr.Field(25).(*array.Int32Builder).Append(record.DepthBuyQuantity3)
-	w.recordBldr.Field(26).(*array.Int32Builder).Append(record.DepthBuyOrders3)
-
-	// Market Depth - Buy Level 4
-	w.recordBldr.Field(27).(*array.Float64Builder).Append(record.DepthBuyPrice4)
-	w.recordBldr.Field(28).(*array.Int32Builder).Append(record.DepthBuyQuantity4)
-	w.recordBldr.Field(29).(*array.Int32Builder).Append(record.DepthBuyOrders4)
-
-	// Market Depth - Buy Level 5
-	w.recordBldr.Field(30).(*array.Float64Builder).Append(record.DepthBuyPrice5)
-	w.recordBldr.Field(31).(*array.Int32Builder).Append(record.DepthBuyQuantity5)
-	w.recordBldr.Field(32).(*array.Int32Builder).Append(record.DepthBuyOrders5)
-
-	// Market Depth - Sell Level 1
-	w.recordBldr.Field(33).(*array.Float64Builder).Append(record.DepthSellPrice1)
-	w.recordBldr.Field(34).(*array.Int32Builder).Append(record.DepthSellQuantity1)
-	w.recordBldr.Field(35).(*array.Int32Builder).Append(record.DepthSellOrders1)
-
-	// Market Depth - Sell Level 2
-	w.recordBldr.Field(36).(*array.Float64Builder).Append(record.DepthSellPrice2)
-	w.recordBldr.Field(37).(*array.Int32Builder).Append(record.DepthSellQuantity2)
-	w.recordBldr.Field(38).(*array.Int32Builder).Append(record.DepthSellOrders2)
-
-	// Market Depth - Sell Level 3
-	w.recordBldr.Field(39).(*array.Float64Builder).Append(record.DepthSellPrice3)
-	w.recordBldr.Field(40).(*array.Int32Builder).Append(record.DepthSellQuantity3)
-	w.recordBldr.Field(41).(*array.Int32Builder).Append(record.DepthSellOrders3)
-
-	// Market Depth - Sell Level 4
-	w.recordBldr.Field(42).(*array.Float64Builder).Append(record.DepthSellPrice4)
-	w.recordBldr.Field(43).(*array.Int32Builder).Append(record.DepthSellQuantity4)
-	w.recordBldr.Field(44).(*array.Int32Builder).Append(record.DepthSellOrders4)
-
-	// Market Depth - Sell Level 5
-	w.recordBldr.Field(45).(*array.Float64Builder).Append(record.DepthSellPrice5)
-	w.recordBldr.Field(46).(*array.Int32Builder).Append(record.DepthSellQuantity5)
-	w.recordBldr.Field(47).(*array.Int32Builder).Append(record.DepthSellOrders5)
-
-	// Additional fields
-	if record.LastTradeTime.Valid {
-		w.recordBldr.Field(48).(*array.TimestampBuilder).Append(arrow.Timestamp(record.LastTradeTime.Time.UnixMicro()))
-	} else {
-		w.recordBldr.Field(48).(*array.TimestampBuilder).AppendNull()
-	}
-	w.recordBldr.Field(49).(*array.Float64Builder).Append(record.NetChange)
-
-	// Metadata
-	if record.TickReceivedTime.Valid {
-		w.recordBldr.Field(50).(*array.TimestampBuilder).Append(arrow.Timestamp(record.TickReceivedTime.Time.UnixMicro()))
-	} else {
-		w.recordBldr.Field(50).(*array.TimestampBuilder).AppendNull()
-	}
-	if record.TickStoredInDbTime.Valid {
-		w.recordBldr.Field(51).(*array.TimestampBuilder).Append(arrow.Timestamp(record.TickStoredInDbTime.Time.UnixMicro()))
-	} else {
-		w.recordBldr.Field(51).(*array.TimestampBuilder).AppendNull()
-	}
+	w.recordBldr.Field(3).(*array.Float64Builder).Append(record.LastPrice)
+	w.recordBldr.Field(4).(*array.Int32Builder).Append(record.OpenInterest)
+	w.recordBldr.Field(5).(*array.Int32Builder).Append(record.VolumeTraded)
+	w.recordBldr.Field(6).(*array.Float64Builder).Append(record.AverageTradePrice)
 
 	w.recordCount++
 
@@ -552,9 +415,6 @@ func (w *ParquetWriter) flush() error {
 	rec := w.recordBldr.NewRecord()
 	defer rec.Release()
 
-	// Log debug info
-	log.Printf("Flushing %d records to parquet file %s", w.recordCount, w.file.Name())
-
 	// Write record batch
 	if err := w.writer.Write(rec); err != nil {
 		return fmt.Errorf("failed to write record batch: %w", err)
@@ -572,12 +432,6 @@ func (w *ParquetWriter) flush() error {
 			float64(stats.CompressedSize)/(1024*1024),
 			stats.CompressionRatio,
 		)
-		if stats.CompressionRatio < 2.0 {
-			log.Printf("Warning: Low compression ratio (%.2f) for file %s",
-				stats.CompressionRatio,
-				w.file.Name(),
-			)
-		}
 	}
 
 	return nil
@@ -595,52 +449,46 @@ func (w *ParquetWriter) Close() error {
 		}
 	}
 
-	// Close the writer
+	// Get stats before closing
+	stats, _ := w.GetStats()
+	initialRecordCount := stats.RecordCount
+
+	// Close the writer (this writes the Parquet footer and closes the underlying file)
 	if err := w.writer.Close(); err != nil {
-		w.file.Close() // Best effort to close file
-		w.writer = nil
 		w.closed = true
 		return fmt.Errorf("failed to close writer: %w", err)
 	}
 
-	// Close the file
-	if err := w.file.Close(); err != nil {
-		w.writer = nil
-		w.closed = true
-		return fmt.Errorf("failed to close file: %w", err)
-	}
-
+	w.file = nil
 	w.writer = nil
 	w.closed = true
 
 	// Log final stats
-	if stats, err := w.GetStats(); err == nil {
-		log.Printf("Final parquet file stats - Records: %d, Size: %.2f MB, Compression: %.2fx",
-			stats.RecordCount,
-			float64(stats.CompressedSize)/(1024*1024),
-			stats.CompressionRatio,
-		)
-	}
+	log.Printf("Final parquet file stats - Records: %d, Size: %.2f MB",
+		initialRecordCount,
+		float64(stats.CompressedSize)/(1024*1024))
 
 	return nil
 }
 
 func (w *ParquetWriter) GetStats() (WriterStats, error) {
+	if w.file == nil {
+		return WriterStats{}, fmt.Errorf("file is nil")
+	}
+
+	// Get current file info
+	fileInfo, err := w.file.Stat()
+	if err != nil {
+		return WriterStats{}, fmt.Errorf("failed to get file stats: %w", err)
+	}
+
+	// Get current record count from the writer
 	stats := WriterStats{
 		RecordCount:      w.recordCount,
 		UncompressedSize: w.uncompressedSize,
+		CompressedSize:   fileInfo.Size(),
 	}
 
-	if w.file == nil {
-		return stats, fmt.Errorf("file is nil")
-	}
-
-	fileInfo, err := w.file.Stat()
-	if err != nil {
-		return stats, fmt.Errorf("failed to get file stats: %w", err)
-	}
-
-	stats.CompressedSize = fileInfo.Size()
 	if stats.CompressedSize > 0 && stats.UncompressedSize > 0 {
 		stats.CompressionRatio = float64(stats.UncompressedSize) / float64(stats.CompressedSize)
 	}
@@ -651,4 +499,95 @@ func (w *ParquetWriter) GetStats() (WriterStats, error) {
 // UncompressedSize returns the current uncompressed size of the parquet file
 func (w *ParquetWriter) UncompressedSize() int64 {
 	return w.uncompressedSize
+}
+
+// ReadSamples reads the first n samples from a parquet file
+func (ps *ParquetStore) ReadSamples(filePath string, numSamples int) ([]TickRecord, error) {
+	ps.log.Info("Reading parquet samples", map[string]interface{}{
+		"file":              filePath,
+		"samples_requested": numSamples,
+	})
+
+	// Open and read the parquet file directly
+	f, err := os.OpenFile(filePath, os.O_RDONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open parquet file: %w", err)
+	}
+	defer f.Close()
+
+	// Create parquet file reader
+	pf, err := file.NewParquetReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create parquet file reader: %w", err)
+	}
+	defer pf.Close()
+
+	// Create Arrow reader
+	readProps := pqarrow.ArrowReadProperties{}
+	arrowReader, err := pqarrow.NewFileReader(pf, readProps, memory.DefaultAllocator)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create arrow reader: %w", err)
+	}
+
+	// Read the table with context
+	ctx := context.Background()
+	table, err := arrowReader.ReadTable(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read table: %w", err)
+	}
+	defer table.Release()
+
+	// Get number of rows to read
+	numRows := int(table.NumRows())
+	if numSamples > numRows {
+		numSamples = numRows
+	}
+
+	ps.log.Info("Converting samples", map[string]interface{}{
+		"total_rows":      numRows,
+		"samples_to_read": numSamples,
+	})
+
+	// Convert records
+	samples := make([]TickRecord, 0, numSamples)
+	for i := 0; i < numSamples; i++ {
+		sample := TickRecord{}
+
+		// Get chunks for each column we're interested in
+		if chunk := table.Column(1).Data().Chunk(0); chunk != nil {
+			if v, ok := chunk.(*array.Int64); ok && v.IsValid(i) {
+				sample.InstrumentToken = v.Value(i)
+			}
+		}
+		if chunk := table.Column(3).Data().Chunk(0); chunk != nil {
+			if v, ok := chunk.(*array.Float64); ok && v.IsValid(i) {
+				sample.LastPrice = v.Value(i)
+			}
+		}
+		if chunk := table.Column(5).Data().Chunk(0); chunk != nil {
+			if v, ok := chunk.(*array.Int32); ok && v.IsValid(i) {
+				sample.VolumeTraded = v.Value(i)
+			}
+		}
+
+		// Handle timestamps
+		if chunk := table.Column(2).Data().Chunk(0); chunk != nil {
+			if ts, ok := chunk.(*array.Int64); ok && ts.IsValid(i) {
+				unixSeconds := ts.Value(i)
+				sample.ExchangeTimestamp.Time = time.Unix(unixSeconds, 0)
+				sample.ExchangeTimestamp.Valid = true
+
+				// Debug final timestamp
+				log.Printf("Final timestamp: %v (Unix: %d)", sample.ExchangeTimestamp.Time, unixSeconds)
+			}
+		}
+
+		samples = append(samples, sample)
+	}
+
+	ps.log.Info("Successfully read samples", map[string]interface{}{
+		"samples_read": len(samples),
+	})
+
+	return samples, nil
 }

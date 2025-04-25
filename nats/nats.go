@@ -13,11 +13,11 @@ import (
 
 const (
 	DefaultURL             = "nats://localhost:4222"
-	ReconnectWait          = 2 * time.Second
-	MaxReconnectAttempts   = 5
-	PingInterval           = 30 * time.Second
+	ReconnectWait          = 1 * time.Second
+	MaxReconnectAttempts   = 3
+	PingInterval           = 20 * time.Second
 	MaxPingOutstanding     = 2
-	PublishAsyncMaxPending = 256 * 1024 // 256K pending messages
+	PublishAsyncMaxPending = 128 * 1024
 )
 
 // NATSHelper manages NATS connections

@@ -85,56 +85,11 @@ func (e *Exporter) ExportTableToProto(ctx context.Context, tableName string) (st
 			if err := rows.Scan(
 				&record.ID,
 				&record.InstrumentToken,
-				&record.Timestamp,
-				&record.IsTradable,
-				&record.IsIndex,
-				&record.Mode,
+				&record.ExchangeTimestamp,
 				&record.LastPrice,
-				&record.LastTradedQuantity,
-				&record.AverageTradePrice,
+				&record.OpenInterest,
 				&record.VolumeTraded,
-				&record.TotalBuyQuantity,
-				&record.TotalSellQuantity,
-				&record.TotalBuy,
-				&record.TotalSell,
-				&record.OhlcOpen,
-				&record.OhlcHigh,
-				&record.OhlcLow,
-				&record.OhlcClose,
-				&record.DepthBuyPrice1,
-				&record.DepthBuyQuantity1,
-				&record.DepthBuyOrders1,
-				&record.DepthBuyPrice2,
-				&record.DepthBuyQuantity2,
-				&record.DepthBuyOrders2,
-				&record.DepthBuyPrice3,
-				&record.DepthBuyQuantity3,
-				&record.DepthBuyOrders3,
-				&record.DepthBuyPrice4,
-				&record.DepthBuyQuantity4,
-				&record.DepthBuyOrders4,
-				&record.DepthBuyPrice5,
-				&record.DepthBuyQuantity5,
-				&record.DepthBuyOrders5,
-				&record.DepthSellPrice1,
-				&record.DepthSellQuantity1,
-				&record.DepthSellOrders1,
-				&record.DepthSellPrice2,
-				&record.DepthSellQuantity2,
-				&record.DepthSellOrders2,
-				&record.DepthSellPrice3,
-				&record.DepthSellQuantity3,
-				&record.DepthSellOrders3,
-				&record.DepthSellPrice4,
-				&record.DepthSellQuantity4,
-				&record.DepthSellOrders4,
-				&record.DepthSellPrice5,
-				&record.DepthSellQuantity5,
-				&record.DepthSellOrders5,
-				&record.LastTradeTime,
-				&record.NetChange,
-				&record.TickReceivedTime,
-				&record.TickStoredInDbTime,
+				&record.AverageTradePrice,
 			); err != nil {
 				rows.Close()
 				return "", fmt.Errorf("scan failed: %w", err)
@@ -142,88 +97,12 @@ func (e *Exporter) ExportTableToProto(ctx context.Context, tableName string) (st
 
 			// Convert to proto message
 			protoMsg := &proto.TickData{
-				InstrumentToken:    uint32(record.InstrumentToken),
-				Timestamp:          record.Timestamp.Time.Unix(),
-				IsTradable:         record.IsTradable,
-				IsIndex:            record.IsIndex,
-				Mode:               record.Mode,
-				LastPrice:          record.LastPrice,
-				LastTradedQuantity: uint32(record.LastTradedQuantity),
-				AverageTradePrice:  record.AverageTradePrice,
-				VolumeTraded:       uint32(record.VolumeTraded),
-				TotalBuyQuantity:   uint32(record.TotalBuyQuantity),
-				TotalSellQuantity:  uint32(record.TotalSellQuantity),
-				TotalBuy:           uint32(record.TotalBuy),
-				TotalSell:          uint32(record.TotalSell),
-
-				// OHLC as a nested message
-				Ohlc: &proto.TickData_OHLC{
-					Open:  record.OhlcOpen,
-					High:  record.OhlcHigh,
-					Low:   record.OhlcLow,
-					Close: record.OhlcClose,
-				},
-
-				NetChange:     record.NetChange,
-				LastTradeTime: record.LastTradeTime.Time.Unix(),
-
-				// Market depth as a nested message
-				Depth: &proto.TickData_MarketDepth{
-					Buy: []*proto.TickData_DepthItem{
-						{
-							Price:    record.DepthBuyPrice1,
-							Quantity: uint32(record.DepthBuyQuantity1),
-							Orders:   uint32(record.DepthBuyOrders1),
-						},
-						{
-							Price:    record.DepthBuyPrice2,
-							Quantity: uint32(record.DepthBuyQuantity2),
-							Orders:   uint32(record.DepthBuyOrders2),
-						},
-						{
-							Price:    record.DepthBuyPrice3,
-							Quantity: uint32(record.DepthBuyQuantity3),
-							Orders:   uint32(record.DepthBuyOrders3),
-						},
-						{
-							Price:    record.DepthBuyPrice4,
-							Quantity: uint32(record.DepthBuyQuantity4),
-							Orders:   uint32(record.DepthBuyOrders4),
-						},
-						{
-							Price:    record.DepthBuyPrice5,
-							Quantity: uint32(record.DepthBuyQuantity5),
-							Orders:   uint32(record.DepthBuyOrders5),
-						},
-					},
-					Sell: []*proto.TickData_DepthItem{
-						{
-							Price:    record.DepthSellPrice1,
-							Quantity: uint32(record.DepthSellQuantity1),
-							Orders:   uint32(record.DepthSellOrders1),
-						},
-						{
-							Price:    record.DepthSellPrice2,
-							Quantity: uint32(record.DepthSellQuantity2),
-							Orders:   uint32(record.DepthSellOrders2),
-						},
-						{
-							Price:    record.DepthSellPrice3,
-							Quantity: uint32(record.DepthSellQuantity3),
-							Orders:   uint32(record.DepthSellOrders3),
-						},
-						{
-							Price:    record.DepthSellPrice4,
-							Quantity: uint32(record.DepthSellQuantity4),
-							Orders:   uint32(record.DepthSellOrders4),
-						},
-						{
-							Price:    record.DepthSellPrice5,
-							Quantity: uint32(record.DepthSellQuantity5),
-							Orders:   uint32(record.DepthSellOrders5),
-						},
-					},
-				},
+				InstrumentToken:       uint32(record.InstrumentToken),
+				ExchangeUnixTimestamp: record.ExchangeTimestamp.Time.Unix(),
+				LastPrice:             record.LastPrice,
+				OpenInterest:          uint32(record.OpenInterest),
+				VolumeTraded:          uint32(record.VolumeTraded),
+				AverageTradePrice:     record.AverageTradePrice,
 			}
 
 			// Serialize the proto message

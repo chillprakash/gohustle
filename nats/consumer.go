@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -241,7 +242,7 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 	if err := c.writeTickToStore(tick, workerId); err != nil {
 		c.log.Error("Failed to write tick to store", map[string]interface{}{
 			"worker_id": workerId,
-			"index":     tick.IndexName,
+			"index":     tick.InstrumentToken,
 			"error":     err.Error(),
 		})
 		c.incrementErrorCount()
@@ -272,13 +273,8 @@ func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
 	requiredKeys := map[string]interface{}{
 		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
 		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
-		fmt.Sprintf("%s_oi", instrumentToken):                   tick.Oi,
-		fmt.Sprintf("%s_oi_day_high", instrumentToken):          tick.OiDayHigh,
-		fmt.Sprintf("%s_oi_day_low", instrumentToken):           tick.OiDayLow,
-		fmt.Sprintf("%s_total_sell_quantity", instrumentToken):  tick.TotalSellQuantity,
-		fmt.Sprintf("%s_total_buy_quantity", instrumentToken):   tick.TotalBuyQuantity,
+		fmt.Sprintf("%s_oi", instrumentToken):                   tick.OpenInterest,
 		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
-		fmt.Sprintf("%s_change", instrumentToken):               tick.NetChange,
 	}
 
 	redisData := make(map[string]interface{})
@@ -307,9 +303,21 @@ func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
 
 // writeTickToStore handles writing tick data to the file store
 func (c *TickConsumer) writeTickToStore(tick *pb.TickData, workerId int) error {
-	if tick.IndexName == core.GetIndices().BANKNIFTY.NameInOptions {
+	// First convert string to uint64 (as strconv.ParseUint returns uint64)
+	bankNiftyToken, err := strconv.ParseUint(core.GetIndices().BANKNIFTY.InstrumentToken, 10, 32)
+	if err != nil {
+		// Handle error appropriately
+		c.log.Error("Error converting BankNifty token", map[string]interface{}{
+			"error": err.Error(),
+		})
 		return nil
 	}
+
+	// Now compare with the tick's instrument token
+	if tick.InstrumentToken == uint32(bankNiftyToken) {
+		return nil
+	}
+
 	tickStore := filestore.GetTickStore()
 	if err := tickStore.WriteTick(tick); err != nil {
 		return fmt.Errorf("failed to write tick to store: %w", err)

@@ -1,0 +1,13 @@
+Did MVP1 with
+Redis, Nats, SqLite
+
+Saved credentails to SqLite
+Nats for Multiplexing of some sort.
+Writing data to WAL and accessing.
+
+Saved the complete data. 
+
+Analysis:
+Actually, we dont need that big of a data.
+Each file was 300 mb at the end of the day and not able to analyse.
+Mac gets vocal with the current approach.

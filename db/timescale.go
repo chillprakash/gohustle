@@ -187,26 +187,67 @@ func protoToTickRecord(tick *proto.TickData) *TickRecord {
 // No depth helper methods needed as we're using the simplified TickData model
 
 // GetTableName returns the appropriate table name for the tick
-func (t *TimescaleDB) GetTableName(tick *proto.TickData) string {
-	// NIFTY instruments
-	if tick.InstrumentToken >= 256000 && tick.InstrumentToken < 257000 {
-		return "nifty_ticks"
+// WriteTicks inserts a batch of ticks efficiently using pgx.CopyFrom
+func (t *TimescaleDB) WriteTicks(ctx context.Context, tableName string, ticks []*proto.TickData) error {
+	if len(ticks) == 0 {
+		return nil
 	}
-	
-	// SENSEX instruments
-	if tick.InstrumentToken >= 260000 && tick.InstrumentToken < 261000 {
-		return "sensex_ticks"
+
+	rows := make([][]interface{}, 0, len(ticks))
+	for _, tick := range ticks {
+		record := protoToTickRecord(tick)
+		rows = append(rows, []interface{}{
+			record.InstrumentToken,
+			record.ExchangeUnixTimestamp,
+			record.LastPrice,
+			record.OpenInterest,
+			record.VolumeTraded,
+			record.AverageTradePrice,
+			record.TickReceivedTime,
+			record.TickStoredInDbTime,
+		})
 	}
-	
-	// Default to NIFTY if we can't determine
-	return "nifty_ticks"
+
+	colNames := []string{
+		"instrument_token",
+		"exchange_unix_timestamp",
+		"last_price",
+		"open_interest",
+		"volume_traded",
+		"average_trade_price",
+		"tick_received_time",
+		"tick_stored_in_db_time",
+	}
+
+	copyCount, err := t.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{tableName},
+		colNames,
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		t.log.Error("Failed to batch write ticks", map[string]interface{}{
+			"error":     err.Error(),
+			"table":     tableName,
+			"batch_len": len(ticks),
+		})
+		return fmt.Errorf("failed to batch write ticks: %w", err)
+	}
+
+	if int(copyCount) != len(ticks) {
+		t.log.Error("Batch write: unexpected number of rows written", map[string]interface{}{
+			"expected": len(ticks),
+			"actual":   copyCount,
+			"table":    tableName,
+		})
+	}
+
+	return nil
 }
 
 // Complete WriteTick method
-func (t *TimescaleDB) WriteTick(tick *proto.TickData) error {
-	tableName := t.GetTableName(tick)
+func (t *TimescaleDB) WriteTick(ctx context.Context, tableName string, tick *proto.TickData) error {
 	record := protoToTickRecord(tick)
-	ctx := context.Background()
 
 	query := fmt.Sprintf(`
 		INSERT INTO %s (

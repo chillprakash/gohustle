@@ -3,13 +3,12 @@ package nats
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"sync"
 	"time"
 
 	"gohustle/cache"
 	"gohustle/core"
-	"gohustle/filestore"
+	"gohustle/db"
 	"gohustle/logger"
 	pb "gohustle/proto"
 
@@ -175,37 +174,81 @@ func (c *TickConsumer) Start(ctx context.Context, subject string, queue string) 
 
 // processMessages handles messages from the channel
 func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
+	const MaxBatchSize = 100
+	const BatchTimeout = 25 * time.Millisecond
+
 	c.log.Info("Started message processor", map[string]interface{}{
 		"worker_id": workerId,
 	})
 
-	drainTimer := time.NewTicker(5 * time.Millisecond)
-	defer drainTimer.Stop()
+	batch := make([]*pb.TickData, 0, MaxBatchSize)
+	ticker := time.NewTicker(BatchTimeout)
+	defer ticker.Stop()
+
+	flushBatch := func() {
+		if len(batch) == 0 {
+			return
+		}
+		ctx := context.Background()
+		// Group ticks by table name
+		ticksByTable := make(map[string][]*pb.TickData)
+		for _, tick := range batch {
+			tableName := core.GetTableNameForToken(ctx, tick.InstrumentToken)
+			ticksByTable[tableName] = append(ticksByTable[tableName], tick)
+		}
+		// Write each group to DB
+		totalProcessed := 0
+		for tableName, ticks := range ticksByTable {
+			if err := db.GetTimescaleDB().WriteTicks(ctx, tableName, ticks); err != nil {
+				c.log.Error("Failed to batch write ticks to TimescaleDB", map[string]interface{}{
+					"worker_id": workerId,
+					"batch_len": len(ticks),
+					"table":     tableName,
+					"error":     err.Error(),
+				})
+				c.incrementErrorCount()
+			} else {
+				totalProcessed += len(ticks)
+			}
+		}
+		c.incrementProcessedCount(uint64(totalProcessed))
+		batch = batch[:0]
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
+			flushBatch()
 			c.log.Info("Message processor shutting down", map[string]interface{}{
 				"worker_id": workerId,
 			})
 			return
-		case <-drainTimer.C:
-			drainCount := 0
-			for drainCount < 100 { // Process up to 100 messages at once
-				select {
-				case msg := <-c.msgChan:
-					c.handleMessage(msg, workerId)
-					drainCount++
-				default:
-					goto done
-				}
-			}
-		done:
-			if drainCount > 0 {
-				c.log.Debug("Processed messages", map[string]interface{}{
+		case <-ticker.C:
+			flushBatch()
+		case msg := <-c.msgChan:
+			tick := &pb.TickData{}
+			if err := proto.Unmarshal(msg.Data, tick); err != nil {
+				c.log.Error("Failed to unmarshal tick data", map[string]interface{}{
 					"worker_id": workerId,
-					"count":     drainCount,
+					"error":     err.Error(),
 				})
+				c.incrementErrorCount()
+				continue
+			}
+
+			// Store data in Redis (per-tick)
+			if err := c.storeTickInRedis(tick); err != nil {
+				c.log.Error("Failed to store tick in Redis", map[string]interface{}{
+					"worker_id": workerId,
+					"error":     err.Error(),
+				})
+				c.incrementErrorCount()
+				continue
+			}
+
+			batch = append(batch, tick)
+			if len(batch) >= MaxBatchSize {
+				flushBatch()
 			}
 		}
 	}
@@ -238,19 +281,6 @@ func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
 		return
 	}
 
-	// Write to tick store
-	if err := c.writeTickToStore(tick, workerId); err != nil {
-		c.log.Error("Failed to write tick to store", map[string]interface{}{
-			"worker_id": workerId,
-			"index":     tick.InstrumentToken,
-			"error":     err.Error(),
-		})
-		c.incrementErrorCount()
-		return
-	}
-
-	c.incrementProcessedCount(1)
-	c.incrementReceivedCount()
 }
 
 // storeTickInRedis handles storing tick data in Redis
@@ -298,30 +328,6 @@ func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
 		}
 	}
 
-	return nil
-}
-
-// writeTickToStore handles writing tick data to the file store
-func (c *TickConsumer) writeTickToStore(tick *pb.TickData, workerId int) error {
-	// First convert string to uint64 (as strconv.ParseUint returns uint64)
-	bankNiftyToken, err := strconv.ParseUint(core.GetIndices().BANKNIFTY.InstrumentToken, 10, 32)
-	if err != nil {
-		// Handle error appropriately
-		c.log.Error("Error converting BankNifty token", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil
-	}
-
-	// Now compare with the tick's instrument token
-	if tick.InstrumentToken == uint32(bankNiftyToken) {
-		return nil
-	}
-
-	tickStore := filestore.GetTickStore()
-	if err := tickStore.WriteTick(tick); err != nil {
-		return fmt.Errorf("failed to write tick to store: %w", err)
-	}
 	return nil
 }
 
@@ -373,14 +379,6 @@ func (c *TickConsumer) cleanup() {
 	}
 	c.subscriptions = nil
 	c.subMu.Unlock()
-
-	// Close tick store
-	tickStore := filestore.GetTickStore()
-	if err := tickStore.Close(); err != nil {
-		c.log.Error("Failed to close tick store", map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
 
 	c.log.Info("Cleanup complete")
 }

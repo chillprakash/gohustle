@@ -6,6 +6,7 @@ Nats for Multiplexing of some sort.
 Writing data to WAL and accessing.
 
 Saved the complete data. 
+Was able to export file completely. But, felt the data is big there.
 
 Analysis:
 Actually, we dont need that big of a data.

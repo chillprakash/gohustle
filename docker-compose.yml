@@ -1,41 +1,62 @@
 version: '3.8'
 
 services:
-  nats:
-    image: nats:latest
-    command: 
-      - "--js"  # Enable JetStream
-      - "--server_name=nats-1"
-      - "--cluster_name=gohustle"
-    ports:
-      - "4222:4222"  # Client connections
-      - "8222:8222"  # HTTP monitoring
-    volumes:
-      - nats_data:/data
-    environment:
-      - NATS_SERVER_NAME=nats-1
-      - NATS_CLUSTER_NAME=gohustle
-    networks:
-      - gohustle_network
-
   redis:
-    image: redis/redis-stack-server:latest
+    image: arm64v8/redis:6.0-alpine3.19
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - 'redis_data:/data'
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     deploy:
       resources:
         limits:
-          memory: 1G
-    networks:
-      - gohustle_network
+          memory: 384M
+        reservations:
+          memory: 128M
+  
+  nats:
+    image: nats:2.9-alpine
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    command: ["-js", "-m", "8222"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+  
+  timescaledb:
+    image: timescale/timescaledb:latest-pg14
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=gohustle
+      # Performance tuning
+      - TIMESCALEDB_TUNE_MAX_CONNECTIONS=100
+      - TIMESCALEDB_TUNE_MAX_BACKGROUND_WORKERS=8
+      - TIMESCALEDB_TUNE_MEMORY=1GB
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
-  nats_data:
   redis_data:
     driver: local
-
-networks:
-  gohustle_network:
-    driver: bridge 
+  timescaledb_data:
+    driver: local

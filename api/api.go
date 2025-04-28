@@ -663,17 +663,25 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Get metrics store instance
-	metricsStore, err := db.GetMetricsStore()
-	if err != nil {
-		s.log.Error("Failed to get metrics store", map[string]interface{}{
-			"error": err.Error(),
-		})
-		sendErrorResponse(w, "Failed to get metrics store", http.StatusInternalServerError)
-		return
-	}
+	// Use TimescaleDB directly for metrics
+	var dbMetrics []*db.IndexMetrics
+	var err error
 
 	var metrics []*types.MetricsData
+
+	// Helper to convert db.IndexMetrics to types.MetricsData
+	convertIndexMetrics := func(dbMetrics []*db.IndexMetrics) []*types.MetricsData {
+		var result []*types.MetricsData
+		for _, m := range dbMetrics {
+			result = append(result, &types.MetricsData{
+				UnderlyingPrice: m.SpotPrice,
+				SyntheticFuture: m.FairPrice,
+				LowestStraddle:  m.StraddlePrice,
+				Timestamp:       m.Timestamp.UnixMilli(),
+			})
+		}
+		return result
+	}
 
 	switch req.Mode {
 	case "realtime":
@@ -686,10 +694,13 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 				return
 			}
 			// Get only newer points
-			metrics, err = metricsStore.GetMetricsAfterTimestamp(req.Index, lastKnown)
+			// Get points after lastKnown timestamp (assume milliseconds since epoch)
+			startTime := time.UnixMilli(lastKnown)
+			endTime := time.Now()
+			dbMetrics, err = db.GetTimescaleDB().GetIndexMetricsInTimeRange(req.Index, startTime, endTime)
 		} else {
 			// Get latest point only
-			metrics, err = metricsStore.GetMetrics(req.Index, "5s", 1) // Use shortest interval for real-time
+			dbMetrics, err = db.GetTimescaleDB().GetLatestIndexMetrics(req.Index, 1)
 		}
 
 	case "historical":
@@ -741,12 +752,12 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 		}
 
 		if startTime > 0 && endTime > 0 {
-			metrics, err = metricsStore.GetMetricsInTimeRange(req.Index, req.Interval, startTime, endTime)
+			dbMetrics, err = db.GetTimescaleDB().GetIndexMetricsInTimeRange(req.Index, time.UnixMilli(startTime), time.UnixMilli(endTime))
 		} else if req.Count > 0 {
-			metrics, err = metricsStore.GetMetrics(req.Index, req.Interval, req.Count)
+			dbMetrics, err = db.GetTimescaleDB().GetLatestIndexMetrics(req.Index, req.Count)
 		} else {
 			// Default to last 50 points if no time range or count specified
-			metrics, err = metricsStore.GetMetrics(req.Index, req.Interval, 50)
+			dbMetrics, err = db.GetTimescaleDB().GetLatestIndexMetrics(req.Index, 50)
 		}
 
 	default:
@@ -757,11 +768,14 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		s.log.Error("Failed to fetch metrics", map[string]interface{}{
 			"error": err.Error(),
-			"mode":  req.Mode,
-			"index": req.Index,
 		})
 		sendErrorResponse(w, "Failed to fetch metrics", http.StatusInternalServerError)
 		return
+	}
+
+	// If dbMetrics was used, convert to API type
+	if dbMetrics != nil {
+		metrics = convertIndexMetrics(dbMetrics)
 	}
 
 	// Convert to response format

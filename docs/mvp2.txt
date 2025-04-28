@@ -1,3 +1,5 @@
+MVP2 will have Go, Redis, Nats, TimescaleDB.
+
 I connect to Zerodha/Fyers websocket.
 I Subscribe around 500-600 instruments.
 In worst case, each instument can send a tick per second.
@@ -96,8 +98,8 @@ as timseries data to TimeScaleDB. (This is for future analysis. Even if there is
 
 I also wanna update the last_price to redis, for quick access.
 
-Let me know how can i design the ingestion. The data writes to TimescalDB can be bit delayed, but should be consistent.
-Data write on redis should be instant. No delay is permitted.
+Let me know how can i design the ingestion. 
+reliable pipeline that guarantees instant Redis updates and eventual TimescaleDB inserts, while keeping things simple:
 
 I currently have GO, Redis, Nats and WAL.(No timescaldb)
 

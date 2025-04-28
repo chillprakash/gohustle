@@ -196,21 +196,23 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 				defer wg.Done()
 
 				// Get metrics store instance
-				metricsStore, err := db.GetMetricsStore()
-				if err != nil {
-					errChan <- fmt.Errorf("failed to get metrics store for interval %s: %w", interval.Name, err)
-					return
-				}
 
-				// Store metrics in SQLite
-				if err := metricsStore.StoreMetrics(index, interval.Name, metrics); err != nil {
+				// Store metrics in TimescaleDB
+				indexMetrics := &db.IndexMetrics{
+					IndexName:     index,
+					SpotPrice:     metrics.UnderlyingPrice,
+					FairPrice:     metrics.SyntheticFuture,
+					StraddlePrice: metrics.LowestStraddle,
+					Timestamp:     time.Now(),
+				}
+				if err := db.GetTimescaleDB().StoreIndexMetrics(index, indexMetrics); err != nil {
 					errChan <- fmt.Errorf("failed to store metrics for interval %s: %w", interval.Name, err)
 					return
 				}
 
 				// Run cleanup in a separate goroutine
 				go func() {
-					if err := metricsStore.CleanupOldMetrics(interval.TTL); err != nil {
+					if err := db.GetTimescaleDB().CleanupOldMetrics(interval.TTL); err != nil {
 						m.log.Error("Failed to cleanup old metrics", map[string]interface{}{
 							"error":    err.Error(),
 							"interval": interval.Name,

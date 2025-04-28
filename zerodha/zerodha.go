@@ -43,7 +43,6 @@ type KiteConnect struct {
 	tokens  []uint32
 
 	// Dependencies
-	db     *db.SQLiteHelper
 	log    *logger.Logger
 	config *config.Config
 
@@ -86,21 +85,12 @@ func initializeKiteConnect() *KiteConnect {
 	log := logger.L()
 	cfg := config.GetConfig()
 
-	// Create SQLite instance
-	dbHelper, err := db.GetSQLiteHelper()
-	if err != nil {
-		log.Error("Failed to create SQLite instance", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil
-	}
-
 	kc := &KiteConnect{
 		Kite:    kiteconnect.New(cfg.Kite.APIKey),
 		Tickers: make([]*kiteticker.Ticker, MaxConnections),
-		db:      dbHelper,
-		log:     log,
-		config:  cfg,
+
+		log:    log,
+		config: cfg,
 	}
 
 	// Get valid token and set it
@@ -131,7 +121,7 @@ func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
 	if k.IsTokenValid(ctx) {
 		token, err := k.getStoredToken(ctx)
 		if err == nil && token != "" {
-			k.log.Info("Found valid token in SQLite", map[string]interface{}{
+			k.log.Info("Found valid token in TimescaleDB", map[string]interface{}{
 				"token_length": len(token),
 			})
 			return token, nil
@@ -146,8 +136,8 @@ func (k *KiteConnect) IsTokenValid(ctx context.Context) bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 
-	cred, err := k.db.GetCredential(k.getTokenKey())
-	if err != nil || cred == nil {
+	cred, err := db.GetTimescaleDB().GetCredential(k.getTokenKey())
+	if err != nil || cred == "" {
 		k.log.Info("No credential found or error retrieving", map[string]interface{}{
 			"error": err,
 		})
@@ -155,7 +145,7 @@ func (k *KiteConnect) IsTokenValid(ctx context.Context) bool {
 	}
 
 	var tokenData token.TokenData
-	if err := json.Unmarshal([]byte(cred.Value), &tokenData); err != nil {
+	if err := json.Unmarshal([]byte(cred), &tokenData); err != nil {
 		k.log.Error("Failed to unmarshal token data", map[string]interface{}{
 			"error": err.Error(),
 		})
@@ -222,7 +212,7 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 	})
 
 	// Store the marshaled TokenData as a string in SQLite
-	err = k.db.StoreCredential(k.getTokenKey(), string(tokenBytes))
+	err = db.GetTimescaleDB().StoreCredential(k.getTokenKey(), string(tokenBytes))
 	if err != nil {
 		k.log.Error("Failed to store token in SQLite", map[string]interface{}{
 			"error": err.Error(),
@@ -239,7 +229,7 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 	})
 
 	// Verify the stored token
-	storedCred, err := k.db.GetCredential(k.getTokenKey())
+	storedCred, err := db.GetTimescaleDB().GetCredential(k.getTokenKey())
 	if err != nil {
 		k.log.Error("Failed to verify stored token", map[string]interface{}{
 			"error": err.Error(),
@@ -248,7 +238,7 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 		return fmt.Errorf("failed to verify stored token: %w", err)
 	}
 
-	if storedCred == nil {
+	if storedCred == "" {
 		k.log.Error("Stored token not found during verification", map[string]interface{}{
 			"key": k.getTokenKey(),
 		})
@@ -256,7 +246,7 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 	}
 
 	var storedTokenData token.TokenData
-	if err := json.Unmarshal([]byte(storedCred.Value), &storedTokenData); err != nil {
+	if err := json.Unmarshal([]byte(storedCred), &storedTokenData); err != nil {
 		k.log.Error("Failed to unmarshal stored token data", map[string]interface{}{
 			"error": err.Error(),
 			"key":   k.getTokenKey(),
@@ -415,13 +405,13 @@ func (k *KiteConnect) getTokenKey() string {
 }
 
 func (k *KiteConnect) getStoredToken(ctx context.Context) (string, error) {
-	cred, err := k.db.GetCredential(k.getTokenKey())
-	if err != nil || cred == nil {
+	cred, err := db.GetTimescaleDB().GetCredential(k.getTokenKey())
+	if err != nil || cred == "" {
 		return "", fmt.Errorf("no token found")
 	}
 
 	var tokenData token.TokenData
-	if err := json.Unmarshal([]byte(cred.Value), &tokenData); err != nil {
+	if err := json.Unmarshal([]byte(cred), &tokenData); err != nil {
 		return "", err
 	}
 

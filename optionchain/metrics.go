@@ -58,13 +58,6 @@ func (m *MetricsManager) shouldStoreForInterval(timestamp time.Time, duration ti
 // storeMetricsInPipeline adds commands to the Redis pipeline for storing metrics
 func (m *MetricsManager) storeMetricsInPipeline(pipe redis.Pipeliner, baseKey string, data *types.MetricsData, ttl time.Duration) {
 	// Get metrics store instance
-	metricsStore, err := db.GetMetricsStore()
-	if err != nil {
-		logger.L().Error("Failed to get metrics store", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return
-	}
 
 	// Extract index and interval from baseKey (format: metrics:interval:index)
 	parts := strings.Split(baseKey, ":")
@@ -78,8 +71,15 @@ func (m *MetricsManager) storeMetricsInPipeline(pipe redis.Pipeliner, baseKey st
 	interval := parts[1]
 	index := parts[2]
 
-	// Store metrics in SQLite
-	if err := metricsStore.StoreMetrics(index, interval, data); err != nil {
+	// Store metrics in TimescaleDB
+	indexMetrics := &db.IndexMetrics{
+		IndexName:     index,
+		SpotPrice:     data.UnderlyingPrice,
+		FairPrice:     data.SyntheticFuture,
+		StraddlePrice: data.LowestStraddle,
+		Timestamp:     time.Now(),
+	}
+	if err := db.GetTimescaleDB().StoreIndexMetrics(index, indexMetrics); err != nil {
 		logger.L().Error("Failed to store metrics", map[string]interface{}{
 			"error":    err.Error(),
 			"index":    index,
@@ -90,7 +90,7 @@ func (m *MetricsManager) storeMetricsInPipeline(pipe redis.Pipeliner, baseKey st
 
 	// Run cleanup in a goroutine to avoid blocking
 	go func() {
-		if err := metricsStore.CleanupOldMetrics(ttl); err != nil {
+		if err := db.GetTimescaleDB().CleanupOldMetrics(ttl); err != nil {
 			logger.L().Error("Failed to cleanup old metrics", map[string]interface{}{
 				"error": err.Error(),
 			})

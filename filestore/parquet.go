@@ -3,6 +3,7 @@ package filestore
 import (
 	"context"
 	"fmt"
+	"gohustle/utils"
 	"log"
 	"os"
 	"path/filepath"
@@ -55,7 +56,7 @@ func GetParquetStore() *ParquetStore {
 		parquetStoreInstance = &ParquetStore{
 			writers:    make(map[string]*ParquetWriter),
 			log:        logger.L(),
-			currentDay: time.Now().Format("2006-01-02"),
+			currentDay: utils.NowIST().Format("2006-01-02"),
 		}
 
 		// Create data directory if it doesn't exist
@@ -97,7 +98,7 @@ func (ps *ParquetStore) rotateFile(index string, currentDay string) error {
 	// Check if file exists
 	if _, err := os.Stat(filePath); err == nil {
 		// File exists, create a backup with timestamp
-		backupPath := filePath + fmt.Sprintf(".%s.bak", time.Now().Format("150405"))
+		backupPath := filePath + fmt.Sprintf(".%s.bak", utils.NowIST().Format("150405"))
 		if err := os.Rename(filePath, backupPath); err != nil {
 			return fmt.Errorf("failed to create backup of existing file: %w", err)
 		}

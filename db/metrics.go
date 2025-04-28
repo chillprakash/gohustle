@@ -16,29 +16,19 @@ type IndexMetrics struct {
 	SpotPrice     float64   `db:"spot_price"`
 	FairPrice     float64   `db:"fair_price"`
 	StraddlePrice float64   `db:"straddle_price"`
+	ATMStrike     float64   `db:"atm_strike"`
 	Timestamp     time.Time `db:"timestamp"`
 }
 
-// StraddleMetrics holds detailed information about straddle calculations
-type StraddleMetrics struct {
-	ID            int64     `db:"id"`
-	IndexName     string    `db:"index_name"`
-	Strike        float64   `db:"strike"`
-	StraddlePrice float64   `db:"straddle_price"`
-	FairPrice     float64   `db:"fair_price"`
-	CallLTP       float64   `db:"call_ltp"`
-	PutLTP        float64   `db:"put_ltp"`
-	Timestamp     time.Time `db:"timestamp"`
-}
 
 // StoreIndexMetrics stores index metrics in TimescaleDB
 func (t *TimescaleDB) StoreIndexMetrics(indexName string, metrics *IndexMetrics) error {
 	ctx := context.Background()
 	query := `
 		INSERT INTO index_metrics (
-			index_name, spot_price, fair_price, straddle_price, timestamp
+			index_name, spot_price, fair_price, straddle_price, atm_strike, timestamp
 		) VALUES (
-			@index_name, @spot_price, @fair_price, @straddle_price, @timestamp
+			@index_name, @spot_price, @fair_price, @straddle_price, @atm_strike, @timestamp
 		)
 	`
 
@@ -47,6 +37,7 @@ func (t *TimescaleDB) StoreIndexMetrics(indexName string, metrics *IndexMetrics)
 		"spot_price":     metrics.SpotPrice,
 		"fair_price":     metrics.FairPrice,
 		"straddle_price": metrics.StraddlePrice,
+		"atm_strike":     metrics.ATMStrike,
 		"timestamp":      pgtype.Timestamp{Time: metrics.Timestamp, Valid: true},
 	}
 
@@ -62,39 +53,6 @@ func (t *TimescaleDB) StoreIndexMetrics(indexName string, metrics *IndexMetrics)
 	return nil
 }
 
-// StoreStraddleMetrics stores straddle metrics in TimescaleDB
-func (t *TimescaleDB) StoreStraddleMetrics(indexName string, metrics *StraddleMetrics) error {
-	ctx := context.Background()
-	query := `
-		INSERT INTO straddle_metrics (
-			index_name, strike, straddle_price, fair_price, call_ltp, put_ltp, timestamp
-		) VALUES (
-			@index_name, @strike, @straddle_price, @fair_price, @call_ltp, @put_ltp, @timestamp
-		)
-	`
-
-	args := pgx.NamedArgs{
-		"index_name":     indexName,
-		"strike":         metrics.Strike,
-		"straddle_price": metrics.StraddlePrice,
-		"fair_price":     metrics.FairPrice,
-		"call_ltp":       metrics.CallLTP,
-		"put_ltp":        metrics.PutLTP,
-		"timestamp":      pgtype.Timestamp{Time: metrics.Timestamp, Valid: true},
-	}
-
-	_, err := t.pool.Exec(ctx, query, args)
-	if err != nil {
-		t.log.Error("Failed to store straddle metrics", map[string]interface{}{
-			"error":      err.Error(),
-			"index_name": indexName,
-			"strike":     metrics.Strike,
-		})
-		return fmt.Errorf("failed to store straddle metrics: %w", err)
-	}
-
-	return nil
-}
 
 // GetLatestIndexMetrics retrieves the latest metrics for a given index
 func (t *TimescaleDB) GetLatestIndexMetrics(indexName string, limit int) ([]*IndexMetrics, error) {
@@ -139,51 +97,6 @@ func (t *TimescaleDB) GetLatestIndexMetrics(indexName string, limit int) ([]*Ind
 	return metrics, nil
 }
 
-// GetStraddleMetrics retrieves straddle metrics for a given index and strike
-func (t *TimescaleDB) GetStraddleMetrics(indexName string, strike float64, limit int) ([]*StraddleMetrics, error) {
-	ctx := context.Background()
-	query := `
-		SELECT id, index_name, strike, straddle_price, fair_price, call_ltp, put_ltp, timestamp
-		FROM straddle_metrics
-		WHERE index_name = $1 AND strike = $2
-		ORDER BY timestamp DESC
-		LIMIT $3
-	`
-
-	rows, err := t.pool.Query(ctx, query, indexName, strike, limit)
-	if err != nil {
-		t.log.Error("Failed to query straddle metrics", map[string]interface{}{
-			"error":      err.Error(),
-			"index_name": indexName,
-			"strike":     strike,
-		})
-		return nil, fmt.Errorf("failed to query straddle metrics: %w", err)
-	}
-	defer rows.Close()
-
-	var metrics []*StraddleMetrics
-	for rows.Next() {
-		m := &StraddleMetrics{}
-		if err := rows.Scan(
-			&m.ID,
-			&m.IndexName,
-			&m.Strike,
-			&m.StraddlePrice,
-			&m.FairPrice,
-			&m.CallLTP,
-			&m.PutLTP,
-			&m.Timestamp,
-		); err != nil {
-			t.log.Error("Failed to scan straddle metrics row", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, fmt.Errorf("failed to scan straddle metrics row: %w", err)
-		}
-		metrics = append(metrics, m)
-	}
-
-	return metrics, nil
-}
 
 // GetIndexMetricsInTimeRange retrieves index metrics within the specified time range
 func (t *TimescaleDB) GetIndexMetricsInTimeRange(indexName string, startTime, endTime time.Time) ([]*IndexMetrics, error) {
@@ -229,52 +142,6 @@ func (t *TimescaleDB) GetIndexMetricsInTimeRange(indexName string, startTime, en
 	return metrics, nil
 }
 
-// GetStraddleMetricsInTimeRange retrieves straddle metrics within the specified time range
-func (t *TimescaleDB) GetStraddleMetricsInTimeRange(indexName string, strike float64, startTime, endTime time.Time) ([]*StraddleMetrics, error) {
-	ctx := context.Background()
-	query := `
-		SELECT id, index_name, strike, straddle_price, fair_price, call_ltp, put_ltp, timestamp
-		FROM straddle_metrics
-		WHERE index_name = $1 AND strike = $2 AND timestamp >= $3 AND timestamp <= $4
-		ORDER BY timestamp ASC
-	`
-
-	rows, err := t.pool.Query(ctx, query, indexName, strike, startTime, endTime)
-	if err != nil {
-		t.log.Error("Failed to query straddle metrics in time range", map[string]interface{}{
-			"error":      err.Error(),
-			"index_name": indexName,
-			"strike":     strike,
-			"start_time": startTime,
-			"end_time":   endTime,
-		})
-		return nil, fmt.Errorf("failed to query straddle metrics in time range: %w", err)
-	}
-	defer rows.Close()
-
-	var metrics []*StraddleMetrics
-	for rows.Next() {
-		m := &StraddleMetrics{}
-		if err := rows.Scan(
-			&m.ID,
-			&m.IndexName,
-			&m.Strike,
-			&m.StraddlePrice,
-			&m.FairPrice,
-			&m.CallLTP,
-			&m.PutLTP,
-			&m.Timestamp,
-		); err != nil {
-			t.log.Error("Failed to scan straddle metrics row", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, fmt.Errorf("failed to scan straddle metrics row: %w", err)
-		}
-		metrics = append(metrics, m)
-	}
-
-	return metrics, nil
-}
 
 // CleanupOldMetrics removes metrics older than the retention period
 func (t *TimescaleDB) CleanupOldMetrics(retentionPeriod time.Duration) error {
@@ -291,15 +158,6 @@ func (t *TimescaleDB) CleanupOldMetrics(retentionPeriod time.Duration) error {
 		return fmt.Errorf("failed to clean up old index metrics: %w", err)
 	}
 
-	// Delete old straddle metrics
-	_, err = t.pool.Exec(ctx, "DELETE FROM straddle_metrics WHERE timestamp < $1", cutoff)
-	if err != nil {
-		t.log.Error("Failed to clean up old straddle metrics", map[string]interface{}{
-			"error":  err.Error(),
-			"cutoff": cutoff,
-		})
-		return fmt.Errorf("failed to clean up old straddle metrics: %w", err)
-	}
 
 	return nil
 }

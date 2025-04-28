@@ -3,6 +3,7 @@ package cache
 import (
 	"sync"
 	"time"
+	"gohustle/utils"
 )
 
 type InMemoryCache struct {
@@ -50,7 +51,7 @@ func (c *InMemoryCache) Get(key string) (interface{}, bool) {
 		return nil, false
 	}
 
-	if time.Now().UnixNano() > item.Expiration {
+	if utils.NowIST().UnixNano() > item.Expiration {
 		return nil, false
 	}
 

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"gohustle/cache"
 	"gohustle/core"
 	"gohustle/db"
 	"gohustle/logger"
@@ -236,131 +235,11 @@ func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 				continue
 			}
 
-			// Store data in Redis (per-tick)
-			if err := c.storeTickInRedis(tick); err != nil {
-				c.log.Error("Failed to store tick in Redis", map[string]interface{}{
-					"worker_id": workerId,
-					"error":     err.Error(),
-				})
-				c.incrementErrorCount()
-				continue
-			}
-
 			batch = append(batch, tick)
 			if len(batch) >= MaxBatchSize {
 				flushBatch()
 			}
 		}
-	}
-}
-
-// handleMessage processes incoming NATS messages
-func (c *TickConsumer) handleMessage(msg *nats.Msg, workerId int) {
-	c.log.Debug("Received tick", map[string]interface{}{
-		"subject":   msg.Subject,
-		"worker_id": workerId,
-	})
-
-	tick := &pb.TickData{}
-	if err := proto.Unmarshal(msg.Data, tick); err != nil {
-		c.log.Error("Failed to unmarshal tick data", map[string]interface{}{
-			"worker_id": workerId,
-			"error":     err.Error(),
-		})
-		c.incrementErrorCount()
-		return
-	}
-
-	// Store data in Redis
-	if err := c.storeTickInRedis(tick); err != nil {
-		c.log.Error("Failed to store tick in Redis", map[string]interface{}{
-			"worker_id": workerId,
-			"error":     err.Error(),
-		})
-		c.incrementErrorCount()
-		return
-	}
-
-}
-
-// storeTickInRedis handles storing tick data in Redis
-func (c *TickConsumer) storeTickInRedis(tick *pb.TickData) error {
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		return fmt.Errorf("failed to get Redis cache: %w", err)
-	}
-
-	ltpDB := redisCache.GetLTPDB3()
-	if ltpDB == nil {
-		return fmt.Errorf("LTP Redis DB is nil")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-
-	instrumentToken := fmt.Sprintf("%d", tick.InstrumentToken)
-
-	requiredKeys := map[string]interface{}{
-		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
-		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
-		fmt.Sprintf("%s_oi", instrumentToken):                   tick.OpenInterest,
-		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
-	}
-
-	redisData := make(map[string]interface{})
-	for key, value := range requiredKeys {
-		if !isZeroValue(value) {
-			redisData[key] = value
-		}
-	}
-
-	if len(redisData) > 0 {
-		pipe := ltpDB.Pipeline()
-		for key, value := range redisData {
-			strValue := convertToString(value)
-			if strValue != "" {
-				pipe.Set(ctx, key, strValue, 12*time.Hour)
-			}
-		}
-
-		if _, err := pipe.Exec(ctx); err != nil {
-			return fmt.Errorf("failed to execute Redis pipeline for token %s: %w", instrumentToken, err)
-		}
-	}
-
-	return nil
-}
-
-// Helper functions for Redis operations
-func isZeroValue(v interface{}) bool {
-	switch v := v.(type) {
-	case int32:
-		return v == 0
-	case int64:
-		return v == 0
-	case float64:
-		return v == 0
-	case string:
-		return v == ""
-	default:
-		return v == nil
-	}
-}
-
-func convertToString(v interface{}) string {
-	switch v := v.(type) {
-	case int32:
-		return fmt.Sprintf("%d", v)
-	case int64:
-		return fmt.Sprintf("%d", v)
-	case uint32:
-		return fmt.Sprintf("%d", v)
-	case float64:
-		return fmt.Sprintf("%f", v)
-	case string:
-		return v
-	default:
-		return ""
 	}
 }
 

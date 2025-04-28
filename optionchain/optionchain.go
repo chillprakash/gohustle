@@ -203,7 +203,8 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 					SpotPrice:     metrics.UnderlyingPrice,
 					FairPrice:     metrics.SyntheticFuture,
 					StraddlePrice: metrics.LowestStraddle,
-					Timestamp:     time.Now(),
+					ATMStrike:     metrics.ATMStrike,
+					Timestamp:     now,
 				}
 				if err := db.GetTimescaleDB().StoreIndexMetrics(index, indexMetrics); err != nil {
 					errChan <- fmt.Errorf("failed to store metrics for interval %s: %w", interval.Name, err)

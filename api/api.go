@@ -18,6 +18,7 @@ import (
 	"gohustle/logger"
 	"gohustle/optionchain"
 	"gohustle/types"
+	"gohustle/utils"
 	"gohustle/zerodha"
 
 	"github.com/gorilla/mux"
@@ -290,7 +291,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 		Message: "API server is running",
 		Data: map[string]interface{}{
 			"status": "ok",
-			"time":   time.Now().Format(time.RFC3339),
+			"time":   utils.NowIST().Format(time.RFC3339),
 		},
 	}
 

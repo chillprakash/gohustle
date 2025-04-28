@@ -9,6 +9,7 @@ import (
 	"gohustle/config"
 	"gohustle/logger"
 	"gohustle/proto"
+	"gohustle/utils"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -177,8 +178,8 @@ func protoToTickRecord(tick *proto.TickData) *TickRecord {
 		AverageTradePrice:     tick.AverageTradePrice,
 
 		// Metadata
-		TickReceivedTime:   pgtype.Timestamp{Time: time.Now(), Valid: true},
-		TickStoredInDbTime: pgtype.Timestamp{Time: time.Now(), Valid: true},
+		TickReceivedTime:   pgtype.Timestamp{Time: utils.NowIST(), Valid: true},
+		TickStoredInDbTime: pgtype.Timestamp{Time: utils.NowIST(), Valid: true},
 	}
 
 	return record

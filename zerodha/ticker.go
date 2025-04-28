@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"gohustle/cache"
 	"gohustle/logger"
 	"gohustle/nats"
 	pb "gohustle/proto"
@@ -168,6 +169,14 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 	// Use hierarchical subject pattern for NATS
 	subject := fmt.Sprintf("ticks.%s", indexName)
 
+	// Store data in Redis
+	if err := k.StoreTickInRedis(protoTick); err != nil {
+		log.Error("Failed to store tick in Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
 	// Publish asynchronously
 	if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
 		log.Error("Failed to publish tick", map[string]interface{}{
@@ -213,6 +222,86 @@ func (k *KiteConnect) onNoReconnect(attempt int) {
 	log.Error("Ticker max reconnect attempts reached", map[string]interface{}{
 		"attempts": attempt,
 	})
+}
+
+// StoreTickInRedis handles storing tick data in Redis
+func (k *KiteConnect) StoreTickInRedis(tick *pb.TickData) error {
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+
+	ltpDB := redisCache.GetLTPDB3()
+	if ltpDB == nil {
+		return fmt.Errorf("LTP Redis DB is nil")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	instrumentToken := fmt.Sprintf("%d", tick.InstrumentToken)
+
+	requiredKeys := map[string]interface{}{
+		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
+		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
+		fmt.Sprintf("%s_oi", instrumentToken):                   tick.OpenInterest,
+		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
+	}
+
+	redisData := make(map[string]interface{})
+	for key, value := range requiredKeys {
+		if !isZeroValue(value) {
+			redisData[key] = value
+		}
+	}
+
+	if len(redisData) > 0 {
+		pipe := ltpDB.Pipeline()
+		for key, value := range redisData {
+			strValue := convertToString(value)
+			if strValue != "" {
+				pipe.Set(ctx, key, strValue, 12*time.Hour)
+			}
+		}
+
+		if _, err := pipe.Exec(ctx); err != nil {
+			return fmt.Errorf("failed to execute Redis pipeline for token %s: %w", instrumentToken, err)
+		}
+	}
+
+	return nil
+}
+
+func isZeroValue(v interface{}) bool {
+	switch v := v.(type) {
+	case int32:
+		return v == 0
+	case int64:
+		return v == 0
+	case float64:
+		return v == 0
+	case string:
+		return v == ""
+	default:
+		return v == nil
+	}
+}
+
+func convertToString(v interface{}) string {
+	switch v := v.(type) {
+	case int32:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case uint32:
+		return fmt.Sprintf("%d", v)
+	case float64:
+		return fmt.Sprintf("%f", v)
+	case string:
+		return v
+	default:
+		return ""
+	}
 }
 
 // Helper function to convert string tokens to uint32

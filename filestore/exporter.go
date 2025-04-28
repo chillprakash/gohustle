@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"gohustle/logger"
+	"gohustle/utils"
 	"os"
 	"path/filepath"
 	"time"
 
-	"gohustle/logger"
 	"gohustle/proto"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,7 +33,7 @@ func NewExporter(pool *pgxpool.Pool, baseDir string) *Exporter {
 
 // ExportTableToProto exports a table to a compressed protobuf file
 func (e *Exporter) ExportTableToProto(ctx context.Context, tableName string) (string, error) {
-	startTime := time.Now()
+	startTime := utils.NowIST()
 	e.logger.Info("Starting proto export", map[string]interface{}{
 		"table": tableName,
 		"time":  startTime,

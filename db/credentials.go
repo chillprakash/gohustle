@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"gohustle/utils"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -29,7 +30,7 @@ func (t *TimescaleDB) StoreCredential(key, value string) error {
 			updated_at = @updated_at
 	`
 
-	now := time.Now()
+	now := utils.NowIST()
 	args := pgx.NamedArgs{
 		"key":        key,
 		"value":      value,

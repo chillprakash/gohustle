@@ -3,10 +3,10 @@ package auth
 import (
 	"crypto/rand"
 	"fmt"
-	"time"
-
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
+	"gohustle/utils"
+	"time"
 )
 
 var (
@@ -65,7 +65,7 @@ func ValidateCredentials(username, password string) bool {
 func GenerateToken(username string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"username": username,
-		"exp":      time.Now().Add(24 * time.Hour).Unix(),
+		"exp":      utils.NowIST().Add(24 * time.Hour).Unix(),
 	})
 
 	tokenString, err := token.SignedString(jwtSecret)

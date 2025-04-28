@@ -1,6 +1,7 @@
 package zerodha
 
 import (
+	"gohustle/utils"
 	"container/list"
 	"context"
 	"fmt"
@@ -167,7 +168,7 @@ func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]s
 // DownloadInstrumentData downloads and saves instrument data
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context, instrumentNames []core.Index) error {
 	log := logger.L()
-	currentDate := time.Now().Format("02-01-2006")
+	currentDate := utils.NowIST().Format("02-01-2006")
 	fileStore := filestore.NewDiskFileStore()
 
 	// Check if file already exists for today
@@ -213,7 +214,7 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 	}
 
 	cache := cache.GetInMemoryCacheInstance()
-	now := time.Now().Truncate(24 * time.Hour)
+	now := utils.NowIST().Truncate(24 * time.Hour)
 
 	// Get allowed indices from core package
 	allowedIndices := core.GetIndices().GetAllNames()
@@ -229,7 +230,7 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 		}
 
 		// Get today's date truncated to start of day
-		today := time.Now().Truncate(24 * time.Hour)
+		today := utils.NowIST().Truncate(24 * time.Hour)
 
 		// Filter and convert valid dates to string format
 		dateStrs := make([]string, 0, len(dates))
@@ -313,7 +314,7 @@ func (k *KiteConnect) GetCachedInstruments() ([]string, bool) {
 // GetInstrumentExpiries reads the gzipped instrument data and returns expiry dates
 func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[string][]time.Time, error) {
 	log := logger.L()
-	currentDate := time.Now().Format("02-01-2006")
+	currentDate := utils.NowIST().Format("02-01-2006")
 	fileStore := filestore.NewDiskFileStore()
 
 	// Read the gzipped data
@@ -508,7 +509,7 @@ func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context
 	log := logger.L()
 	log.Info("Initializing lookup maps for File Store", nil)
 
-	currentDate := time.Now().Format("02-01-2006")
+	currentDate := utils.NowIST().Format("02-01-2006")
 	fileStore := filestore.NewDiskFileStore()
 	cache := cache.GetInMemoryCacheInstance()
 
@@ -695,7 +696,7 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 	log := logger.L()
 	log.Info("Initializing lookup maps for File Store", nil)
 
-	currentDate := time.Now().Format("02-01-2006")
+	currentDate := utils.NowIST().Format("02-01-2006")
 	fileStore := filestore.NewDiskFileStore()
 	cache := cache.GetInMemoryCacheInstance()
 
@@ -817,7 +818,7 @@ func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(ctx context.Context) (
 }
 
 func generateTargetFileName(expiry time.Time, index string) string {
-	currentDate := time.Now().Format("020106") // ddmmyy format
+	currentDate := utils.NowIST().Format("020106") // ddmmyy format
 
 	// For indices (when expiry is zero time)
 	if expiry.IsZero() {
@@ -873,7 +874,7 @@ func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []co
 
 func (k *KiteConnect) saveInstrumentsToFile(instruments []kiteconnect.Instrument) error {
 	log := logger.L()
-	currentDate := time.Now().Format("02-01-2006")
+	currentDate := utils.NowIST().Format("02-01-2006")
 	fileStore := filestore.NewDiskFileStore()
 
 	// Convert to proto message
@@ -925,7 +926,7 @@ func convertToProtoInstruments(instruments []kiteconnect.Instrument) *Instrument
 // GetInstrumentExpirySymbolMap reads instrument data and organizes trading symbols
 func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error) {
 	log := logger.L()
-	currentDate := time.Now().Format("02-01-2006")
+	currentDate := utils.NowIST().Format("02-01-2006")
 	fileStore := filestore.NewDiskFileStore()
 
 	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
@@ -1083,7 +1084,7 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, indices []str
 	// _, _, _ = k.CreateLookupMapWithExpiryVSTokenMap(ctx)
 
 	// Find upcoming expiry
-	now := time.Now().Truncate(24 * time.Hour)
+	now := utils.NowIST().Truncate(24 * time.Hour)
 	upcomingExpiry := make(map[string]time.Time)
 
 	for _, index := range indices {
@@ -1168,7 +1169,7 @@ func (k *KiteConnect) GetIndexVsExpiryMap(ctx context.Context) (map[string][]tim
 		for _, targetIndex := range indices {
 			if index == targetIndex {
 				// Filter only future expiries
-				now := time.Now().Truncate(24 * time.Hour)
+				now := utils.NowIST().Truncate(24 * time.Hour)
 				futureExpiries := make([]time.Time, 0)
 
 				for _, date := range dates {

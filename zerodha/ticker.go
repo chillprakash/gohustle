@@ -140,54 +140,50 @@ func (k *KiteConnect) CloseTicker() error {
 // Internal handlers
 func (k *KiteConnect) handleTick(tick models.Tick) {
 	log := logger.L()
-	natsProducer := nats.GetTickProducer()
 
-	// Create a short-lived context for this tick
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
+	// Parallelize Redis storage
+	go func(t models.Tick) {
+		if err := k.StoreTickInRedis(&t); err != nil {
+			log.Error("Failed to store tick in Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}(tick)
 
-	indexName, err := k.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", tick.InstrumentToken))
-	if err != nil {
-		log.Error("Failed to get index name", map[string]interface{}{
-			"error": err.Error(),
-			"token": tick.InstrumentToken,
-		})
-		return
-	}
+	// Parallelize NATS publishing
+	go func(t models.Tick) {
+		natsProducer := nats.GetTickProducer()
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
 
-	// Convert to protobuf with proper type conversions
-	protoTick := &pb.TickData{
-		// Basic info
-		InstrumentToken:       tick.InstrumentToken,
-		ExchangeUnixTimestamp: tick.Timestamp.Unix(),
-		LastPrice:             tick.LastPrice,
-		VolumeTraded:          tick.VolumeTraded,
-		AverageTradePrice:     tick.AverageTradePrice,
-		OpenInterest:          tick.OI,
-	}
+		indexName, err := k.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", t.InstrumentToken))
+		if err != nil {
+			log.Error("Failed to get index name", map[string]interface{}{
+				"error": err.Error(),
+				"token": t.InstrumentToken,
+			})
+			return
+		}
 
-	// Use hierarchical subject pattern for NATS
-	subject := fmt.Sprintf("ticks.%s", indexName)
-
-	// Store data in Redis
-	if err := k.StoreTickInRedis(protoTick); err != nil {
-		log.Error("Failed to store tick in Redis", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return
-	}
-
-	// Publish asynchronously
-	if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
-		log.Error("Failed to publish tick", map[string]interface{}{
-			"error":        err.Error(),
-			"token":        tick.InstrumentToken,
-			"index":        indexName,
-			"last_price":   tick.LastPrice,
-			"total_volume": tick.VolumeTraded,
-		})
-		return
-	}
+		protoTick := &pb.TickData{
+			InstrumentToken:       t.InstrumentToken,
+			ExchangeUnixTimestamp: t.Timestamp.Unix(),
+			LastPrice:             t.LastPrice,
+			VolumeTraded:          t.VolumeTraded,
+			AverageTradePrice:     t.AverageTradePrice,
+			OpenInterest:          t.OI,
+		}
+		subject := fmt.Sprintf("ticks.%s", indexName)
+		if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
+			log.Error("Failed to publish tick", map[string]interface{}{
+				"error":        err.Error(),
+				"token":        t.InstrumentToken,
+				"index":        indexName,
+				"last_price":   t.LastPrice,
+				"total_volume": t.VolumeTraded,
+			})
+		}
+	}(tick)
 }
 
 func (k *KiteConnect) onError(err error) {
@@ -225,7 +221,7 @@ func (k *KiteConnect) onNoReconnect(attempt int) {
 }
 
 // StoreTickInRedis handles storing tick data in Redis
-func (k *KiteConnect) StoreTickInRedis(tick *pb.TickData) error {
+func (k *KiteConnect) StoreTickInRedis(tick *models.Tick) error {
 	redisCache, err := cache.GetRedisCache()
 	if err != nil {
 		return fmt.Errorf("failed to get Redis cache: %w", err)
@@ -244,7 +240,7 @@ func (k *KiteConnect) StoreTickInRedis(tick *pb.TickData) error {
 	requiredKeys := map[string]interface{}{
 		fmt.Sprintf("%s_ltp", instrumentToken):                  tick.LastPrice,
 		fmt.Sprintf("%s_volume", instrumentToken):               tick.VolumeTraded,
-		fmt.Sprintf("%s_oi", instrumentToken):                   tick.OpenInterest,
+		fmt.Sprintf("%s_oi", instrumentToken):                   tick.OI,
 		fmt.Sprintf("%s_average_traded_price", instrumentToken): tick.AverageTradePrice,
 	}
 

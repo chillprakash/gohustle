@@ -156,7 +156,7 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 				"error":    err.Error(),
 			})
 		} else {
-			pm.log.Info("Stored token quantity", map[string]interface{}{
+			pm.log.Debug("Stored token quantity", map[string]interface{}{
 				"token":    pos.InstrumentToken,
 				"quantity": pos.Quantity,
 			})

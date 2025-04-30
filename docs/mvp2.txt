@@ -1,4 +1,5 @@
 MVP2 will have Go, Redis, Nats, TimescaleDB.
+Use Unix Socket in Redis to connect with Go app.
 
 I connect to Zerodha/Fyers websocket.
 I Subscribe around 500-600 instruments.

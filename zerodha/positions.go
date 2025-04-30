@@ -290,21 +290,43 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 	// Calculate steps for position adjustment
 	steps := []string{"1/4", "1/2", "1"}
 
-	// Add nearby strikes (this is a simplified version - you might want to add more logic)
-	strikeGap := 50.0 // Assuming 50-point strikes
+	// Set strike gap based on index name from token
+	strikeGap := 50.0
+	indexName, err := pm.kite.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", pos.InstrumentToken))
+	if err == nil {
+		if indexName == "BANKNIFTY" || indexName == "SENSEX" {
+			strikeGap = 100.0
+		}
+	}
 
-	// Extract strike price from trading symbol
+	// Extract strike price from cache using the same key as population
 	inmemoryCache := cache.GetInMemoryCacheInstance()
-	strikePrice, ok := inmemoryCache.Get(fmt.Sprintf("%d", pos.InstrumentToken))
+	strikeKey := fmt.Sprintf("strike:%d", pos.InstrumentToken)
+	strikePrice, ok := inmemoryCache.Get(strikeKey)
 	if !ok {
 		pm.log.Error("Failed to get strike price for moves calculation", map[string]interface{}{
 			"token": pos.InstrumentToken,
+			"key":   strikeKey,
 		})
 		return moves
 	}
 
-	strike, ok := strikePrice.(float64)
-	if !ok {
+	var strike float64
+	switch v := strikePrice.(type) {
+	case float64:
+		strike = v
+	case string:
+		var err error
+		strike, err = strconv.ParseFloat(v, 64)
+		if err != nil {
+			pm.log.Error("Failed to parse strike price string for moves calculation", map[string]interface{}{
+				"token": pos.InstrumentToken,
+				"value": v,
+				"error": err.Error(),
+			})
+			return moves
+		}
+	default:
 		pm.log.Error("Invalid strike price type for moves calculation", map[string]interface{}{
 			"token": pos.InstrumentToken,
 			"type":  fmt.Sprintf("%T", strikePrice),

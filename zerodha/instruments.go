@@ -1,7 +1,6 @@
 package zerodha
 
 import (
-	"gohustle/utils"
 	"container/list"
 	"context"
 	"fmt"
@@ -9,6 +8,7 @@ import (
 	"gohustle/core"
 	"gohustle/filestore"
 	"gohustle/logger"
+	"gohustle/utils"
 	"math"
 	"slices"
 	"sort"
@@ -689,6 +689,51 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// GetInstrumentDetailsByToken retrieves instrument details (trading symbol, exchange) from an instrument token
+func (k *KiteConnect) GetInstrumentDetailsByToken(ctx context.Context, instrumentToken string) (string, string, error) {
+	log := logger.L()
+
+	// Check if we have the instrument details in cache
+	instrumentMutex.RLock()
+	info, exists := reverseLookupCache[instrumentToken]
+	instrumentMutex.RUnlock()
+
+	if exists {
+		return info.Symbol, "NFO", nil // Most instruments are from NFO exchange
+	}
+
+	// If not in cache, try to load from instrument data file
+	currentDate := utils.NowIST().Format("02-01-2006")
+	fileStore := filestore.NewDiskFileStore()
+
+	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
+	if err != nil {
+		log.Error("Failed to read instrument data", map[string]interface{}{
+			"error": err.Error(),
+			"date":  currentDate,
+		})
+		return "", "", fmt.Errorf("failed to read instrument data: %w", err)
+	}
+
+	instrumentList := &InstrumentList{}
+	if err := proto.Unmarshal(data, instrumentList); err != nil {
+		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return "", "", fmt.Errorf("failed to unmarshal instrument data: %w", err)
+	}
+
+	// Look for the instrument token in the list
+	for _, inst := range instrumentList.Instruments {
+		if inst.InstrumentToken == instrumentToken {
+			// Found it - return the details
+			return inst.Tradingsymbol, inst.Exchange, nil
+		}
+	}
+
+	return "", "", fmt.Errorf("instrument token not found: %s", instrumentToken)
 }
 
 // CreateLookUpforFileStore creates a lookup map for index tokens vs Index name for lookup during websocke

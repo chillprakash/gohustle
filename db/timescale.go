@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -150,6 +151,106 @@ type Row interface {
 // CommandTag interface for exec results
 type CommandTag interface {
 	RowsAffected() int64
+}
+
+// OrderRecord struct for persisting order data
+// Matches the 'orders' table in schema.sql
+type OrderRecord struct {
+	ID            int64       `db:"id"`
+	OrderID       string      `db:"order_id"`
+	OrderType     string      `db:"order_type"`
+	GTTType       string      `db:"gtt_type"`
+	Status        string      `db:"status"`
+	Message       string      `db:"message"`
+	TradingSymbol string      `db:"trading_symbol"`
+	Exchange      string      `db:"exchange"`
+	Side          string      `db:"side"`
+	Quantity      int         `db:"quantity"`
+	Price         float64     `db:"price"`
+	TriggerPrice  float64     `db:"trigger_price"`
+	Product       string      `db:"product"`
+	Validity      string      `db:"validity"`
+	DisclosedQty  int         `db:"disclosed_qty"`
+	Tag           string      `db:"tag"`
+	UserID        string      `db:"user_id"`
+	PlacedAt      time.Time   `db:"placed_at"`
+	KiteResponse  interface{} `db:"kite_response"`
+	PaperTrading  bool        `db:"paper_trading"`
+}
+
+// ListOrders fetches all order records from the orders table
+func (t *TimescaleDB) ListOrders(ctx context.Context) ([]*OrderRecord, error) {
+	query := `SELECT id, order_id, order_type, gtt_type, status, message, trading_symbol, exchange, side, quantity, price, trigger_price, product, validity, disclosed_qty, tag, user_id, placed_at, kite_response, paper_trading FROM orders ORDER BY placed_at DESC`
+	rows, err := t.pool.Query(ctx, query)
+	if err != nil {
+		t.log.Error("Failed to list orders", map[string]interface{}{"error": err.Error()})
+		return nil, err
+	}
+	defer rows.Close()
+
+	var orders []*OrderRecord
+	for rows.Next() {
+		order := &OrderRecord{}
+		var kiteRespBytes []byte
+		err := rows.Scan(
+			&order.ID,
+			&order.OrderID,
+			&order.OrderType,
+			&order.GTTType,
+			&order.Status,
+			&order.Message,
+			&order.TradingSymbol,
+			&order.Exchange,
+			&order.Side,
+			&order.Quantity,
+			&order.Price,
+			&order.TriggerPrice,
+			&order.Product,
+			&order.Validity,
+			&order.DisclosedQty,
+			&order.Tag,
+			&order.UserID,
+			&order.PlacedAt,
+			&kiteRespBytes,
+			&order.PaperTrading,
+		)
+		if err != nil {
+			t.log.Error("Failed to scan order row", map[string]interface{}{"error": err.Error()})
+			continue
+		}
+		// Unmarshal kite_response JSON
+		if len(kiteRespBytes) > 0 {
+			_ = json.Unmarshal(kiteRespBytes, &order.KiteResponse)
+		}
+		orders = append(orders, order)
+	}
+	if err := rows.Err(); err != nil {
+		t.log.Error("Error iterating order rows", map[string]interface{}{"error": err.Error()})
+		return nil, err
+	}
+	return orders, nil
+}
+
+// InsertOrder inserts an order record into the orders table
+func (t *TimescaleDB) InsertOrder(ctx context.Context, order *OrderRecord) error {
+	query := `
+		INSERT INTO orders (
+			order_id, order_type, gtt_type, status, message, trading_symbol, exchange, side,
+			quantity, price, trigger_price, product, validity, disclosed_qty, tag, user_id, placed_at, kite_response
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+		)
+	`
+	_, err := t.pool.Exec(ctx, query,
+		order.OrderID, order.OrderType, order.GTTType, order.Status, order.Message, order.TradingSymbol, order.Exchange, order.Side,
+		order.Quantity, order.Price, order.TriggerPrice, order.Product, order.Validity, order.DisclosedQty, order.Tag, order.UserID, order.PlacedAt, order.KiteResponse,
+	)
+	if err != nil {
+		t.log.Error("Failed to insert order", map[string]interface{}{"error": err.Error(), "order_id": order.OrderID})
+		return err
+	}
+	return nil
 }
 
 // TickRecord struct aligned with proto.TickData message

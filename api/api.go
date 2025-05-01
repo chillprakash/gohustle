@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,37 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// PlaceOrderAPIRequest is the API payload for placing a regular order
+// (mirrors zerodha.PlaceOrderRequest, but with camelCase for JSON)
+type PlaceOrderAPIRequest struct {
+	// Either provide InstrumentToken OR both TradingSymbol and Exchange
+	InstrumentToken string  `json:"instrumentToken,omitempty"`
+	TradingSymbol   string  `json:"tradingSymbol,omitempty"`
+	Exchange        string  `json:"exchange,omitempty"`
+	OrderType       string  `json:"orderType"`
+	Side            string  `json:"side"`
+	Quantity        int     `json:"quantity"`
+	Price           float64 `json:"price,omitempty"`
+	TriggerPrice    float64 `json:"triggerPrice,omitempty"`
+	Product         string  `json:"product"`
+	Validity        string  `json:"validity,omitempty"`
+	DisclosedQty    int     `json:"disclosedQty,omitempty"`
+	Tag             string  `json:"tag,omitempty"`
+	PaperTrading    bool    `json:"paperTrading,omitempty"`
+}
+
+// PlaceGTTAPIRequest is the API payload for placing a GTT order
+type PlaceGTTAPIRequest struct {
+	TriggerType string `json:"triggerType"`
+	// Either provide InstrumentToken OR both TradingSymbol and Exchange
+	InstrumentToken string                   `json:"instrumentToken,omitempty"`
+	TradingSymbol   string                   `json:"tradingSymbol,omitempty"`
+	Exchange        string                   `json:"exchange,omitempty"`
+	TriggerValues   []float64                `json:"triggerValues"`
+	LastPrice       float64                  `json:"lastPrice"`
+	Orders          []map[string]interface{} `json:"orders"`
+}
+
 // Server represents the HTTP API server
 type Server struct {
 	router       *mux.Router
@@ -34,6 +66,226 @@ type Server struct {
 	log          *logger.Logger
 	tickStore    *filestore.TickStore
 	parquetStore *filestore.ParquetStore
+}
+
+// --- Order Handlers ---
+func (s *Server) handleGetOrders(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	orders, err := db.GetTimescaleDB().ListOrders(ctx)
+	if err != nil {
+		s.log.Error("Failed to fetch orders", map[string]interface{}{"error": err.Error()})
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "Failed to fetch orders",
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"orders":  orders,
+	})
+}
+
+func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
+	var req PlaceOrderAPIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	// If instrument token is provided, fetch trading symbol and exchange
+	if req.InstrumentToken != "" && (req.TradingSymbol == "" || req.Exchange == "") {
+		// Get the initialized KiteConnect instance
+		kc := zerodha.GetKiteConnect()
+
+		// Lookup the instrument details
+		tradingSymbol, exchange, err := kc.GetInstrumentDetailsByToken(r.Context(), req.InstrumentToken)
+		if err != nil {
+			s.log.Error("Failed to get instrument details", map[string]interface{}{
+				"error": err.Error(),
+				"token": req.InstrumentToken,
+			})
+			sendErrorResponse(w, fmt.Sprintf("Failed to get instrument details: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Set the trading symbol and exchange
+		req.TradingSymbol = tradingSymbol
+		req.Exchange = exchange
+
+		s.log.Info("Resolved instrument token", map[string]interface{}{
+			"token":          req.InstrumentToken,
+			"trading_symbol": tradingSymbol,
+			"exchange":       exchange,
+		})
+	}
+
+	// Validate that we have the required fields
+	if req.TradingSymbol == "" || req.Exchange == "" {
+		sendErrorResponse(w, "Trading symbol and exchange are required", http.StatusBadRequest)
+		return
+	}
+
+	orderReq := zerodha.PlaceOrderRequest{
+		TradingSymbol: req.TradingSymbol,
+		Exchange:      req.Exchange,
+		OrderType:     zerodha.OrderType(req.OrderType),
+		Side:          zerodha.OrderSide(req.Side),
+		Quantity:      req.Quantity,
+		Price:         req.Price,
+		TriggerPrice:  req.TriggerPrice,
+		Product:       zerodha.ProductType(req.Product),
+		Validity:      req.Validity,
+		DisclosedQty:  req.DisclosedQty,
+		Tag:           req.Tag,
+	}
+
+	var resp *zerodha.OrderResponse
+	var kiteResp interface{}
+
+	// Check if this is a paper trading order
+	if req.PaperTrading {
+		// Generate a simulated response for paper trading
+		s.log.Info("Processing paper trading order", map[string]interface{}{
+			"symbol": req.TradingSymbol,
+			"side":   req.Side,
+			"qty":    req.Quantity,
+		})
+
+		// Generate a unique order ID for paper trading
+		paperOrderID := fmt.Sprintf("paper-%s-%d", strings.ToLower(req.TradingSymbol), time.Now().UnixNano())
+
+		// Create a simulated response
+		resp = &zerodha.OrderResponse{
+			OrderID: paperOrderID,
+			Status:  "PAPER",
+			Message: "Paper trading order simulated successfully",
+		}
+
+		// Create a simulated Kite response
+		kiteResp = map[string]interface{}{
+			"order_id": paperOrderID,
+			"status":   "PAPER",
+			"message":  "Paper trading order simulated",
+		}
+	} else {
+		// Place the actual order with Zerodha using the token from KiteConnect
+		resp, err := zerodha.PlaceOrder(orderReq)
+		if err != nil {
+			s.log.Error("Order placement failed", map[string]interface{}{"error": err.Error()})
+			sendErrorResponse(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+
+		// Store the Kite response for persistence
+		kiteResp = resp
+	}
+
+	// Persist the order to the database (both real and paper) - using "system" as userID
+	zerodha.SaveOrderAsync(orderReq, resp, "system", kiteResp)
+
+	// Return the response to the client
+	sendJSONResponse(w, map[string]interface{}{
+		"order_id":      resp.OrderID,
+		"status":        resp.Status,
+		"message":       resp.Message,
+		"paper_trading": req.PaperTrading,
+	})
+}
+
+func (s *Server) handlePlaceGTTOrder(w http.ResponseWriter, r *http.Request) {
+	var req PlaceGTTAPIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	// Default to regular trading mode
+	paperTrading := false
+
+	// If instrument token is provided, fetch trading symbol and exchange
+	if req.InstrumentToken != "" && (req.TradingSymbol == "" || req.Exchange == "") {
+		// Get the initialized KiteConnect instance
+		kc := zerodha.GetKiteConnect()
+
+		// Lookup the instrument details
+		tradingSymbol, exchange, err := kc.GetInstrumentDetailsByToken(r.Context(), req.InstrumentToken)
+		if err != nil {
+			s.log.Error("Failed to get instrument details for GTT order", map[string]interface{}{
+				"error": err.Error(),
+				"token": req.InstrumentToken,
+			})
+			sendErrorResponse(w, fmt.Sprintf("Failed to get instrument details: %v", err), http.StatusBadRequest)
+			return
+		}
+
+		// Set the trading symbol and exchange
+		req.TradingSymbol = tradingSymbol
+		req.Exchange = exchange
+
+		s.log.Info("Resolved instrument token for GTT order", map[string]interface{}{
+			"token":          req.InstrumentToken,
+			"trading_symbol": tradingSymbol,
+			"exchange":       exchange,
+		})
+	}
+
+	// Validate that we have the required fields
+	if req.TradingSymbol == "" || req.Exchange == "" {
+		sendErrorResponse(w, "Trading symbol and exchange are required", http.StatusBadRequest)
+		return
+	}
+
+	gttReq := zerodha.GTTOrderRequest{
+		TriggerType:   req.TriggerType,
+		TradingSymbol: req.TradingSymbol,
+		Exchange:      req.Exchange,
+		TriggerValues: req.TriggerValues,
+		LastPrice:     req.LastPrice,
+		Orders:        req.Orders,
+	}
+
+	var resp *zerodha.OrderResponse
+	var err error
+
+	if paperTrading {
+		// Generate a simulated response for paper trading GTT order
+		s.log.Info("Processing paper trading GTT order", map[string]interface{}{
+			"symbol":         req.TradingSymbol,
+			"trigger_type":   req.TriggerType,
+			"trigger_values": req.TriggerValues,
+		})
+
+		// Generate a unique order ID for paper trading GTT
+		paperOrderID := fmt.Sprintf("paper-gtt-%s-%d", strings.ToLower(req.TradingSymbol), time.Now().UnixNano())
+
+		// Create a simulated response
+		resp = &zerodha.OrderResponse{
+			OrderID: paperOrderID,
+			Status:  "PAPER",
+			Message: "Paper trading GTT order simulated successfully",
+		}
+	} else {
+		// Place the actual GTT order with Zerodha
+		resp, err = zerodha.PlaceGTTOrder(gttReq)
+		if err != nil {
+			s.log.Error("GTT order placement failed", map[string]interface{}{"error": err.Error()})
+			sendErrorResponse(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+
+	// Persist the GTT order to the database (both real and paper) with system user ID
+	zerodha.SaveOrderAsync(gttReq, resp, "system", resp)
+
+	sendJSONResponse(w, map[string]interface{}{
+		"order_id":      resp.OrderID,
+		"status":        resp.Status,
+		"message":       resp.Message,
+		"paper_trading": paperTrading,
+	})
 }
 
 // Response is a standard API response structure
@@ -99,6 +351,10 @@ func (s *Server) SetPort(port string) {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
+	s.router.HandleFunc("/api/orders", func(w http.ResponseWriter, r *http.Request) {
+		s.CORSMiddleware(http.HandlerFunc(s.handleGetOrders)).ServeHTTP(w, r)
+	}).Methods("GET", "OPTIONS")
+
 	// Create HTTP server
 	s.server = &http.Server{
 		Addr:         ":" + s.port,
@@ -222,26 +478,46 @@ type TimeSeriesMetricsResponse struct {
 // CORSMiddleware adds CORS headers to responses
 func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Set CORS headers
+		// Always set CORS headers for all responses
 		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow all origins
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Kite-Token, X-User-ID")
 		w.Header().Set("Access-Control-Max-Age", "3600")
 
-		// Handle preflight requests
+		// Add these headers to ensure CORS works properly
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Vary", "Origin")
+
+		// Handle preflight OPTIONS requests
 		if r.Method == "OPTIONS" {
+			// Return 200 OK with no content for OPTIONS requests
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
+		// Process the actual request
 		next.ServeHTTP(w, r)
 	})
 }
 
 // setupRoutes initializes all API routes
 func (s *Server) setupRoutes() {
-	// Add CORS middleware to the router
-	s.router.Use(s.CORSMiddleware)
+	// Create a global CORS middleware handler
+	corsMiddleware := s.CORSMiddleware
+
+	// Apply CORS middleware to the main router FIRST, before any routes are defined
+	s.router.Use(corsMiddleware)
+
+	// --- Order APIs ---
+	// v1 API routes (with version in path)
+	v1 := s.router.PathPrefix("/api/v1").Subrouter()
+	v1.HandleFunc("/orders/place", s.handlePlaceOrder).Methods("POST", "OPTIONS")
+	v1.HandleFunc("/orders/gtt", s.handlePlaceGTTOrder).Methods("POST", "OPTIONS")
+
+	// Direct API routes (without version in path, for React app compatibility)
+	directAPI := s.router.PathPrefix("/api").Subrouter()
+	directAPI.HandleFunc("/orders/place", s.handlePlaceOrder).Methods("POST", "OPTIONS")
+	directAPI.HandleFunc("/orders/gtt", s.handlePlaceGTTOrder).Methods("POST", "OPTIONS")
 
 	// Auth routes (no authentication required)
 	s.router.HandleFunc("/api/auth/login", s.handleLogin).Methods("POST", "OPTIONS")
@@ -250,6 +526,8 @@ func (s *Server) setupRoutes() {
 
 	// Create authenticated router
 	authenticatedRouter := s.router.PathPrefix("/api").Subrouter()
+	// Apply Auth middleware to the authenticated router
+	// (CORS is already applied at the router level)
 	authenticatedRouter.Use(s.AuthMiddleware)
 
 	// Health check endpoint
@@ -268,7 +546,7 @@ func (s *Server) setupRoutes() {
 	authenticatedRouter.HandleFunc("/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")
 
 	// API version 1 routes
-	v1 := authenticatedRouter.PathPrefix("/v1").Subrouter()
+	v1 = authenticatedRouter.PathPrefix("/v1").Subrouter()
 
 	// Market data endpoints
 	market := v1.PathPrefix("/market").Subrouter()

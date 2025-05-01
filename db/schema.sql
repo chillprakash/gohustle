@@ -101,14 +101,25 @@ COMMENT ON TABLE credentials IS 'API credentials and configuration values';
 COMMENT ON TABLE index_metrics IS 'Derived metrics for indices (spot, fair, straddle prices)';
 COMMENT ON TABLE straddle_metrics IS 'Detailed straddle metrics per strike price';
 
--- Compression policy (optional, uncomment if needed)
--- This will compress chunks that are older than 7 days
--- ALTER TABLE nifty_ticks SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_token');
--- ALTER TABLE sensex_ticks SET (timescaledb.compress, timescaledb.compress_segmentby = 'instrument_token');
--- SELECT add_compression_policy('nifty_ticks', INTERVAL '7 days');
--- SELECT add_compression_policy('sensex_ticks', INTERVAL '7 days');
-
--- Retention policy (optional, uncomment if needed)
--- This will drop chunks older than 90 days
--- SELECT add_retention_policy('nifty_ticks', INTERVAL '90 days');
--- SELECT add_retention_policy('sensex_ticks', INTERVAL '90 days');
+CREATE TABLE orders (
+    id                  SERIAL PRIMARY KEY,
+    order_id            VARCHAR(64),           -- Zerodha order ID or GTT trigger ID
+    order_type          VARCHAR(16),           -- MARKET, LIMIT, SL, SL-M, GTT
+    gtt_type            VARCHAR(16),           -- NULL for regular, 'single'/'oco' for GTT
+    status              VARCHAR(32),           -- Status from Zerodha (e.g., 'success', 'rejected')
+    message             TEXT,                  -- Any message from Zerodha
+    trading_symbol      VARCHAR(32) NOT NULL,
+    exchange            VARCHAR(16) NOT NULL,
+    side                VARCHAR(8),            -- BUY/SELL
+    quantity            INT,
+    price               NUMERIC(12,2),
+    trigger_price       NUMERIC(12,2),
+    product             VARCHAR(8),
+    validity            VARCHAR(8),
+    disclosed_qty       INT,
+    tag                 VARCHAR(64),
+    user_id             VARCHAR(64),           -- If you support multi-user
+    placed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- When the order was placed
+    kite_response       JSONB,                 -- Raw Zerodha response for audit/debug
+    paper_trading       BOOLEAN DEFAULT FALSE  -- Whether this is a paper trade (not sent to broker)
+);

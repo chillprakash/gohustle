@@ -154,6 +154,38 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 			"qty":    req.Quantity,
 		})
 
+		// Try to get the latest price for the instrument from Redis
+		var executionPrice float64 = req.Price // Default to the requested price
+
+		if req.InstrumentToken != "" {
+			// Get Redis cache for LTP data
+			redisCache, err := cache.GetRedisCache()
+			if err == nil {
+				ltpDB := redisCache.GetLTPDB3()
+				if ltpDB != nil {
+					// Create a context with timeout for Redis operations
+					ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+					defer cancel()
+
+					// Format the key as expected in Redis
+					ltpKey := fmt.Sprintf("%s_ltp", req.InstrumentToken)
+
+					// Try to get the LTP from Redis
+					ltpStr, err := ltpDB.Get(ctx, ltpKey).Result()
+					if err == nil {
+						ltp, err := strconv.ParseFloat(ltpStr, 64)
+						if err == nil && ltp > 0 {
+							executionPrice = ltp
+							s.log.Info("Using Redis LTP for paper trading", map[string]interface{}{
+								"instrument_token": req.InstrumentToken,
+								"ltp":              ltp,
+							})
+						}
+					}
+				}
+			}
+		}
+
 		// Generate a unique order ID for paper trading
 		paperOrderID := fmt.Sprintf("paper-%s-%d", strings.ToLower(req.TradingSymbol), time.Now().UnixNano())
 
@@ -164,12 +196,11 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 			Message: "Paper trading order simulated successfully",
 		}
 
-		// Create a simulated Kite response
-		kiteResp = map[string]interface{}{
-			"order_id": paperOrderID,
-			"status":   "PAPER",
-			"message":  "Paper trading order simulated",
-		}
+		// For paper trades, KiteResponse should be nil as there's no actual Zerodha interaction
+		kiteResp = nil
+
+		// Store the execution price in the request for tracking purposes
+		orderReq.Price = executionPrice
 	} else {
 		// Place the actual order with Zerodha using the token from KiteConnect
 		resp, err := zerodha.PlaceOrder(orderReq)
@@ -258,6 +289,38 @@ func (s *Server) handlePlaceGTTOrder(w http.ResponseWriter, r *http.Request) {
 			"trigger_values": req.TriggerValues,
 		})
 
+		// Try to get the latest price for the instrument from Redis
+		var currentPrice float64 = req.LastPrice // Default to the requested last price
+
+		if req.InstrumentToken != "" {
+			// Get Redis cache for LTP data
+			redisCache, err := cache.GetRedisCache()
+			if err == nil {
+				ltpDB := redisCache.GetLTPDB3()
+				if ltpDB != nil {
+					// Create a context with timeout for Redis operations
+					ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+					defer cancel()
+
+					// Format the key as expected in Redis
+					ltpKey := fmt.Sprintf("%s_ltp", req.InstrumentToken)
+
+					// Try to get the LTP from Redis
+					ltpStr, err := ltpDB.Get(ctx, ltpKey).Result()
+					if err == nil {
+						ltp, err := strconv.ParseFloat(ltpStr, 64)
+						if err == nil && ltp > 0 {
+							currentPrice = ltp
+							s.log.Info("Using Redis LTP for paper trading GTT", map[string]interface{}{
+								"instrument_token": req.InstrumentToken,
+								"ltp":              ltp,
+							})
+						}
+					}
+				}
+			}
+		}
+
 		// Generate a unique order ID for paper trading GTT
 		paperOrderID := fmt.Sprintf("paper-gtt-%s-%d", strings.ToLower(req.TradingSymbol), time.Now().UnixNano())
 
@@ -267,6 +330,9 @@ func (s *Server) handlePlaceGTTOrder(w http.ResponseWriter, r *http.Request) {
 			Status:  "PAPER",
 			Message: "Paper trading GTT order simulated successfully",
 		}
+
+		// Update the last price in the request with the current market price
+		gttReq.LastPrice = currentPrice
 	} else {
 		// Place the actual GTT order with Zerodha
 		resp, err = zerodha.PlaceGTTOrder(gttReq)
@@ -277,8 +343,19 @@ func (s *Server) handlePlaceGTTOrder(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Create a variable to hold the Kite response
+	var kiteResp interface{}
+
+	// For paper trades, kiteResp should be nil as there's no actual Zerodha interaction
+	if paperTrading {
+		kiteResp = nil
+	} else {
+		// For real trades, use the response from Zerodha
+		kiteResp = resp
+	}
+
 	// Persist the GTT order to the database (both real and paper) with system user ID
-	zerodha.SaveOrderAsync(gttReq, resp, "system", resp)
+	zerodha.SaveOrderAsync(gttReq, resp, "system", kiteResp)
 
 	sendJSONResponse(w, map[string]interface{}{
 		"order_id":      resp.OrderID,

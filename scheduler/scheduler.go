@@ -185,7 +185,7 @@ func InitializeOrderPolling(ctx context.Context) {
 
 	task := &Task{
 		Name:     "OrderPolling",
-		Interval: 5 * time.Second, // Poll orders less frequently than positions
+		Interval: time.Second, // Poll orders at the same frequency as positions
 		Execute: func(ctx context.Context) error {
 			if !isMarketOpen() {
 				return nil

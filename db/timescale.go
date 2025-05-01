@@ -178,6 +178,33 @@ type OrderRecord struct {
 	PaperTrading  bool        `db:"paper_trading"`
 }
 
+// PositionRecord represents a record in the positions table
+type PositionRecord struct {
+	ID            int64       `db:"id"`
+	PositionID    string      `db:"position_id"`
+	TradingSymbol string      `db:"trading_symbol"`
+	Exchange      string      `db:"exchange"`
+	Product       string      `db:"product"`
+	Quantity      int         `db:"quantity"`
+	AveragePrice  float64     `db:"average_price"`
+	LastPrice     float64     `db:"last_price"`
+	PnL           float64     `db:"pnl"`
+	RealizedPnL   float64     `db:"realized_pnl"`
+	UnrealizedPnL float64     `db:"unrealized_pnl"`
+	Multiplier    float64     `db:"multiplier"`
+	BuyQuantity   int         `db:"buy_quantity"`
+	SellQuantity  int         `db:"sell_quantity"`
+	BuyPrice      float64     `db:"buy_price"`
+	SellPrice     float64     `db:"sell_price"`
+	BuyValue      float64     `db:"buy_value"`
+	SellValue     float64     `db:"sell_value"`
+	PositionType  string      `db:"position_type"`
+	UserID        string      `db:"user_id"`
+	UpdatedAt     time.Time   `db:"updated_at"`
+	PaperTrading  bool        `db:"paper_trading"`
+	KiteResponse  interface{} `db:"kite_response"`
+}
+
 // ListOrders fetches all order records from the orders table
 func (t *TimescaleDB) ListOrders(ctx context.Context) ([]*OrderRecord, error) {
 	query := `SELECT id, order_id, order_type, gtt_type, status, message, trading_symbol, exchange, side, quantity, price, trigger_price, product, validity, disclosed_qty, tag, user_id, placed_at, kite_response, paper_trading FROM orders ORDER BY placed_at DESC`

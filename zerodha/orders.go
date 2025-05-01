@@ -65,20 +65,45 @@ func (om *OrderManager) PollOrdersAndUpdateInRedis(ctx context.Context) error {
 		return fmt.Errorf("failed to get orders: %w", err)
 	}
 
-	// Store orders in Redis
-	if err := om.storeOrdersInRedis(ctx, orders); err != nil {
+	// Use a wait group to wait for both operations to complete
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Channel to collect errors from goroutines
+	errChan := make(chan error, 2)
+
+	// Store orders in Redis concurrently
+	go func() {
+		defer wg.Done()
+		if err := om.storeOrdersInRedis(ctx, orders); err != nil {
+			om.log.Error("Failed to store orders in Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+			errChan <- err
+		}
+	}()
+
+	// Update the database with the latest order statuses concurrently
+	go func() {
+		defer wg.Done()
+		if err := om.updateOrderStatusesInDB(orders); err != nil {
+			om.log.Error("Failed to update order statuses in DB", map[string]interface{}{
+				"error": err.Error(),
+			})
+			// Don't send this error to errChan as we want to continue even if DB update fails
+		}
+	}()
+
+	// Wait for both goroutines to finish
+	wg.Wait()
+
+	// Check if there was an error in Redis storage (which is critical)
+	select {
+	case err := <-errChan:
 		return err
+	default:
+		return nil
 	}
-
-	// Also update the database with the latest order statuses
-	if err := om.updateOrderStatusesInDB(ctx, orders); err != nil {
-		om.log.Error("Failed to update order statuses in DB", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// Don't return error here, as we still want to continue with Redis updates
-	}
-
-	return nil
 }
 
 // storeOrdersInRedis stores orders in Redis for quick access

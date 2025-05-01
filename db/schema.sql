@@ -123,3 +123,29 @@ CREATE TABLE orders (
     kite_response       JSONB,                 -- Raw Zerodha response for audit/debug
     paper_trading       BOOLEAN DEFAULT FALSE  -- Whether this is a paper trade (not sent to broker)
 );
+
+CREATE TABLE positions (
+    id                  SERIAL PRIMARY KEY,
+    position_id         VARCHAR(64),           -- Unique identifier for the position
+    trading_symbol      VARCHAR(32) NOT NULL,
+    exchange            VARCHAR(16) NOT NULL,
+    product             VARCHAR(8),            -- NRML, MIS, CNC
+    quantity            INT,                   -- Current position quantity (+ for long, - for short)
+    average_price       NUMERIC(12,2),         -- Average price of the position
+    last_price          NUMERIC(12,2),         -- Latest market price
+    pnl                 NUMERIC(12,2),         -- Current P&L
+    realized_pnl        NUMERIC(12,2),         -- Realized P&L
+    unrealized_pnl      NUMERIC(12,2),         -- Unrealized P&L
+    multiplier          NUMERIC(10,2),         -- Contract multiplier (for derivatives)
+    buy_quantity        INT,                   -- Total buy quantity
+    sell_quantity       INT,                   -- Total sell quantity
+    buy_price           NUMERIC(12,2),         -- Average buy price
+    sell_price          NUMERIC(12,2),         -- Average sell price
+    buy_value           NUMERIC(16,2),         -- Total buy value
+    sell_value          NUMERIC(16,2),         -- Total sell value
+    position_type       VARCHAR(8),            -- 'net', 'day'
+    user_id             VARCHAR(64),           -- User ID
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- When the position was last updated
+    paper_trading       BOOLEAN DEFAULT FALSE,  -- Whether this is a paper trade
+    kite_response       JSONB                  -- Raw Zerodha response for audit/debug
+);

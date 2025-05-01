@@ -8,8 +8,10 @@ import (
 	"strconv"
 	"strings"
 	sync "sync"
+	"time"
 
 	"gohustle/cache"
+	"gohustle/db"
 	"gohustle/logger"
 
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
@@ -98,16 +100,103 @@ func (pm *PositionManager) GetOpenPositions(ctx context.Context) (kiteconnect.Po
 	return positions, nil
 }
 
-// PollPositionsAndUpdateInRedis periodically polls positions and updates Redis
+// PollPositionsAndUpdateInRedis periodically polls positions and updates Redis and database
 func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) error {
 	positions, err := pm.GetOpenPositions(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	// Store net positions alone
-	if err := pm.storePositionsInRedis(ctx, "net", positions.Net); err != nil {
+	// Use a wait group to wait for both operations to complete
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Channel to collect errors from goroutines
+	errChan := make(chan error, 2)
+
+	// Store positions in Redis concurrently
+	go func() {
+		defer wg.Done()
+		// Store net positions alone in Redis
+		if err := pm.storePositionsInRedis(ctx, "net", positions.Net); err != nil {
+			pm.log.Error("Failed to store positions in Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+			errChan <- err
+		}
+	}()
+
+	// Store positions in database concurrently
+	go func() {
+		defer wg.Done()
+		if err := pm.storePositionsInDB(ctx, positions.Net); err != nil {
+			pm.log.Error("Failed to store positions in database", map[string]interface{}{
+				"error": err.Error(),
+			})
+			// Don't send this error to errChan as we want to continue even if DB update fails
+		}
+	}()
+
+	// Wait for both goroutines to finish
+	wg.Wait()
+
+	// Check if there was an error in Redis storage (which is critical)
+	select {
+	case err := <-errChan:
 		return err
+	default:
+		return nil
+	}
+}
+
+// storePositionsInDB stores positions in the database
+func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []kiteconnect.Position) error {
+	timescaleDB := db.GetTimescaleDB()
+	if timescaleDB == nil {
+		return fmt.Errorf("timescale DB is nil")
+	}
+
+	// Process each position
+	for _, pos := range positions {
+		// Create a unique position ID
+		positionID := fmt.Sprintf("%s_%s_%s", pos.Tradingsymbol, pos.Exchange, pos.Product)
+
+		// Create a position record
+		posRecord := &db.PositionRecord{
+			PositionID:    positionID,
+			TradingSymbol: pos.Tradingsymbol,
+			Exchange:      pos.Exchange,
+			Product:       pos.Product,
+			Quantity:      pos.Quantity,
+			AveragePrice:  pos.AveragePrice,
+			LastPrice:     pos.LastPrice,
+			PnL:           pos.PnL,
+			RealizedPnL:   pos.Realised,   // Field name is different in Kite API
+			UnrealizedPnL: pos.Unrealised, // Field name is different in Kite API
+			Multiplier:    pos.Multiplier,
+			BuyQuantity:   pos.BuyQuantity,
+			SellQuantity:  pos.SellQuantity,
+			BuyPrice:      pos.BuyPrice,
+			SellPrice:     pos.SellPrice,
+			BuyValue:      pos.BuyValue,
+			SellValue:     pos.SellValue,
+			PositionType:  "net",
+			UserID:        "system", // Default user ID
+			UpdatedAt:     time.Now(),
+			PaperTrading:  false, // Default to false for real positions
+			KiteResponse:  pos,   // Store the original Kite position
+		}
+
+		// Upsert the position in the database
+		if err := timescaleDB.UpsertPosition(ctx, posRecord); err != nil {
+			pm.log.Error("Failed to upsert position in database", map[string]interface{}{
+				"error":          err.Error(),
+				"position_id":    positionID,
+				"trading_symbol": pos.Tradingsymbol,
+			})
+			// Continue with other positions even if one fails
+			continue
+		}
 	}
 
 	return nil

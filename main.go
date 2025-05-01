@@ -101,6 +101,9 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 
 	scheduler.InitializePositionPolling(ctx)
 
+	// Initialize order polling to track order statuses
+	scheduler.InitializeOrderPolling(ctx)
+
 	scheduler.InitializeIndexOptionChainPolling(ctx)
 
 	// Block until context is cancelled

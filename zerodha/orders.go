@@ -2,13 +2,215 @@ package zerodha
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
+	"gohustle/cache"
 	"gohustle/db"
+	"gohustle/logger"
 
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
+
+// OrderManager handles order status polling and updates
+type OrderManager struct {
+	log  *logger.Logger
+	kite *KiteConnect
+}
+
+var (
+	orderManagerInstance *OrderManager
+	orderManagerOnce     sync.Once
+)
+
+// GetOrderManager returns a singleton instance of OrderManager
+func GetOrderManager() *OrderManager {
+	orderManagerOnce.Do(func() {
+		log := logger.L()
+		kite := GetKiteConnect()
+
+		if kite == nil {
+			log.Error("Failed to initialize order manager: KiteConnect is nil", map[string]interface{}{})
+			return
+		}
+
+		orderManagerInstance = &OrderManager{
+			log:  log,
+			kite: kite,
+		}
+		log.Info("Order manager initialized", map[string]interface{}{})
+	})
+	return orderManagerInstance
+}
+
+// GetOpenOrders fetches all open orders from Zerodha
+func (om *OrderManager) GetOpenOrders(ctx context.Context) ([]kiteconnect.Order, error) {
+	if om == nil || om.kite == nil {
+		return nil, fmt.Errorf("order manager or kite client not initialized")
+	}
+
+	orders, err := om.kite.Kite.GetOrders()
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch orders: %w", err)
+	}
+	return orders, nil
+}
+
+// PollOrdersAndUpdateInRedis periodically polls orders and updates Redis
+func (om *OrderManager) PollOrdersAndUpdateInRedis(ctx context.Context) error {
+	orders, err := om.GetOpenOrders(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get orders: %w", err)
+	}
+
+	// Store orders in Redis
+	if err := om.storeOrdersInRedis(ctx, orders); err != nil {
+		return err
+	}
+
+	// Also update the database with the latest order statuses
+	if err := om.updateOrderStatusesInDB(ctx, orders); err != nil {
+		om.log.Error("Failed to update order statuses in DB", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Don't return error here, as we still want to continue with Redis updates
+	}
+
+	return nil
+}
+
+// storeOrdersInRedis stores orders in Redis for quick access
+func (om *OrderManager) storeOrdersInRedis(ctx context.Context, orders []kiteconnect.Order) error {
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+
+	// Use LTP DB for orders as well (since we don't have a dedicated orders DB)
+	ordersDB := redisCache.GetLTPDB3()
+	if ordersDB == nil {
+		return fmt.Errorf("orders Redis DB is nil")
+	}
+
+	// Create a context with timeout for Redis operations
+	redisCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	// Store each order in Redis with key format: order_{order_id}_status
+	for _, order := range orders {
+		// Store order status
+		statusKey := fmt.Sprintf("order_%s_status", order.OrderID)
+		if err := ordersDB.Set(redisCtx, statusKey, order.Status, 24*time.Hour).Err(); err != nil {
+			om.log.Error("Failed to store order status in Redis", map[string]interface{}{
+				"order_id": order.OrderID,
+				"status":   order.Status,
+				"error":    err.Error(),
+			})
+			continue
+		}
+
+		// Store the entire order as JSON for detailed information
+		orderKey := fmt.Sprintf("order_%s", order.OrderID)
+		orderJSON, err := json.Marshal(order)
+		if err != nil {
+			om.log.Error("Failed to marshal order to JSON", map[string]interface{}{
+				"order_id": order.OrderID,
+				"error":    err.Error(),
+			})
+			continue
+		}
+
+		if err := ordersDB.Set(redisCtx, orderKey, orderJSON, 24*time.Hour).Err(); err != nil {
+			om.log.Error("Failed to store order in Redis", map[string]interface{}{
+				"order_id": order.OrderID,
+				"error":    err.Error(),
+			})
+		}
+	}
+
+	return nil
+}
+
+// updateOrderStatusesInDB updates the order statuses in the database
+func (om *OrderManager) updateOrderStatusesInDB(orders []kiteconnect.Order) error {
+	timescaleDB := db.GetTimescaleDB()
+	if timescaleDB == nil {
+		return fmt.Errorf("timescale DB is nil")
+	}
+
+	for _, order := range orders {
+		// Skip paper trading orders (they won't have a matching Zerodha order ID)
+		if len(order.OrderID) > 6 && order.OrderID[:6] == "paper-" {
+			continue
+		}
+
+		// Update the order status in the database
+		// For now, just log that we would update the status
+		// You'll need to implement the actual DB update method
+		om.log.Info("Would update order status in DB", map[string]interface{}{
+			"order_id":        order.OrderID,
+			"status":          order.Status,
+			"filled_quantity": order.FilledQuantity,
+		})
+
+		// TODO: Implement the actual DB update when the method is available
+		// if err := timescaleDB.UpdateOrderStatus(ctx, order.OrderID, order.Status, order.FilledQuantity); err != nil {
+		// 	om.log.Error("Failed to update order status in DB", map[string]interface{}{
+		// 		"order_id": order.OrderID,
+		// 		"status":   order.Status,
+		// 		"error":    err.Error(),
+		// 	})
+		// }
+	}
+
+	return nil
+}
+
+// GetOrderStatus gets the status of an order from Redis or Zerodha
+func (om *OrderManager) GetOrderStatus(ctx context.Context, orderID string) (string, error) {
+	// First try to get from Redis
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return "", fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+
+	ordersDB := redisCache.GetLTPDB3()
+	if ordersDB == nil {
+		return "", fmt.Errorf("orders Redis DB is nil")
+	}
+
+	// Create a context with timeout for Redis operations
+	redisCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	// Try to get from Redis first
+	statusKey := fmt.Sprintf("order_%s_status", orderID)
+	status, err := ordersDB.Get(redisCtx, statusKey).Result()
+	if err == nil && status != "" {
+		return status, nil
+	}
+
+	// If not in Redis, try to get from Zerodha
+	// Skip for paper trading orders
+	if len(orderID) > 6 && orderID[:6] == "paper-" {
+		return "PAPER", nil
+	}
+
+	// Get order details from Zerodha
+	order, err := om.kite.Kite.GetOrderHistory(orderID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get order history: %w", err)
+	}
+
+	if len(order) == 0 {
+		return "", fmt.Errorf("no order found with ID: %s", orderID)
+	}
+
+	// Return the status of the most recent order update
+	return order[len(order)-1].Status, nil
+}
 
 // OrderType represents the type of order (MARKET, LIMIT, etc.)
 type OrderType string

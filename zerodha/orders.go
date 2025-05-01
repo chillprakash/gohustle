@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -365,10 +366,94 @@ func SaveOrderAsync(orderReq interface{}, resp *OrderResponse, userID string, ki
 	}()
 }
 
+// Index-specific freeze limits for iceberg orders
+type FreezeLimit struct {
+	Units    int  // Maximum units per order
+	LotSize  int  // Standard lot size
+	MaxLots  int  // Maximum number of lots per order
+	Supports bool // Whether iceberg orders are supported
+}
+
+// Freeze limits by index/segment
+var indexFreezeLimits = map[string]FreezeLimit{
+	"NIFTY":     {Units: 1800, LotSize: 50, MaxLots: 36, Supports: true},  // Nifty F&O (NSE)
+	"BANKNIFTY": {Units: 900, LotSize: 15, MaxLots: 60, Supports: true},   // Bank Nifty F&O (NSE)
+	"SENSEX":    {Units: 1000, LotSize: 10, MaxLots: 100, Supports: true}, // SENSEX (BSE)
+	"SENSEX50":  {Units: 1800, LotSize: 50, MaxLots: 36, Supports: true},  // SENSEX50 (BSE)
+	"BANKEX":    {Units: 900, LotSize: 15, MaxLots: 60, Supports: true},   // BANKEX (BSE)
+}
+
+// Exchange-specific quantity limits for equity
+var exchangeQuantityLimits = map[string]int{
+	"NSE":     100000, // NSE equity limit (Zerodha)
+	"BSE":     100000, // BSE equity limit (Zerodha)
+	"default": 50000,  // Default limit for other exchanges
+}
+
 // PlaceOrder places a regular order using the Kite Connect API
+// Automatically handles iceberg orders if quantity exceeds exchange limits
 func PlaceOrder(req PlaceOrderRequest) (*OrderResponse, error) {
 	// Get the KiteConnect instance
 	kc := GetKiteConnect()
+	log := logger.L()
+
+	// Extract index name from trading symbol (if applicable)
+	indexName, isIndex := extractIndexFromSymbol(req.TradingSymbol)
+
+	// Check if this is a potential iceberg order based on quantity
+	var freezeLimit int
+	var shouldUseIceberg bool
+
+	// Different handling for index derivatives vs equity
+	if isIndex {
+		// For index derivatives, use index-specific freeze limits
+		freezeLimitInfo, limitExists := getIndexFreezeLimit(indexName)
+		if limitExists && freezeLimitInfo.Supports {
+			freezeLimit = freezeLimitInfo.Units
+			shouldUseIceberg = req.Quantity > freezeLimit && req.DisclosedQty == 0
+
+			log.Info("Using index-specific freeze limit", map[string]interface{}{
+				"index":    indexName,
+				"limit":    freezeLimit,
+				"lot_size": freezeLimitInfo.LotSize,
+				"max_lots": freezeLimitInfo.MaxLots,
+			})
+		} else {
+			// Fall back to exchange limits if index not recognized
+			freezeLimit = getExchangeQuantityLimit(req.Exchange)
+			shouldUseIceberg = req.Quantity > freezeLimit && req.DisclosedQty == 0
+		}
+	} else {
+		// For equity, use exchange-specific limits
+		freezeLimit = getExchangeQuantityLimit(req.Exchange)
+		shouldUseIceberg = req.Quantity > freezeLimit && req.DisclosedQty == 0
+	}
+
+	// Apply iceberg order logic if needed
+	if shouldUseIceberg {
+		// This is a large order that should be handled as an iceberg order
+		log.Info("Converting to iceberg order due to large quantity", map[string]interface{}{
+			"trading_symbol": req.TradingSymbol,
+			"quantity":       req.Quantity,
+			"freeze_limit":   freezeLimit,
+			"is_index":       isIndex,
+			"index_name":     indexName,
+		})
+
+		// Set disclosed quantity to the exchange limit or less
+		// Typically, disclosed quantity is set to a fraction of the total
+		// to minimize market impact
+		disclosedQty := min(freezeLimit, req.Quantity/5) // Disclose 20% or the limit, whichever is smaller
+		if disclosedQty < 1 {
+			disclosedQty = 1 // Ensure at least 1 share is disclosed
+		}
+		req.DisclosedQty = disclosedQty
+
+		log.Info("Iceberg order parameters set", map[string]interface{}{
+			"total_quantity":     req.Quantity,
+			"disclosed_quantity": req.DisclosedQty,
+		})
+	}
 
 	// Create OrderParams for the Kite Connect client
 	orderParams := kiteconnect.OrderParams{
@@ -405,12 +490,61 @@ func PlaceOrder(req PlaceOrderRequest) (*OrderResponse, error) {
 		return nil, fmt.Errorf("kite order placement failed: %v", err)
 	}
 
+	// Determine if this was placed as an iceberg order
+	isIceberg := req.DisclosedQty > 0 && req.DisclosedQty < req.Quantity
+	message := "Order placed successfully"
+	if isIceberg {
+		message = "Iceberg order placed successfully"
+	}
+
 	return &OrderResponse{
 		OrderID: kiteResp.OrderID,
 		Status:  "success", // The Kite API returns a successful response if the order is placed
-		Message: "Order placed successfully",
+		Message: message,
 	}, nil
 }
+
+// getExchangeQuantityLimit returns the maximum order quantity for a given exchange (for equity)
+func getExchangeQuantityLimit(exchange string) int {
+	limit, exists := exchangeQuantityLimits[exchange]
+	if !exists {
+		return exchangeQuantityLimits["default"]
+	}
+	return limit
+}
+
+// getIndexFreezeLimit returns the freeze limit information for a specific index
+func getIndexFreezeLimit(indexName string) (FreezeLimit, bool) {
+	limit, exists := indexFreezeLimits[indexName]
+	return limit, exists
+}
+
+// extractIndexFromSymbol attempts to identify the index from a trading symbol
+// Returns the index name and a boolean indicating if it's an index derivative
+func extractIndexFromSymbol(symbol string) (string, bool) {
+	// Common index prefixes in trading symbols
+	indexPrefixes := []string{"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX", "BANKEX", "SENSEX50"}
+
+	// Check if the symbol starts with any known index prefix
+	for _, prefix := range indexPrefixes {
+		if strings.HasPrefix(symbol, prefix) {
+			return prefix, true
+		}
+	}
+
+	// Additional check for options contracts which might have different formats
+	// For example: "NIFTY23MAY18500CE" for a NIFTY option
+	for _, prefix := range indexPrefixes {
+		if strings.Contains(symbol, prefix) {
+			return prefix, true
+		}
+	}
+
+	// Not an index derivative
+	return "", false
+}
+
+// Note: Using the min function from instruments.go
 
 // GTTOrderRequest for placing a GTT order
 // PlaceGTTOrder places a GTT order using the Kite Connect API

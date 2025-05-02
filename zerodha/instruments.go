@@ -771,6 +771,7 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
 			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
 			cache.Set(strike_key, inst.StrikePrice, 7*24*time.Hour)
+			cache.Set(inst.Tradingsymbol, inst.InstrumentToken, 7*24*time.Hour)
 			continue
 		}
 	}

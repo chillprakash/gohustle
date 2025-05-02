@@ -126,7 +126,7 @@ CREATE TABLE orders (
 
 CREATE TABLE positions (
     id                  SERIAL PRIMARY KEY,
-    position_id         VARCHAR(64),           -- Unique identifier for the position
+    position_id         VARCHAR(64) UNIQUE,    -- Unique identifier for the position
     trading_symbol      VARCHAR(32) NOT NULL,
     exchange            VARCHAR(16) NOT NULL,
     product             VARCHAR(8),            -- NRML, MIS, CNC

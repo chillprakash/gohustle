@@ -256,10 +256,10 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 
 // GetPositionAnalysis returns detailed analysis of all positions
 func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAnalysis, error) {
-	positions, err := pm.GetOpenPositions(ctx)
-	inmemoryCache := cache.GetInMemoryCacheInstance()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get positions: %w", err)
+	// Initialize analysis structure
+	analysis := &PositionAnalysis{
+		Summary:   PositionSummary{},
+		Positions: make([]DetailedPosition, 0),
 	}
 
 	// Get Redis cache for LTP data
@@ -268,13 +268,40 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
 	}
 	ltpDB := redisCache.GetLTPDB3()
+	inmemoryCache := cache.GetInMemoryCacheInstance()
 
-	analysis := &PositionAnalysis{
-		Summary:   PositionSummary{},
-		Positions: make([]DetailedPosition, 0),
+	// Get positions from database (includes both real and paper trading positions)
+	timescaleDB := db.GetTimescaleDB()
+	if timescaleDB == nil {
+		return nil, fmt.Errorf("timescale DB is nil")
+	}
+	
+	// Fetch all positions from database
+	dbPositions, err := timescaleDB.ListPositions(ctx)
+	if err != nil {
+		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Continue with Zerodha positions if DB fetch fails
+	} else {
+		pm.log.Info("Fetched positions from database", map[string]interface{}{
+			"count": len(dbPositions),
+		})
 	}
 
-	// Process each position
+	// Also get positions from Zerodha API for real-time data
+	positions, err := pm.GetOpenPositions(ctx)
+	if err != nil {
+		pm.log.Error("Failed to get positions from Zerodha", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// If we have DB positions, we can continue without Zerodha positions
+		if len(dbPositions) == 0 {
+			return nil, fmt.Errorf("failed to get positions from any source: %w", err)
+		}
+	}
+
+	// Process positions from Zerodha API
 	for _, pos := range positions.Net {
 		// Skip non-option positions
 		if !isOptionPosition(pos.Tradingsymbol) {
@@ -353,6 +380,82 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		analysis.Positions = append(analysis.Positions, detailedPos)
 	}
 
+	// Process positions from database (including paper trading positions)
+	for _, dbPos := range dbPositions {
+		// Skip positions already processed from Zerodha API (to avoid duplicates)
+		if !dbPos.PaperTrading {
+			// Skip real trading positions as they're already included from Zerodha API
+			continue
+		}
+		
+		// Skip non-option positions
+		if !isOptionPosition(dbPos.TradingSymbol) {
+			continue
+		}
+		
+		// Get option type
+		optionType := getOptionType(dbPos.TradingSymbol)
+		
+		// Get current LTP
+		var ltp float64 = dbPos.LastPrice
+		
+		// Try to get instrument token from cache
+		instrumentToken, exists := inmemoryCache.Get(dbPos.TradingSymbol)
+		if exists {
+			// Try to get LTP from Redis using instrument token
+			ltpKey := fmt.Sprintf("%v_ltp", instrumentToken)
+			ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
+			if err == nil && ltpVal > 0 {
+				ltp = ltpVal
+			}
+		}
+		
+		// Extract strike price from trading symbol
+		var strikePriceFloat float64
+		parts := strings.Split(dbPos.TradingSymbol, "")
+		for i := 0; i < len(parts); i++ {
+			if len(parts[i]) > 0 && parts[i][0] >= '0' && parts[i][0] <= '9' {
+				// Found a number, try to parse it as strike price
+				strikePriceStr := ""
+				for j := i; j < len(parts); j++ {
+					if len(parts[j]) > 0 && ((parts[j][0] >= '0' && parts[j][0] <= '9') || parts[j][0] == '.') {
+						strikePriceStr += parts[j]
+					} else {
+						break
+					}
+				}
+				strikePriceFloat, _ = strconv.ParseFloat(strikePriceStr, 64)
+				break
+			}
+		}
+		
+		// If we couldn't extract strike price, use a default value
+		if strikePriceFloat == 0 {
+			strikePriceFloat = dbPos.AveragePrice
+		}
+		
+		detailedPos := DetailedPosition{
+			Strike:       strikePriceFloat,
+			OptionType:   optionType,
+			Quantity:     int64(dbPos.Quantity),
+			AveragePrice: dbPos.AveragePrice,
+			SellPrice:    dbPos.SellPrice,
+			LTP:          ltp,
+			Diff:         ltp - dbPos.AveragePrice,
+			VWAP:         0,
+			Value:        math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
+		}
+		
+		// Update summary
+		if optionType == "CE" {
+			analysis.Summary.TotalCallValue += detailedPos.Value
+		} else {
+			analysis.Summary.TotalPutValue += detailedPos.Value
+		}
+		
+		analysis.Positions = append(analysis.Positions, detailedPos)
+	}
+	
 	analysis.Summary.TotalValue = analysis.Summary.TotalCallValue + analysis.Summary.TotalPutValue
 	return analysis, nil
 }

@@ -3,29 +3,37 @@ package zerodha
 import (
 	"context"
 	"fmt"
+	sync "sync"
 	"time"
 
 	"gohustle/cache"
 	"gohustle/db"
 	"gohustle/logger"
-
-	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
 // PnLManager handles P&L calculations for positions
 type PnLManager struct {
-	kite *KiteConnect
-	log  *logger.Logger
+	log *logger.Logger
 }
 
 // PnLSummary represents a summary of P&L across all positions
 type PnLSummary struct {
-	TotalRealizedPnL   float64            `json:"total_realized_pnl"`
-	TotalUnrealizedPnL float64            `json:"total_unrealized_pnl"`
-	TotalPnL           float64            `json:"total_pnl"`
-	PositionPnL        map[string]float64 `json:"position_pnl"`      // Map of trading symbol to P&L
-	PaperPositionPnL   map[string]float64 `json:"paper_position_pnl"` // Map of trading symbol to paper trading P&L
-	UpdatedAt          time.Time          `json:"updated_at"`
+	TotalRealizedPnL   float64                       `json:"total_realized_pnl"`
+	TotalUnrealizedPnL float64                       `json:"total_unrealized_pnl"`
+	TotalPnL           float64                       `json:"total_pnl"`
+	PositionPnL        map[string]float64            `json:"position_pnl"`          // Map of trading symbol to P&L
+	PaperPositionPnL   map[string]float64            `json:"paper_position_pnl"`     // Map of trading symbol to paper trading P&L
+	StrategyPnL        map[string]StrategyPnLSummary `json:"strategy_pnl"`          // Map of strategy name to P&L summary
+	PaperStrategyPnL   map[string]StrategyPnLSummary `json:"paper_strategy_pnl"`     // Map of strategy name to paper trading P&L summary
+	UpdatedAt          time.Time                     `json:"updated_at"`
+}
+
+// StrategyPnLSummary represents a summary of P&L for a specific strategy
+type StrategyPnLSummary struct {
+	RealizedPnL   float64                `json:"realized_pnl"`
+	UnrealizedPnL float64                `json:"unrealized_pnl"`
+	TotalPnL      float64                `json:"total_pnl"`
+	Positions     map[string]PositionPnL `json:"positions"` // Map of position ID to position P&L
 }
 
 // PositionPnL represents P&L for a specific position
@@ -42,6 +50,7 @@ type PositionPnL struct {
 	BuyValue       float64 `json:"buy_value"`
 	SellValue      float64 `json:"sell_value"`
 	Multiplier     float64 `json:"multiplier"`
+	Strategy       string  `json:"strategy"`
 	PaperTrading   bool    `json:"paper_trading"`
 	PositionID     string  `json:"position_id"`
 }
@@ -55,15 +64,8 @@ var (
 func GetPnLManager() *PnLManager {
 	pnlOnce.Do(func() {
 		log := logger.L()
-		kite := GetKiteConnect()
-		if kite == nil {
-			log.Error("Failed to get KiteConnect instance", map[string]interface{}{})
-			return
-		}
-
 		pnlInstance = &PnLManager{
-			log:  log,
-			kite: kite,
+			log: log,
 		}
 		log.Info("PnL manager initialized", map[string]interface{}{})
 	})
@@ -75,6 +77,8 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 	summary := &PnLSummary{
 		PositionPnL:      make(map[string]float64),
 		PaperPositionPnL: make(map[string]float64),
+		StrategyPnL:      make(map[string]StrategyPnLSummary),
+		PaperStrategyPnL: make(map[string]StrategyPnLSummary),
 		UpdatedAt:        time.Now(),
 	}
 
@@ -129,30 +133,82 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		totalPnL := realizedPnL + unrealizedPnL
 
 		// Create position P&L record
-		positionPnL := &PositionPnL{
-			TradingSymbol: pos.TradingSymbol,
-			Exchange:      pos.Exchange,
-			Product:       pos.Product,
-			Quantity:      pos.Quantity,
-			AveragePrice:  pos.AveragePrice,
-			LastPrice:     lastPrice,
-			RealizedPnL:   realizedPnL,
-			UnrealizedPnL: unrealizedPnL,
-			TotalPnL:      totalPnL,
-			BuyValue:      pos.BuyValue,
-			SellValue:     pos.SellValue,
-			Multiplier:    pos.Multiplier,
-			PaperTrading:  pos.PaperTrading,
-			PositionID:    pos.PositionID,
+		positionPnL := PositionPnL{
+			TradingSymbol:  pos.TradingSymbol,
+			Exchange:       pos.Exchange,
+			Product:        pos.Product,
+			Quantity:       pos.Quantity,
+			AveragePrice:    pos.AveragePrice,
+			LastPrice:       lastPrice,
+			RealizedPnL:     realizedPnL,
+			UnrealizedPnL:   unrealizedPnL,
+			TotalPnL:        totalPnL,
+			BuyValue:        pos.BuyValue,
+			SellValue:       pos.SellValue,
+			Multiplier:      pos.Multiplier,
+			Strategy:        pos.Strategy,
+			PaperTrading:    pos.PaperTrading,
+			PositionID:      pos.PositionID,
 		}
+
+		// Log position P&L details
+		pm.log.Info("Calculated P&L for position", map[string]interface{}{
+			"trading_symbol": pos.TradingSymbol,
+			"position_id":    pos.PositionID,
+			"strategy":       pos.Strategy,
+			"realized_pnl":   realizedPnL,
+			"unrealized_pnl": unrealizedPnL,
+			"total_pnl":      totalPnL,
+			"paper_trading":  pos.PaperTrading,
+		})
 
 		// Update summary
 		if pos.PaperTrading {
 			summary.PaperPositionPnL[pos.TradingSymbol] = totalPnL
+			
+			// Update strategy P&L summary for paper trading
+			if pos.Strategy != "" {
+				strategy := pos.Strategy
+				strategySummary, exists := summary.PaperStrategyPnL[strategy]
+				if !exists {
+					strategySummary = StrategyPnLSummary{
+						Positions: make(map[string]PositionPnL),
+					}
+				}
+				
+				// Add position to strategy summary
+				strategySummary.Positions[pos.PositionID] = positionPnL
+				strategySummary.RealizedPnL += realizedPnL
+				strategySummary.UnrealizedPnL += unrealizedPnL
+				strategySummary.TotalPnL += totalPnL
+				
+				// Update the strategy summary in the main summary
+				summary.PaperStrategyPnL[strategy] = strategySummary
+			}
 		} else {
 			summary.PositionPnL[pos.TradingSymbol] = totalPnL
 			summary.TotalRealizedPnL += realizedPnL
 			summary.TotalUnrealizedPnL += unrealizedPnL
+			
+			// Update strategy P&L summary for real trading
+			if pos.Strategy != "" {
+				strategy := pos.Strategy
+				strategySummary, exists := summary.StrategyPnL[strategy]
+				if !exists {
+					strategySummary = StrategyPnLSummary{
+						Positions: make(map[string]PositionPnL),
+					}
+				}
+				
+				// Add position to strategy summary
+				strategySummary.Positions[pos.PositionID] = positionPnL
+				strategySummary.RealizedPnL += realizedPnL
+				strategySummary.UnrealizedPnL += unrealizedPnL
+				strategySummary.TotalPnL += totalPnL
+				
+				// Update the strategy summary in the main summary
+				summary.StrategyPnL[strategy] = strategySummary
+			}
 		}
 
 		// Store updated P&L in database

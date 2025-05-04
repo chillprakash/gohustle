@@ -391,6 +391,26 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		"paper_trading":  order.PaperTrading,
 	})
 	
+	// Extract strategy from order tag if available
+	strategy := ""
+	if order.Tag != "" {
+		// Check if the tag is a strategy name directly
+		if strings.HasPrefix(order.Tag, "strategy:") {
+			strategy = strings.TrimPrefix(order.Tag, "strategy:")
+			log.Info("Found strategy in order tag", map[string]interface{}{
+				"strategy": strategy,
+				"order_id": order.OrderID,
+			})
+		} else {
+			// Use the tag as the strategy name
+			strategy = order.Tag
+			log.Info("Using order tag as strategy", map[string]interface{}{
+				"strategy": strategy,
+				"order_id": order.OrderID,
+			})
+		}
+	}
+	
 	// Verify this is actually a paper trading order
 	if !order.PaperTrading {
 		log.Error("Attempted to manage position for non-paper trading order", map[string]interface{}{
@@ -617,6 +637,7 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			BuyValue:      float64(max(0, quantity)) * order.Price,
 			SellValue:     float64(max(0, -quantity)) * order.Price,
 			PositionType:  "net",
+			Strategy:      strategy,
 			UserID:        order.UserID,
 			UpdatedAt:     time.Now(),
 			PaperTrading:  true,

@@ -124,9 +124,25 @@ CREATE TABLE orders (
     paper_trading       BOOLEAN DEFAULT FALSE  -- Whether this is a paper trade (not sent to broker)
 );
 
+-- Create strategies table first (since positions references it)
+CREATE TABLE strategies (
+    id                SERIAL PRIMARY KEY,
+    name              VARCHAR(64) UNIQUE NOT NULL,  -- Unique strategy name
+    description       TEXT,                         -- Strategy description
+    type              VARCHAR(32),                  -- e.g., "options", "futures", "equity"
+    parameters        JSONB,                        -- Strategy-specific parameters
+    entry_rules       JSONB,                        -- Entry conditions
+    exit_rules        JSONB,                        -- Exit conditions
+    risk_parameters   JSONB,                        -- Risk management parameters
+    created_at        TIMESTAMPTZ DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ DEFAULT NOW(),
+    active            BOOLEAN DEFAULT TRUE,         -- Whether strategy is active
+    creator_id        VARCHAR(64)                   -- User who created the strategy
+);
+
 CREATE TABLE positions (
     id                  SERIAL PRIMARY KEY,
-    position_id         VARCHAR(64) UNIQUE,    -- Unique identifier for the position
+    position_id         VARCHAR(64),           -- Unique identifier for the position
     trading_symbol      VARCHAR(32) NOT NULL,
     exchange            VARCHAR(16) NOT NULL,
     product             VARCHAR(8),            -- NRML, MIS, CNC
@@ -144,8 +160,13 @@ CREATE TABLE positions (
     buy_value           NUMERIC(16,2),         -- Total buy value
     sell_value          NUMERIC(16,2),         -- Total sell value
     position_type       VARCHAR(8),            -- 'net', 'day'
+    strategy            VARCHAR(64),           -- Strategy name (e.g., 'iron_condor', 'straddle', etc.)
     user_id             VARCHAR(64),           -- User ID
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- When the position was last updated
     paper_trading       BOOLEAN DEFAULT FALSE,  -- Whether this is a paper trade
-    kite_response       JSONB                  -- Raw Zerodha response for audit/debug
+    kite_response       JSONB,                 -- Raw Zerodha response for audit/debug
+    strategy_id         INTEGER REFERENCES strategies(id), -- Reference to strategy table
+    UNIQUE(position_id)
 );
+
+

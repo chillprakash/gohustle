@@ -198,6 +198,27 @@ func InitializeOrderPolling(ctx context.Context) {
 	scheduler.Start(ctx)
 }
 
+// InitializePnLCalculation sets up periodic P&L calculation
+func InitializePnLCalculation(ctx context.Context) {
+	scheduler := GetScheduler()
+	pnlManager := zerodha.GetPnLManager()
+
+	task := &Task{
+		Name:     "PnLCalculation",
+		Interval: 5 * time.Second, // Calculate P&L every 5 seconds
+		Execute: func(ctx context.Context) error {
+			if !isMarketOpen() {
+				return nil
+			}
+			_, err := pnlManager.CalculatePnL(ctx)
+			return err
+		},
+	}
+
+	scheduler.AddTask(task)
+	scheduler.Start(ctx)
+}
+
 // InitializeIndexOptionChainPolling sets up option chain polling for all indices
 func InitializeIndexOptionChainPolling(ctx context.Context) {
 	scheduler := GetScheduler()

@@ -12,9 +12,9 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 		position_id, trading_symbol, exchange, product, quantity, 
 		average_price, last_price, pnl, realized_pnl, unrealized_pnl, 
 		multiplier, buy_quantity, sell_quantity, buy_price, sell_price, 
-		buy_value, sell_value, position_type, user_id, updated_at, paper_trading, kite_response
+		buy_value, sell_value, position_type, strategy, user_id, updated_at, paper_trading, kite_response
 	) VALUES (
-		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
 	) 
 	ON CONFLICT (position_id) DO UPDATE SET 
 		quantity = $5, 
@@ -30,8 +30,9 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 		sell_price = $15, 
 		buy_value = $16, 
 		sell_value = $17, 
-		updated_at = $20, 
-		kite_response = $22
+		strategy = $19,
+		updated_at = $21, 
+		kite_response = $23
 	RETURNING id`
 
 	// Convert KiteResponse to JSON if it's not nil
@@ -64,6 +65,7 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 		position.BuyValue,
 		position.SellValue,
 		position.PositionType,
+		position.Strategy,
 		position.UserID,
 		position.UpdatedAt,
 		position.PaperTrading,

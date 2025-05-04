@@ -619,6 +619,9 @@ func (s *Server) setupRoutes() {
 	// Positions endpoint
 	authenticatedRouter.HandleFunc("/positions", s.handleGetPositions).Methods("GET", "OPTIONS")
 
+	// P&L endpoint
+	authenticatedRouter.HandleFunc("/pnl", s.handleGetPnL).Methods("GET", "OPTIONS")
+
 	// Time series metrics endpoint
 	authenticatedRouter.HandleFunc("/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")
 
@@ -974,6 +977,100 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	resp := Response{
 		Success: true,
 		Data:    analysis,
+	}
+
+	sendJSONResponse(w, resp)
+}
+
+// handleGetPnL returns P&L calculations for all positions
+func (s *Server) handleGetPnL(w http.ResponseWriter, r *http.Request) {
+	pnlManager := zerodha.GetPnLManager()
+	if pnlManager == nil {
+		sendErrorResponse(w, "PnL manager not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Get query parameters
+	strategy := r.URL.Query().Get("strategy")
+	paperOnly := r.URL.Query().Get("paper_only") == "true"
+	realOnly := r.URL.Query().Get("real_only") == "true"
+
+	// Calculate P&L
+	pnlSummary, err := pnlManager.CalculatePnL(r.Context())
+	if err != nil {
+		s.log.Error("Failed to calculate P&L", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to calculate P&L", http.StatusInternalServerError)
+		return
+	}
+
+	// Filter by strategy if specified
+	if strategy != "" {
+		// Create a filtered summary
+		filteredSummary := &zerodha.PnLSummary{
+			PositionPnL:      make(map[string]float64),
+			PaperPositionPnL: make(map[string]float64),
+			StrategyPnL:      make(map[string]zerodha.StrategyPnLSummary),
+			PaperStrategyPnL: make(map[string]zerodha.StrategyPnLSummary),
+			UpdatedAt:        pnlSummary.UpdatedAt,
+		}
+
+		// Filter real trading strategies
+		if !paperOnly {
+			if strategySummary, exists := pnlSummary.StrategyPnL[strategy]; exists {
+				filteredSummary.StrategyPnL[strategy] = strategySummary
+				filteredSummary.TotalRealizedPnL += strategySummary.RealizedPnL
+				filteredSummary.TotalUnrealizedPnL += strategySummary.UnrealizedPnL
+
+				// Add positions to position P&L map
+				for _, pos := range strategySummary.Positions {
+					filteredSummary.PositionPnL[pos.TradingSymbol] = pos.TotalPnL
+				}
+			}
+		}
+
+		// Filter paper trading strategies
+		if !realOnly {
+			if strategySummary, exists := pnlSummary.PaperStrategyPnL[strategy]; exists {
+				filteredSummary.PaperStrategyPnL[strategy] = strategySummary
+
+				// Add positions to paper position P&L map
+				for _, pos := range strategySummary.Positions {
+					filteredSummary.PaperPositionPnL[pos.TradingSymbol] = pos.TotalPnL
+				}
+			}
+		}
+
+		// Update total P&L
+		filteredSummary.TotalPnL = filteredSummary.TotalRealizedPnL + filteredSummary.TotalUnrealizedPnL
+
+		// Use filtered summary instead of full summary
+		pnlSummary = filteredSummary
+	} else if paperOnly {
+		// Return only paper trading P&L
+		filteredSummary := &zerodha.PnLSummary{
+			PaperPositionPnL: pnlSummary.PaperPositionPnL,
+			PaperStrategyPnL: pnlSummary.PaperStrategyPnL,
+			UpdatedAt:        pnlSummary.UpdatedAt,
+		}
+		pnlSummary = filteredSummary
+	} else if realOnly {
+		// Return only real trading P&L
+		filteredSummary := &zerodha.PnLSummary{
+			TotalRealizedPnL:   pnlSummary.TotalRealizedPnL,
+			TotalUnrealizedPnL: pnlSummary.TotalUnrealizedPnL,
+			TotalPnL:           pnlSummary.TotalPnL,
+			PositionPnL:        pnlSummary.PositionPnL,
+			StrategyPnL:        pnlSummary.StrategyPnL,
+			UpdatedAt:          pnlSummary.UpdatedAt,
+		}
+		pnlSummary = filteredSummary
+	}
+
+	resp := Response{
+		Success: true,
+		Data:    pnlSummary,
 	}
 
 	sendJSONResponse(w, resp)

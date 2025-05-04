@@ -199,7 +199,7 @@ type PositionRecord struct {
 	BuyValue      float64     `db:"buy_value"`
 	SellValue     float64     `db:"sell_value"`
 	PositionType  string      `db:"position_type"`
-	Strategy      string      `db:"strategy"`
+	StrategyID    *int        `db:"strategy_id"`
 	UserID        string      `db:"user_id"`
 	UpdatedAt     time.Time   `db:"updated_at"`
 	PaperTrading  bool        `db:"paper_trading"`

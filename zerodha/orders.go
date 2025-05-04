@@ -637,7 +637,8 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			BuyValue:      float64(max(0, quantity)) * order.Price,
 			SellValue:     float64(max(0, -quantity)) * order.Price,
 			PositionType:  "net",
-			Strategy:      strategy,
+			// Remove Strategy field as it doesn't exist in the database
+			// StrategyID will be set later if needed
 			UserID:        order.UserID,
 			UpdatedAt:     time.Now(),
 			PaperTrading:  true,

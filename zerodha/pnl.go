@@ -50,7 +50,7 @@ type PositionPnL struct {
 	BuyValue       float64 `json:"buy_value"`
 	SellValue      float64 `json:"sell_value"`
 	Multiplier     float64 `json:"multiplier"`
-	Strategy       string  `json:"strategy"`
+	StrategyID     int     `json:"strategy_id"`
 	PaperTrading   bool    `json:"paper_trading"`
 	PositionID     string  `json:"position_id"`
 }
@@ -59,6 +59,21 @@ var (
 	pnlInstance *PnLManager
 	pnlOnce     sync.Once
 )
+
+// NewPnLManager creates a new PnLManager
+func NewPnLManager() *PnLManager {
+	return &PnLManager{
+		log: logger.L(),
+	}
+}
+
+// getStrategyIDValue safely extracts the strategy ID value from a potentially nil pointer
+func getStrategyIDValue(strategyID *int) int {
+	if strategyID == nil {
+		return 0
+	}
+	return *strategyID
+}
 
 // GetPnLManager returns a singleton instance of PnLManager
 func GetPnLManager() *PnLManager {
@@ -146,7 +161,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 			BuyValue:        pos.BuyValue,
 			SellValue:       pos.SellValue,
 			Multiplier:      pos.Multiplier,
-			Strategy:        pos.Strategy,
+			StrategyID:      getStrategyIDValue(pos.StrategyID),
 			PaperTrading:    pos.PaperTrading,
 			PositionID:      pos.PositionID,
 		}
@@ -155,7 +170,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		pm.log.Info("Calculated P&L for position", map[string]interface{}{
 			"trading_symbol": pos.TradingSymbol,
 			"position_id":    pos.PositionID,
-			"strategy":       pos.Strategy,
+			"strategy_id":    pos.StrategyID,
 			"realized_pnl":   realizedPnL,
 			"unrealized_pnl": unrealizedPnL,
 			"total_pnl":      totalPnL,
@@ -167,9 +182,9 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 			summary.PaperPositionPnL[pos.TradingSymbol] = totalPnL
 			
 			// Update strategy P&L summary for paper trading
-			if pos.Strategy != "" {
-				strategy := pos.Strategy
-				strategySummary, exists := summary.PaperStrategyPnL[strategy]
+			if pos.StrategyID != nil && *pos.StrategyID != 0 {
+				strategyID := getStrategyIDValue(pos.StrategyID)
+				strategySummary, exists := summary.PaperStrategyPnL[fmt.Sprintf("%d", strategyID)]
 				if !exists {
 					strategySummary = StrategyPnLSummary{
 						Positions: make(map[string]PositionPnL),
@@ -183,7 +198,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 				strategySummary.TotalPnL += totalPnL
 				
 				// Update the strategy summary in the main summary
-				summary.PaperStrategyPnL[strategy] = strategySummary
+				summary.PaperStrategyPnL[fmt.Sprintf("%d", strategyID)] = strategySummary
 			}
 		} else {
 			summary.PositionPnL[pos.TradingSymbol] = totalPnL
@@ -191,9 +206,9 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 			summary.TotalUnrealizedPnL += unrealizedPnL
 			
 			// Update strategy P&L summary for real trading
-			if pos.Strategy != "" {
-				strategy := pos.Strategy
-				strategySummary, exists := summary.StrategyPnL[strategy]
+			if pos.StrategyID != nil && *pos.StrategyID != 0 {
+				strategyID := getStrategyIDValue(pos.StrategyID)
+				strategySummary, exists := summary.StrategyPnL[fmt.Sprintf("%d", strategyID)]
 				if !exists {
 					strategySummary = StrategyPnLSummary{
 						Positions: make(map[string]PositionPnL),
@@ -207,7 +222,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 				strategySummary.TotalPnL += totalPnL
 				
 				// Update the strategy summary in the main summary
-				summary.StrategyPnL[strategy] = strategySummary
+				summary.StrategyPnL[fmt.Sprintf("%d", strategyID)] = strategySummary
 			}
 		}
 

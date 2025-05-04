@@ -484,12 +484,43 @@ func (e *StrategyEngine) getPositionsForStrategy(strategyName string) ([]*db.Pos
 	// Filter positions for this strategy
 	var strategyPositions []*db.PositionRecord
 	for _, pos := range positions {
-		if pos.Strategy == strategyName {
+		// Skip positions with nil StrategyID
+		if pos.StrategyID == nil {
+			continue
+		}
+		
+		// Get strategy name from strategy ID
+		strategy, err := e.getStrategyNameByID(*pos.StrategyID)
+		if err != nil {
+			continue
+		}
+		if strategy == strategyName {
 			strategyPositions = append(strategyPositions, pos)
 		}
 	}
 
 	return strategyPositions, nil
+}
+
+// getStrategyNameByID retrieves the strategy name from its ID
+func (e *StrategyEngine) getStrategyNameByID(strategyID int) (string, error) {
+	if strategyID == 0 {
+		return "", fmt.Errorf("invalid strategy ID: 0")
+	}
+	
+	// Get the strategy from the database
+	timescaleDB := db.GetTimescaleDB()
+	if timescaleDB == nil {
+		return "", fmt.Errorf("timescale DB is nil")
+	}
+	
+	// Get the strategy by ID
+	strategy, err := timescaleDB.GetStrategyByID(context.Background(), strategyID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get strategy by ID: %w", err)
+	}
+	
+	return strategy.Name, nil
 }
 
 // getMarketDataForSymbol retrieves market data for a specific symbol

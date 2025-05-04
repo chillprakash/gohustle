@@ -45,16 +45,18 @@ type MoveSuggestions struct {
 
 // DetailedPosition represents a position with additional analysis
 type DetailedPosition struct {
-	Strike       float64         `json:"strike"`
-	OptionType   string          `json:"option_type"` // CE or PE
-	Quantity     int64           `json:"quantity"`
-	AveragePrice float64         `json:"average_price"`
-	SellPrice    float64         `json:"sell_price"`
-	LTP          float64         `json:"ltp"`
-	Diff         float64         `json:"diff"`
-	VWAP         float64         `json:"vwap"`
-	Value        float64         `json:"value"`
-	Moves        MoveSuggestions `json:"moves"`
+	TradingSymbol string          `json:"trading_symbol"` // Full trading symbol
+	Strike        float64         `json:"strike"`
+	Expiry        string          `json:"expiry"`      // Expiry date in YYYY-MM-DD format (e.g., "2025-05-08")
+	OptionType    string          `json:"option_type"` // CE or PE
+	Quantity      int64           `json:"quantity"`
+	AveragePrice  float64         `json:"average_price"`
+	SellPrice     float64         `json:"sell_price"`
+	LTP           float64         `json:"ltp"`
+	Diff          float64         `json:"diff"`
+	Value         float64         `json:"value"`
+	PaperTrading  bool            `json:"paper_trading"` // Whether this is a paper trading position
+	Moves         MoveSuggestions `json:"moves"`
 }
 
 // PositionAnalysis represents the complete position analysis
@@ -275,195 +277,179 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 	if timescaleDB == nil {
 		return nil, fmt.Errorf("timescale DB is nil")
 	}
-	
+
 	// Fetch all positions from database
 	dbPositions, err := timescaleDB.ListPositions(ctx)
 	if err != nil {
 		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
 			"error": err.Error(),
 		})
-		// Continue with Zerodha positions if DB fetch fails
-	} else {
-		pm.log.Info("Fetched positions from database", map[string]interface{}{
-			"count": len(dbPositions),
-		})
+		return nil, fmt.Errorf("failed to get positions from database: %w", err)
 	}
 
-	// Also get positions from Zerodha API for real-time data
-	positions, err := pm.GetOpenPositions(ctx)
-	if err != nil {
-		pm.log.Error("Failed to get positions from Zerodha", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// If we have DB positions, we can continue without Zerodha positions
-		if len(dbPositions) == 0 {
-			return nil, fmt.Errorf("failed to get positions from any source: %w", err)
-		}
-	}
+	pm.log.Info("Fetched positions from database", map[string]interface{}{
+		"count": len(dbPositions),
+	})
 
-	// Process positions from Zerodha API
-	for _, pos := range positions.Net {
-		// Skip non-option positions
-		if !isOptionPosition(pos.Tradingsymbol) {
-			continue
-		}
-
-		// Get current LTP
-		ltpKey := fmt.Sprintf("%d_ltp", pos.InstrumentToken)
-		ltp, err := ltpDB.Get(ctx, ltpKey).Float64()
-		if err != nil {
-			pm.log.Error("Failed to get LTP", map[string]interface{}{
-				"token": pos.InstrumentToken,
-				"error": err.Error(),
-			})
-			ltp = pos.LastPrice
-		}
-
-		optionType := getOptionType(pos.Tradingsymbol)
-		strike_key := fmt.Sprintf("strike:%d", pos.InstrumentToken)
-		strikePrice, ok := inmemoryCache.Get(strike_key)
-		if !ok {
-			pm.log.Error("Failed to get strike price", map[string]interface{}{
-				"token":  pos.InstrumentToken,
-				"symbol": pos.Tradingsymbol,
-				"key":    strike_key,
-			})
-			continue
-		}
-
-		// Convert strike price to float64 based on type
-		var strikePriceFloat float64
-		switch v := strikePrice.(type) {
-		case float64:
-			strikePriceFloat = v
-		case string:
-			var err error
-			strikePriceFloat, err = strconv.ParseFloat(v, 64)
-			if err != nil {
-				pm.log.Error("Failed to parse strike price", map[string]interface{}{
-					"token":  pos.InstrumentToken,
-					"strike": v,
-					"error":  err.Error(),
-				})
-				continue
-			}
-		default:
-			pm.log.Error("Invalid strike price type", map[string]interface{}{
-				"token": pos.InstrumentToken,
-				"type":  fmt.Sprintf("%T", strikePrice),
-			})
-			continue
-		}
-
-		detailedPos := DetailedPosition{
-			Strike:       strikePriceFloat,
-			OptionType:   optionType,
-			Quantity:     int64(pos.Quantity),
-			AveragePrice: pos.AveragePrice,
-			SellPrice:    pos.SellPrice,
-			LTP:          ltp,
-			Diff:         ltp - pos.AveragePrice,
-			VWAP:         0,
-			Value:        math.Abs(float64(pos.Quantity) * pos.AveragePrice),
-		}
-
-		// Calculate moves
-		detailedPos.Moves = pm.calculateMoves(ctx, pos)
-
-		// Update summary
-		if optionType == "CE" {
-			analysis.Summary.TotalCallValue += detailedPos.Value
-		} else {
-			analysis.Summary.TotalPutValue += detailedPos.Value
-		}
-
-		analysis.Positions = append(analysis.Positions, detailedPos)
-	}
-
-	// Process positions from database (including paper trading positions)
+	// Process all positions from database (both real and paper trading)
 	for _, dbPos := range dbPositions {
-		// Skip positions already processed from Zerodha API (to avoid duplicates)
-		if !dbPos.PaperTrading {
-			// Skip real trading positions as they're already included from Zerodha API
-			continue
-		}
-		
+
 		// Skip non-option positions
 		if !isOptionPosition(dbPos.TradingSymbol) {
 			continue
 		}
-		
+
 		// Get option type
 		optionType := getOptionType(dbPos.TradingSymbol)
-		
+
 		// Get current LTP
 		var ltp float64 = dbPos.LastPrice
-		
-		// Try to get instrument token from cache
-		instrumentToken, exists := inmemoryCache.Get(dbPos.TradingSymbol)
+		var expiryDate string
+		var strikePrice float64
+		var tokenStr string
+
+		// Try to get instrument token from cache - we store this as trading symbol -> token mapping
+		tokenValue, exists := inmemoryCache.Get(dbPos.TradingSymbol)
 		if exists {
+			// Convert token to string format for cache keys
+			tokenStr = fmt.Sprintf("%v", tokenValue)
+
 			// Try to get LTP from Redis using instrument token
-			ltpKey := fmt.Sprintf("%v_ltp", instrumentToken)
+			ltpKey := fmt.Sprintf("%s_ltp", tokenStr)
 			ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
 			if err == nil && ltpVal > 0 {
 				ltp = ltpVal
 			}
-		}
-		
-		// Extract strike price from trading symbol
-		var strikePriceFloat float64
-		parts := strings.Split(dbPos.TradingSymbol, "")
-		for i := 0; i < len(parts); i++ {
-			if len(parts[i]) > 0 && parts[i][0] >= '0' && parts[i][0] <= '9' {
-				// Found a number, try to parse it as strike price
-				strikePriceStr := ""
-				for j := i; j < len(parts); j++ {
-					if len(parts[j]) > 0 && ((parts[j][0] >= '0' && parts[j][0] <= '9') || parts[j][0] == '.') {
-						strikePriceStr += parts[j]
+
+			// Get expiry date from cache
+			expiryKey := fmt.Sprintf("expiry:%s", tokenStr)
+			expiryVal, expiryExists := inmemoryCache.Get(expiryKey)
+			if expiryExists {
+				switch v := expiryVal.(type) {
+				case string:
+					// Keep the ISO format (YYYY-MM-DD) as is
+					if len(v) >= 10 && strings.Contains(v, "-") { // Format like "2025-05-25"
+						expiryDate = v
 					} else {
-						break
+						// Check if it's in MMYYYY format (like "052025")
+						if len(v) == 6 && !strings.Contains(v, "-") {
+							// Convert from MMYYYY to YYYY-MM-DD
+							month := v[:2]
+							year := v[2:]
+							// Default to day 1 if we don't have day information
+							expiryDate = year + "-" + month + "-01"
+						} else {
+							// For any other format, just use as-is and log
+							expiryDate = v
+							pm.log.Debug("Unexpected expiry date format", map[string]interface{}{
+								"expiry": v,
+							})
+						}
 					}
+				case time.Time:
+					// Format time.Time as YYYY-MM-DD
+					expiryDate = v.Format("2006-01-02")
+				default:
+					// Just log and continue
+					pm.log.Debug("Unexpected expiry date format in cache", map[string]interface{}{
+						"type":  fmt.Sprintf("%T", expiryVal),
+						"value": expiryVal,
+					})
 				}
-				strikePriceFloat, _ = strconv.ParseFloat(strikePriceStr, 64)
-				break
+			}
+
+			// Get strike price from cache
+			strikeKey := fmt.Sprintf("strike:%s", tokenStr)
+			strikeVal, strikeExists := inmemoryCache.Get(strikeKey)
+			if strikeExists {
+				switch v := strikeVal.(type) {
+				case float64:
+					strikePrice = v
+				case string:
+					if val, err := strconv.ParseFloat(v, 64); err == nil {
+						strikePrice = val
+					}
+				default:
+					// Just log and continue
+					pm.log.Debug("Unexpected strike price format in cache", map[string]interface{}{
+						"type":  fmt.Sprintf("%T", strikeVal),
+						"value": strikeVal,
+					})
+				}
+			}
+
+		}
+
+		// Create a kiteconnect.Position from the db.PositionRecord for move calculation
+		pseudoPos := kiteconnect.Position{
+			Tradingsymbol:   dbPos.TradingSymbol,
+			Exchange:        dbPos.Exchange,
+			InstrumentToken: 0, // We'll set this from the token value if available
+			Product:         dbPos.Product,
+			Quantity:        dbPos.Quantity,
+			AveragePrice:    dbPos.AveragePrice,
+			LastPrice:       ltp,
+			ClosePrice:      0,
+			PnL:             dbPos.PnL,
+			M2M:             0,
+			Multiplier:      dbPos.Multiplier,
+			BuyQuantity:     dbPos.BuyQuantity,
+			SellQuantity:    dbPos.SellQuantity,
+			BuyPrice:        dbPos.BuyPrice,
+			SellPrice:       dbPos.SellPrice,
+			BuyValue:        dbPos.BuyValue,
+			SellValue:       dbPos.SellValue,
+		}
+
+		// Set the instrument token from the token value we already retrieved
+		if exists {
+			switch v := tokenValue.(type) {
+			case int:
+				pseudoPos.InstrumentToken = uint32(v)
+			case int64:
+				pseudoPos.InstrumentToken = uint32(v)
+			case uint32:
+				pseudoPos.InstrumentToken = v
+			case string:
+				if tokenInt, err := strconv.Atoi(v); err == nil {
+					pseudoPos.InstrumentToken = uint32(tokenInt)
+				}
 			}
 		}
-		
-		// If we couldn't extract strike price, use a default value
-		if strikePriceFloat == 0 {
-			strikePriceFloat = dbPos.AveragePrice
-		}
-		
+
 		detailedPos := DetailedPosition{
-			Strike:       strikePriceFloat,
-			OptionType:   optionType,
-			Quantity:     int64(dbPos.Quantity),
-			AveragePrice: dbPos.AveragePrice,
-			SellPrice:    dbPos.SellPrice,
-			LTP:          ltp,
-			Diff:         ltp - dbPos.AveragePrice,
-			VWAP:         0,
-			Value:        math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
+			TradingSymbol: dbPos.TradingSymbol,
+			Strike:        strikePrice,
+			Expiry:        expiryDate,
+			OptionType:    optionType,
+			Quantity:      int64(dbPos.Quantity),
+			AveragePrice:  dbPos.AveragePrice,
+			SellPrice:     dbPos.SellPrice,
+			LTP:           ltp,
+			Diff:          ltp - dbPos.AveragePrice,
+			Value:         math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
+			PaperTrading:  dbPos.PaperTrading,
+			Moves:         pm.calculateMoves(ctx, pseudoPos),
 		}
-		
+
 		// Update summary
 		if optionType == "CE" {
 			analysis.Summary.TotalCallValue += detailedPos.Value
 		} else {
 			analysis.Summary.TotalPutValue += detailedPos.Value
 		}
-		
+
 		analysis.Positions = append(analysis.Positions, detailedPos)
 	}
-	
+
 	analysis.Summary.TotalValue = analysis.Summary.TotalCallValue + analysis.Summary.TotalPutValue
 	return analysis, nil
 }
 
 // Helper functions
 
-func isOptionPosition(symbol string) bool {
-	return len(symbol) > 2 && (strings.HasSuffix(symbol, "CE") || strings.HasSuffix(symbol, "PE"))
+func isOptionPosition(tradingSymbol string) bool {
+	return strings.HasSuffix(tradingSymbol, "CE") || strings.HasSuffix(tradingSymbol, "PE")
 }
 
 func getOptionType(symbol string) string {
@@ -482,86 +468,203 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 	// Calculate steps for position adjustment
 	steps := []string{"1/4", "1/2", "1"}
 
-	// Set strike gap based on index name from token
+	// Get in-memory cache instance
+	inmemoryCache := cache.GetInMemoryCacheInstance()
+
+	// Get Redis cache for LTP data
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		pm.log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return moves
+	}
+	ltpDB := redisCache.GetLTPDB3()
+
+	// Set strike gap based on index name or trading symbol
 	strikeGap := 50.0
-	indexName, err := pm.kite.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", pos.InstrumentToken))
-	if err == nil {
-		if indexName == "BANKNIFTY" || indexName == "SENSEX" {
+	if strings.Contains(pos.Tradingsymbol, "BANKNIFTY") || strings.Contains(pos.Tradingsymbol, "SENSEX") {
+		strikeGap = 100.0
+	} else {
+		// Try to get index name from token
+		indexName, err := pm.kite.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", pos.InstrumentToken))
+		if err == nil && (indexName == "BANKNIFTY" || indexName == "SENSEX") {
 			strikeGap = 100.0
 		}
 	}
 
-	// Extract strike price from cache using the same key as population
-	inmemoryCache := cache.GetInMemoryCacheInstance()
-	strikeKey := fmt.Sprintf("strike:%d", pos.InstrumentToken)
-	strikePrice, ok := inmemoryCache.Get(strikeKey)
-	if !ok {
-		pm.log.Error("Failed to get strike price for moves calculation", map[string]interface{}{
-			"token": pos.InstrumentToken,
-			"key":   strikeKey,
+	// Extract strike price and option type from trading symbol
+	var strike float64
+	optionType := ""
+
+	// Check if it's a CE or PE option
+	if strings.HasSuffix(pos.Tradingsymbol, "CE") {
+		optionType = "CE"
+	} else if strings.HasSuffix(pos.Tradingsymbol, "PE") {
+		optionType = "PE"
+	} else {
+		pm.log.Error("Invalid option type in trading symbol", map[string]interface{}{
+			"symbol": pos.Tradingsymbol,
 		})
 		return moves
 	}
 
-	var strike float64
-	switch v := strikePrice.(type) {
-	case float64:
-		strike = v
-	case string:
-		var err error
-		strike, err = strconv.ParseFloat(v, 64)
-		if err != nil {
-			pm.log.Error("Failed to parse strike price string for moves calculation", map[string]interface{}{
-				"token": pos.InstrumentToken,
-				"value": v,
-				"error": err.Error(),
+	// First try to get strike from cache
+	strikeKey := fmt.Sprintf("strike:%d", pos.InstrumentToken)
+	strikePrice, ok := inmemoryCache.Get(strikeKey)
+	if ok {
+		switch v := strikePrice.(type) {
+		case float64:
+			strike = v
+		case string:
+			if val, err := strconv.ParseFloat(v, 64); err == nil {
+				strike = val
+			}
+		default:
+			pm.log.Error("Invalid strike price type", map[string]interface{}{
+				"type": fmt.Sprintf("%T", strikePrice),
 			})
-			return moves
 		}
-	default:
-		pm.log.Error("Invalid strike price type for moves calculation", map[string]interface{}{
-			"token": pos.InstrumentToken,
-			"type":  fmt.Sprintf("%T", strikePrice),
-		})
-		return moves
+	}
+
+	// If we couldn't get strike from cache, extract it from trading symbol
+	if strike == 0 {
+		// Extract numeric part from trading symbol (the strike price)
+		var numStr string
+		for i := 0; i < len(pos.Tradingsymbol); i++ {
+			if pos.Tradingsymbol[i] >= '0' && pos.Tradingsymbol[i] <= '9' {
+				// Found start of number
+				numStr = ""
+				for j := i; j < len(pos.Tradingsymbol); j++ {
+					if (pos.Tradingsymbol[j] >= '0' && pos.Tradingsymbol[j] <= '9') || pos.Tradingsymbol[j] == '.' {
+						numStr += string(pos.Tradingsymbol[j])
+					} else {
+						break
+					}
+				}
+				break
+			}
+		}
+
+		if numStr != "" {
+			var err error
+			strike, err = strconv.ParseFloat(numStr, 64)
+			if err != nil {
+				pm.log.Error("Failed to parse strike from trading symbol", map[string]interface{}{
+					"symbol": pos.Tradingsymbol,
+					"numStr": numStr,
+					"error":  err.Error(),
+				})
+				// Fall back to using the last price as strike
+				strike = pos.LastPrice
+			}
+		} else {
+			// Fall back to using the last price as strike
+			strike = pos.LastPrice
+		}
+	}
+
+	// Extract base symbol (without strike and option type)
+	baseSymbol := ""
+	for i := 0; i < len(pos.Tradingsymbol); i++ {
+		if pos.Tradingsymbol[i] >= '0' && pos.Tradingsymbol[i] <= '9' {
+			baseSymbol = pos.Tradingsymbol[:i]
+			break
+		}
+	}
+
+	// If we couldn't extract base symbol, use a default approach
+	if baseSymbol == "" {
+		// Remove last 2 chars (CE or PE) and any digits
+		baseSymbol = strings.TrimRight(pos.Tradingsymbol[:len(pos.Tradingsymbol)-2], "0123456789.")
+	}
+
+	// Function to create a new trading symbol with a different strike
+	createNewSymbol := func(newStrike float64) string {
+		// Convert strike price to whole number (remove decimals)
+		newStrike = math.Round(newStrike)
+		// Format strike price correctly (no decimal for whole numbers)
+		strikeStr := ""
+		if newStrike == float64(int(newStrike)) {
+			// It's a whole number
+			strikeStr = fmt.Sprintf("%.0f", newStrike)
+		} else {
+			// It has decimals
+			strikeStr = fmt.Sprintf("%.1f", newStrike)
+		}
+		return baseSymbol + strikeStr + optionType
+	}
+
+	// Function to get premium for a new strike
+	getPremium := func(newSymbol string, defaultMultiplier float64) float64 {
+		// Try to get instrument token for this symbol
+		tokenInterface, exists := inmemoryCache.Get(newSymbol)
+		if !exists {
+			return pos.LastPrice * defaultMultiplier
+		}
+
+		// Convert token to string
+		var tokenStr string
+		switch v := tokenInterface.(type) {
+		case string:
+			tokenStr = v
+		case int:
+			tokenStr = fmt.Sprintf("%d", v)
+		case uint32:
+			tokenStr = fmt.Sprintf("%d", v)
+		default:
+			return pos.LastPrice * defaultMultiplier
+		}
+
+		// Try to get LTP from Redis
+		ltpKey := fmt.Sprintf("%s_ltp", tokenStr)
+		ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
+		if err == nil && ltpVal > 0 {
+			return ltpVal
+		}
+
+		// Fall back to default calculation
+		return pos.LastPrice * defaultMultiplier
 	}
 
 	// Away moves (2 strikes)
 	for i := 1; i <= 2; i++ {
-		if strings.HasSuffix(pos.Tradingsymbol, "CE") {
-			newStrike := strike + (strikeGap * float64(i))
-			moves.Away = append(moves.Away, MoveStep{
-				Strike:  newStrike,
-				Premium: pos.LastPrice * 0.8, // Simplified premium calculation
-				Steps:   steps,
-			})
+		var newStrike float64
+		if optionType == "CE" {
+			newStrike = strike + (strikeGap * float64(i))
 		} else {
-			newStrike := strike - (strikeGap * float64(i))
-			moves.Away = append(moves.Away, MoveStep{
-				Strike:  newStrike,
-				Premium: pos.LastPrice * 0.8,
-				Steps:   steps,
-			})
+			newStrike = strike - (strikeGap * float64(i))
 		}
+
+		// Create new symbol and get premium
+		newSymbol := createNewSymbol(newStrike)
+		premium := getPremium(newSymbol, 0.8) // Default multiplier 0.8 for away moves
+
+		moves.Away = append(moves.Away, MoveStep{
+			Strike:  newStrike,
+			Premium: premium,
+			Steps:   steps,
+		})
 	}
 
 	// Closer moves (2 strikes)
 	for i := 1; i <= 2; i++ {
-		if strings.HasSuffix(pos.Tradingsymbol, "CE") {
-			newStrike := strike - (strikeGap * float64(i))
-			moves.Closer = append(moves.Closer, MoveStep{
-				Strike:  newStrike,
-				Premium: pos.LastPrice * 1.2,
-				Steps:   steps,
-			})
+		var newStrike float64
+		if optionType == "CE" {
+			newStrike = strike - (strikeGap * float64(i))
 		} else {
-			newStrike := strike + (strikeGap * float64(i))
-			moves.Closer = append(moves.Closer, MoveStep{
-				Strike:  newStrike,
-				Premium: pos.LastPrice * 1.2,
-				Steps:   steps,
-			})
+			newStrike = strike + (strikeGap * float64(i))
 		}
+
+		// Create new symbol and get premium
+		newSymbol := createNewSymbol(newStrike)
+		premium := getPremium(newSymbol, 1.2) // Default multiplier 1.2 for closer moves
+
+		moves.Closer = append(moves.Closer, MoveStep{
+			Strike:  newStrike,
+			Premium: premium,
+			Steps:   steps,
+		})
 	}
 
 	return moves

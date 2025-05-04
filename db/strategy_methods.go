@@ -454,7 +454,7 @@ func (t *TimescaleDB) GetPositionsByStrategy(ctx context.Context, strategyName s
 			&position.BuyQuantity,
 			&position.SellQuantity,
 			&position.PaperTrading,
-			&position.Strategy,
+			&position.StrategyID,
 		)
 
 		if err != nil {

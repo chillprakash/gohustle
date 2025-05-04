@@ -237,10 +237,8 @@ func (s *IronCondorStrategy) ShouldEnter(ctx context.Context, data base.MarketDa
 
 // ShouldExit determines if an iron condor position should be exited
 func (s *IronCondorStrategy) ShouldExit(ctx context.Context, position *db.PositionRecord, data base.MarketDataMap) (*base.SignalResult, error) {
-	// Check if this is part of an iron condor strategy
-	if position.Strategy != "iron_condor" {
-		return nil, nil
-	}
+	// For now, skip strategy check since we're transitioning from Strategy to StrategyID
+	// and need to handle existing positions that might have nil StrategyID
 	
 	// Calculate days to expiry
 	// In a real implementation, you would extract this from the position
@@ -332,10 +330,8 @@ func (s *IronCondorStrategy) CalculatePositionSize(ctx context.Context, capital 
 
 // ManagePosition handles adjustments to an existing iron condor
 func (s *IronCondorStrategy) ManagePosition(ctx context.Context, position *db.PositionRecord, data base.MarketDataMap) (*base.PositionAction, error) {
-	// Check if this is part of an iron condor strategy
-	if position.Strategy != "iron_condor" {
-		return nil, nil
-	}
+	// For now, skip strategy check since we're transitioning from Strategy to StrategyID
+	// and need to handle existing positions that might have nil StrategyID
 	
 	// In a real implementation, you would implement adjustment logic
 	// For example, rolling threatened sides, adding wings, etc.

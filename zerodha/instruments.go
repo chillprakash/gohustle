@@ -767,10 +767,23 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 		if inst.InstrumentType != "CE" && inst.InstrumentType != "PE" {
 			continue
 		}
+		// Cache keys for instrument metadata
 		strike_key := fmt.Sprintf("strike:%s", inst.InstrumentToken)
+		expiry_key := fmt.Sprintf("expiry:%s", inst.InstrumentToken)
+
 		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
+			// Cache the index name for this instrument token
 			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
+
+			// Cache strike price
 			cache.Set(strike_key, inst.StrikePrice, 7*24*time.Hour)
+
+			// Cache expiry date
+			if inst.Expiry != "" {
+				cache.Set(expiry_key, inst.Expiry, 7*24*time.Hour)
+			}
+
+			// Cache reverse lookup (trading symbol to instrument token)
 			cache.Set(inst.Tradingsymbol, inst.InstrumentToken, 7*24*time.Hour)
 			continue
 		}

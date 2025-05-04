@@ -12,7 +12,7 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 		position_id, trading_symbol, exchange, product, quantity, 
 		average_price, last_price, pnl, realized_pnl, unrealized_pnl, 
 		multiplier, buy_quantity, sell_quantity, buy_price, sell_price, 
-		buy_value, sell_value, position_type, strategy, user_id, updated_at, paper_trading, kite_response
+		buy_value, sell_value, position_type, strategy_id, user_id, updated_at, paper_trading, kite_response
 	) VALUES (
 		$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
 	) 
@@ -30,7 +30,7 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 		sell_price = $15, 
 		buy_value = $16, 
 		sell_value = $17, 
-		strategy = $19,
+		strategy_id = $19,
 		updated_at = $21, 
 		kite_response = $23
 	RETURNING id`
@@ -65,7 +65,7 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 		position.BuyValue,
 		position.SellValue,
 		position.PositionType,
-		position.Strategy,
+		position.StrategyID,
 		position.UserID,
 		position.UpdatedAt,
 		position.PaperTrading,
@@ -75,7 +75,7 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 
 // ListPositions fetches all position records from the positions table
 func (t *TimescaleDB) ListPositions(ctx context.Context) ([]*PositionRecord, error) {
-	query := `SELECT id, position_id, trading_symbol, exchange, product, quantity, average_price, last_price, pnl, realized_pnl, unrealized_pnl, multiplier, buy_quantity, sell_quantity, buy_price, sell_price, buy_value, sell_value, position_type, user_id, updated_at, paper_trading, kite_response FROM positions ORDER BY updated_at DESC`
+	query := `SELECT id, position_id, trading_symbol, exchange, product, quantity, average_price, last_price, pnl, realized_pnl, unrealized_pnl, multiplier, buy_quantity, sell_quantity, buy_price, sell_price, buy_value, sell_value, position_type, strategy_id, user_id, updated_at, paper_trading, kite_response FROM positions ORDER BY updated_at DESC`
 	rows, err := t.pool.Query(ctx, query)
 	if err != nil {
 		t.log.Error("Failed to list positions", map[string]interface{}{"error": err.Error()})
@@ -107,6 +107,7 @@ func (t *TimescaleDB) ListPositions(ctx context.Context) ([]*PositionRecord, err
 			&position.BuyValue,
 			&position.SellValue,
 			&position.PositionType,
+			&position.StrategyID,
 			&position.UserID,
 			&position.UpdatedAt,
 			&position.PaperTrading,

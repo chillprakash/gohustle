@@ -1,0 +1,72 @@
+[
+    {
+      "instrument_token": "256265",
+      "exchange_token": "1001",
+      "tradingsymbol": "NIFTY 50",
+      "name": "NIFTY 50",
+      "last_price": "0.0",
+      "expiry": "",
+      "strike": "0.0",
+      "tick_size": "0.0",
+      "lot_size": "0",
+      "instrument_type": "EQ",
+      "segment": "INDICES",
+      "exchange": "NSE"
+    },
+    {
+      "instrument_token": "265",
+      "exchange_token": "1",
+      "tradingsymbol": "SENSEX",
+      "name": "SENSEX",
+      "last_price": "0.0",
+      "expiry": "",
+      "strike": "0.0",
+      "tick_size": "0.0",
+      "lot_size": "0",
+      "instrument_type": "EQ",
+      "segment": "INDICES",
+      "exchange": "BSE"
+    },
+    {
+      "instrument_token": "260105",
+      "exchange_token": "1016",
+      "tradingsymbol": "NIFTY BANK",
+      "name": "NIFTY BANK",
+      "last_price": "0.0",
+      "expiry": "",
+      "strike": "0.0",
+      "tick_size": "0.0",
+      "lot_size": "0",
+      "instrument_type": "EQ",
+      "segment": "INDICES",
+      "exchange": "NSE"
+    },
+    {
+      "instrument_token": "257801",
+      "exchange_token": "1007",
+      "tradingsymbol": "NIFTY FIN SERVICE",
+      "name": "NIFTY FIN SERVICE",
+      "last_price": "0.0",
+      "expiry": "",
+      "strike": "0.0",
+      "tick_size": "0.0",
+      "lot_size": "0",
+      "instrument_type": "EQ",
+      "segment": "INDICES",
+      "exchange": "NSE"
+    },
+    {
+      "instrument_token": "288009",
+      "exchange_token": "1125",
+      "tradingsymbol": "NIFTY MID SELECT",
+      "name": "NIFTY MIDCAP SELECT (MIDCPNIFTY)",
+      "last_price": "0.0",
+      "expiry": "",
+      "strike": "0.0",
+      "tick_size": "0.0",
+      "lot_size": "0",
+      "instrument_type": "EQ",
+      "segment": "INDICES",
+      "exchange": "NSE"
+    }
+  ]

@@ -770,7 +770,23 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 		// Cache keys for instrument metadata
 		strike_key := fmt.Sprintf("strike:%s", inst.InstrumentToken)
 		expiry_key := fmt.Sprintf("expiry:%s", inst.InstrumentToken)
-
+		strike, err := strconv.ParseFloat(inst.StrikePrice, 64)
+		if err != nil {
+			log.Error("Failed to parse strike price", map[string]interface{}{
+				"error":        err.Error(),
+				"strike_price": inst.StrikePrice,
+				"symbol":       inst.Tradingsymbol,
+			})
+			continue
+		}
+		strikeStr := fmt.Sprintf("%d", int(strike))
+		next_move_lookup_key := fmt.Sprintf("next_move:%s:%s:%s", strikeStr, inst.InstrumentType, inst.Expiry)
+		log.Info("Looking up instrument token", map[string]interface{}{
+			"key":         next_move_lookup_key,
+			"strike":      strikeStr,
+			"option_type": inst.InstrumentType,
+			"expiry":      inst.Expiry,
+		})
 		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
 			// Cache the index name for this instrument token
 			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
@@ -782,6 +798,7 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 			if inst.Expiry != "" {
 				cache.Set(expiry_key, inst.Expiry, 7*24*time.Hour)
 			}
+			cache.Set(next_move_lookup_key, inst.InstrumentToken, 7*24*time.Hour)
 
 			// Cache reverse lookup (trading symbol to instrument token)
 			cache.Set(inst.Tradingsymbol, inst.InstrumentToken, 7*24*time.Hour)

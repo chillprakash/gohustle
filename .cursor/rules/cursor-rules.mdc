@@ -10,3 +10,4 @@ Avoid Sharing Memory: Minimize the sharing of mutable data between goroutines.
 Handle Errors: Properly handle errors in goroutines to prevent panics from crashing the entire program.
 Use Context for Cancellation: Use the context package to propagate cancellation signals to goroutines.
 Limit the Number of Goroutines: Avoid creating an excessive number of goroutines, as it can lead to performance degradation.
+dont impelment fallback, unless asked explicitly.

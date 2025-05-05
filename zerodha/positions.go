@@ -32,9 +32,10 @@ type PositionSummary struct {
 
 // MoveStep represents a possible position adjustment step
 type MoveStep struct {
-	Strike  float64  `json:"strike"`
-	Premium float64  `json:"premium"`
-	Steps   []string `json:"steps"`
+	Strike          float64  `json:"strike"`
+	Premium         float64  `json:"premium"`
+	Steps           []string `json:"steps"`
+	InstrumentToken string   `json:"instrument_token"`
 }
 
 // MoveSuggestions represents possible position adjustments
@@ -45,18 +46,19 @@ type MoveSuggestions struct {
 
 // DetailedPosition represents a position with additional analysis
 type DetailedPosition struct {
-	TradingSymbol string          `json:"trading_symbol"` // Full trading symbol
-	Strike        float64         `json:"strike"`
-	Expiry        string          `json:"expiry"`      // Expiry date in YYYY-MM-DD format (e.g., "2025-05-08")
-	OptionType    string          `json:"option_type"` // CE or PE
-	Quantity      int64           `json:"quantity"`
-	AveragePrice  float64         `json:"average_price"`
-	SellPrice     float64         `json:"sell_price"`
-	LTP           float64         `json:"ltp"`
-	Diff          float64         `json:"diff"`
-	Value         float64         `json:"value"`
-	PaperTrading  bool            `json:"paper_trading"` // Whether this is a paper trading position
-	Moves         MoveSuggestions `json:"moves"`
+	TradingSymbol   string          `json:"trading_symbol"` // Full trading symbol
+	Strike          float64         `json:"strike"`
+	Expiry          string          `json:"expiry"`      // Expiry date in YYYY-MM-DD format (e.g., "2025-05-08")
+	OptionType      string          `json:"option_type"` // CE or PE
+	Quantity        int64           `json:"quantity"`
+	AveragePrice    float64         `json:"average_price"`
+	SellPrice       float64         `json:"sell_price"`
+	LTP             float64         `json:"ltp"`
+	Diff            float64         `json:"diff"`
+	Value           float64         `json:"value"`
+	PaperTrading    bool            `json:"paper_trading"`    // Whether this is a paper trading position
+	InstrumentToken string          `json:"instrument_token"` // Instrument token for the position
+	Moves           MoveSuggestions `json:"moves"`
 }
 
 // PositionAnalysis represents the complete position analysis
@@ -418,18 +420,19 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		}
 
 		detailedPos := DetailedPosition{
-			TradingSymbol: dbPos.TradingSymbol,
-			Strike:        strikePrice,
-			Expiry:        expiryDate,
-			OptionType:    optionType,
-			Quantity:      int64(dbPos.Quantity),
-			AveragePrice:  dbPos.AveragePrice,
-			SellPrice:     dbPos.SellPrice,
-			LTP:           ltp,
-			Diff:          ltp - dbPos.AveragePrice,
-			Value:         math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
-			PaperTrading:  dbPos.PaperTrading,
-			Moves:         pm.calculateMoves(ctx, pseudoPos),
+			TradingSymbol:   dbPos.TradingSymbol,
+			Strike:          strikePrice,
+			Expiry:          expiryDate,
+			OptionType:      optionType,
+			Quantity:        int64(dbPos.Quantity),
+			AveragePrice:    dbPos.AveragePrice,
+			SellPrice:       dbPos.SellPrice,
+			LTP:             ltp,
+			Diff:            ltp - dbPos.AveragePrice,
+			Value:           math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
+			PaperTrading:    dbPos.PaperTrading,
+			InstrumentToken: tokenStr,
+			Moves:           pm.calculateMoves(ctx, pseudoPos, strikePrice, expiryDate),
 		}
 
 		// Update summary
@@ -459,7 +462,44 @@ func getOptionType(symbol string) string {
 	return "PE"
 }
 
-func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.Position) MoveSuggestions {
+// getInstrumentTokenForStrike is a helper function to find the instrument token for a given strike price and option type
+func (pm *PositionManager) getInstrumentTokenForStrike(ctx context.Context, strike float64, optionType string, baseSymbol string, expiryDate string) string {
+	// Get in-memory cache instance
+	inmemoryCache := cache.GetInMemoryCacheInstance()
+
+	// Create symbol with the strike price
+	strike = math.Round(strike) // Round to whole number
+	strikeStr := fmt.Sprintf("%.0f", strike)
+	newSymbol := baseSymbol + strikeStr + optionType
+
+	// First try direct lookup by symbol
+	tokenInterface, exists := inmemoryCache.Get(newSymbol)
+	if exists {
+		pm.log.Debug("Found token directly from symbol", map[string]interface{}{
+			"symbol": newSymbol,
+			"token":  fmt.Sprintf("%v", tokenInterface),
+		})
+		return fmt.Sprintf("%v", tokenInterface)
+	}
+
+	// Try to find using the strike lookup key if we have expiry date
+	if expiryDate != "" {
+		strikeLookupKey := fmt.Sprintf("next_strike_lookup:%.0f:%s:%s", strike, expiryDate, optionType)
+		tokenInterface, exists = inmemoryCache.Get(strikeLookupKey)
+		if exists {
+			pm.log.Debug("Found token using strike lookup", map[string]interface{}{
+				"key":   strikeLookupKey,
+				"token": fmt.Sprintf("%v", tokenInterface),
+			})
+			return fmt.Sprintf("%v", tokenInterface)
+		}
+	}
+
+	// If all else fails, return empty string
+	return ""
+}
+
+func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.Position, strike float64, expiryDate string) MoveSuggestions {
 	moves := MoveSuggestions{
 		Away:   make([]MoveStep, 0),
 		Closer: make([]MoveStep, 0),
@@ -467,19 +507,6 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 
 	// Calculate steps for position adjustment
 	steps := []string{"1/4", "1/2", "1"}
-
-	// Get in-memory cache instance
-	inmemoryCache := cache.GetInMemoryCacheInstance()
-
-	// Get Redis cache for LTP data
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		pm.log.Error("Failed to get Redis cache", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return moves
-	}
-	ltpDB := redisCache.GetLTPDB3()
 
 	// Set strike gap based on index name or trading symbol
 	strikeGap := 50.0
@@ -493,139 +520,8 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 		}
 	}
 
-	// Extract strike price and option type from trading symbol
-	var strike float64
-	optionType := ""
-
-	// Check if it's a CE or PE option
-	if strings.HasSuffix(pos.Tradingsymbol, "CE") {
-		optionType = "CE"
-	} else if strings.HasSuffix(pos.Tradingsymbol, "PE") {
-		optionType = "PE"
-	} else {
-		pm.log.Error("Invalid option type in trading symbol", map[string]interface{}{
-			"symbol": pos.Tradingsymbol,
-		})
-		return moves
-	}
-
-	// First try to get strike from cache
-	strikeKey := fmt.Sprintf("strike:%d", pos.InstrumentToken)
-	strikePrice, ok := inmemoryCache.Get(strikeKey)
-	if ok {
-		switch v := strikePrice.(type) {
-		case float64:
-			strike = v
-		case string:
-			if val, err := strconv.ParseFloat(v, 64); err == nil {
-				strike = val
-			}
-		default:
-			pm.log.Error("Invalid strike price type", map[string]interface{}{
-				"type": fmt.Sprintf("%T", strikePrice),
-			})
-		}
-	}
-
-	// If we couldn't get strike from cache, extract it from trading symbol
-	if strike == 0 {
-		// Extract numeric part from trading symbol (the strike price)
-		var numStr string
-		for i := 0; i < len(pos.Tradingsymbol); i++ {
-			if pos.Tradingsymbol[i] >= '0' && pos.Tradingsymbol[i] <= '9' {
-				// Found start of number
-				numStr = ""
-				for j := i; j < len(pos.Tradingsymbol); j++ {
-					if (pos.Tradingsymbol[j] >= '0' && pos.Tradingsymbol[j] <= '9') || pos.Tradingsymbol[j] == '.' {
-						numStr += string(pos.Tradingsymbol[j])
-					} else {
-						break
-					}
-				}
-				break
-			}
-		}
-
-		if numStr != "" {
-			var err error
-			strike, err = strconv.ParseFloat(numStr, 64)
-			if err != nil {
-				pm.log.Error("Failed to parse strike from trading symbol", map[string]interface{}{
-					"symbol": pos.Tradingsymbol,
-					"numStr": numStr,
-					"error":  err.Error(),
-				})
-				// Fall back to using the last price as strike
-				strike = pos.LastPrice
-			}
-		} else {
-			// Fall back to using the last price as strike
-			strike = pos.LastPrice
-		}
-	}
-
-	// Extract base symbol (without strike and option type)
-	baseSymbol := ""
-	for i := 0; i < len(pos.Tradingsymbol); i++ {
-		if pos.Tradingsymbol[i] >= '0' && pos.Tradingsymbol[i] <= '9' {
-			baseSymbol = pos.Tradingsymbol[:i]
-			break
-		}
-	}
-
-	// If we couldn't extract base symbol, use a default approach
-	if baseSymbol == "" {
-		// Remove last 2 chars (CE or PE) and any digits
-		baseSymbol = strings.TrimRight(pos.Tradingsymbol[:len(pos.Tradingsymbol)-2], "0123456789.")
-	}
-
-	// Function to create a new trading symbol with a different strike
-	createNewSymbol := func(newStrike float64) string {
-		// Convert strike price to whole number (remove decimals)
-		newStrike = math.Round(newStrike)
-		// Format strike price correctly (no decimal for whole numbers)
-		strikeStr := ""
-		if newStrike == float64(int(newStrike)) {
-			// It's a whole number
-			strikeStr = fmt.Sprintf("%.0f", newStrike)
-		} else {
-			// It has decimals
-			strikeStr = fmt.Sprintf("%.1f", newStrike)
-		}
-		return baseSymbol + strikeStr + optionType
-	}
-
-	// Function to get premium for a new strike
-	getPremium := func(newSymbol string, defaultMultiplier float64) float64 {
-		// Try to get instrument token for this symbol
-		tokenInterface, exists := inmemoryCache.Get(newSymbol)
-		if !exists {
-			return pos.LastPrice * defaultMultiplier
-		}
-
-		// Convert token to string
-		var tokenStr string
-		switch v := tokenInterface.(type) {
-		case string:
-			tokenStr = v
-		case int:
-			tokenStr = fmt.Sprintf("%d", v)
-		case uint32:
-			tokenStr = fmt.Sprintf("%d", v)
-		default:
-			return pos.LastPrice * defaultMultiplier
-		}
-
-		// Try to get LTP from Redis
-		ltpKey := fmt.Sprintf("%s_ltp", tokenStr)
-		ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
-		if err == nil && ltpVal > 0 {
-			return ltpVal
-		}
-
-		// Fall back to default calculation
-		return pos.LastPrice * defaultMultiplier
-	}
+	// Get option type from trading symbol
+	optionType := getOptionType(pos.Tradingsymbol)
 
 	// Away moves (2 strikes)
 	for i := 1; i <= 2; i++ {
@@ -636,14 +532,15 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 			newStrike = strike - (strikeGap * float64(i))
 		}
 
-		// Create new symbol and get premium
-		newSymbol := createNewSymbol(newStrike)
-		premium := getPremium(newSymbol, 0.8) // Default multiplier 0.8 for away moves
+		// Get the instrument token for this strike using our new helper function
+		tokenStr := getInstrumentTokenWithStrikeAndExpiry(newStrike, optionType, expiryDate)
+		premium := getPremium(tokenStr)
 
 		moves.Away = append(moves.Away, MoveStep{
-			Strike:  newStrike,
-			Premium: premium,
-			Steps:   steps,
+			Strike:          newStrike,
+			Premium:         premium,
+			Steps:           steps,
+			InstrumentToken: tokenStr,
 		})
 	}
 
@@ -656,16 +553,71 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 			newStrike = strike + (strikeGap * float64(i))
 		}
 
-		// Create new symbol and get premium
-		newSymbol := createNewSymbol(newStrike)
-		premium := getPremium(newSymbol, 1.2) // Default multiplier 1.2 for closer moves
+		// Get the instrument token for this strike using our new helper function
+		tokenStr := getInstrumentTokenWithStrikeAndExpiry(newStrike, optionType, expiryDate)
+		premium := getPremium(tokenStr)
 
 		moves.Closer = append(moves.Closer, MoveStep{
-			Strike:  newStrike,
-			Premium: premium,
-			Steps:   steps,
+			Strike:          newStrike,
+			Premium:         premium,
+			Steps:           steps,
+			InstrumentToken: tokenStr,
 		})
 	}
 
 	return moves
+}
+
+func getPremium(tokenStr string) float64 {
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return 0.0
+	}
+	ltpDB := redisCache.GetLTPDB3()
+	ltpVal, err := ltpDB.Get(context.Background(), fmt.Sprintf("%s_ltp", tokenStr)).Float64()
+	if err != nil {
+		return 0.0
+	}
+	return ltpVal
+}
+
+func getInstrumentTokenWithStrikeAndExpiry(strike float64, optionType string, expiryDate string) string {
+	// Get in-memory cache instance
+	inmemoryCache := cache.GetInMemoryCacheInstance()
+	logger := logger.L()
+
+	// Format the strike price as a string (whole number without decimals)
+	strikeStr := fmt.Sprintf("%.0f", math.Round(strike))
+
+	// Create the lookup key in the same format as used in CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes
+	// next_move:{strike}:{option_type}:{expiry}
+	nextMoveKey := fmt.Sprintf("next_move:%s:%s:%s", strikeStr, optionType, expiryDate)
+
+	logger.Debug("Looking up instrument token", map[string]interface{}{
+		"key":         nextMoveKey,
+		"strike":      strike,
+		"option_type": optionType,
+		"expiry":      expiryDate,
+	})
+
+	// Try to get the token from cache
+	tokenInterface, exists := inmemoryCache.Get(nextMoveKey)
+	if exists {
+		tokenStr := fmt.Sprintf("%v", tokenInterface)
+		logger.Debug("Found instrument token using next_move lookup", map[string]interface{}{
+			"key":   nextMoveKey,
+			"token": tokenStr,
+		})
+		return tokenStr
+	}
+
+	logger.Debug("No instrument token found for strike and expiry", map[string]interface{}{
+		"key":         nextMoveKey,
+		"strike":      strike,
+		"option_type": optionType,
+		"expiry":      expiryDate,
+	})
+
+	// If not found, return empty string
+	return ""
 }

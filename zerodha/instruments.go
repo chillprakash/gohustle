@@ -770,7 +770,7 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 		// Cache keys for instrument metadata
 		strike_key := fmt.Sprintf("strike:%s", inst.InstrumentToken)
 		expiry_key := fmt.Sprintf("expiry:%s", inst.InstrumentToken)
-		instrument_type_key := fmt.Sprintf("instrument_type:%s", inst.InstrumentType)
+		instrument_type_key := fmt.Sprintf("instrument_type:%s", inst.InstrumentToken) // Corrected key
 		strike, err := strconv.ParseFloat(inst.StrikePrice, 64)
 		if err != nil {
 			log.Error("Failed to parse strike price", map[string]interface{}{
@@ -790,7 +790,8 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 		})
 		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
 			// Cache the index name for this instrument token
-			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
+			instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", inst.InstrumentToken)
+			cache.Set(instrumentNameKey, inst.Name, 7*24*time.Hour)
 
 			// Cache strike price
 			cache.Set(strike_key, inst.StrikePrice, 7*24*time.Hour)
@@ -806,12 +807,14 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 
 			// Cache reverse lookup (trading symbol to instrument token)
 			cache.Set(inst.Tradingsymbol, inst.InstrumentToken, 7*24*time.Hour)
+			cache.Set(instrumentNameKey, inst.Name, 7*24*time.Hour)
 			continue
 		}
 	}
 
 	for _, index := range core.GetIndices().GetIndicesToSubscribeForIntraday() {
-		cache.Set(index.InstrumentToken, index.NameInOptions, 7*24*time.Hour)
+		instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", index.InstrumentToken)
+		cache.Set(instrumentNameKey, index.NameInOptions, 7*24*time.Hour)
 	}
 }
 
@@ -928,15 +931,6 @@ func convertExpiryMapToSortedSlices(expiryMap map[string]map[time.Time]bool) map
 	}
 
 	return result
-}
-
-// formatExpiries formats expiry dates for logging
-func formatExpiries(expiries []time.Time) []string {
-	formatted := make([]string, len(expiries))
-	for i, expiry := range expiries {
-		formatted[i] = expiry.Format("02-Jan-2006")
-	}
-	return formatted
 }
 
 func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []core.Index) []kiteconnect.Instrument {
@@ -1314,12 +1308,12 @@ func (k *KiteConnect) PrintStrikeCache() {
 	}
 }
 
-// GetIndexNameFromToken retrieves the index name for a given instrument token from cache
 func (k *KiteConnect) GetIndexNameFromToken(ctx context.Context, instrumentToken string) (string, error) {
 	cache := cache.GetInMemoryCacheInstance()
 
 	// Get index name from cache
-	indexName, exists := cache.Get(instrumentToken)
+	instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", instrumentToken)
+	indexName, exists := cache.Get(instrumentNameKey)
 	if !exists {
 		return "", fmt.Errorf("no index found for instrument token: %s", instrumentToken)
 	}

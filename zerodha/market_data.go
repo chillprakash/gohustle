@@ -308,3 +308,34 @@ func GetExpiry(ctx context.Context, instrumentToken interface{}) (string, bool) 
 func GetInstrumentToken(ctx context.Context, tradingSymbol string) (interface{}, bool) {
 	return GetMarketDataManager().GetInstrumentToken(ctx, tradingSymbol)
 }
+
+// GetIndexFromInstrumentToken retrieves the index name (e.g., NIFTY, BANKNIFTY) associated with an instrument token from the cache.
+// This is primarily used for index instrument tokens themselves.
+func GetIndexFromInstrumentToken(ctx context.Context, instrumentToken string) (string, bool) {
+	cache := cache.GetInMemoryCacheInstance()
+	if cache == nil {
+		logger.L().Error("In-memory cache not initialized", map[string]interface{}{
+			"function": "GetIndexFromInstrumentToken",
+		})
+		return "", false
+	}
+
+	// Construct the key used for caching the index name
+	instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", instrumentToken)
+	// The index name is cached directly with the token as the key
+	val, found := cache.Get(instrumentNameKey)
+	if !found {
+		return "", false
+	}
+
+	indexName, ok := val.(string)
+	if !ok {
+		logger.L().Error("Cached value for index token is not a string", map[string]interface{}{
+			"instrument_token": instrumentToken,
+			"cached_value":     val,
+		})
+		return "", false
+	}
+
+	return indexName, true
+}

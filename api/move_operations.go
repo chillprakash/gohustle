@@ -79,8 +79,61 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 		"paper_trading":  currentPosition.PaperTrading,
 	})
 
+	// Fetch indexName earlier and pass to calculateQuantityToProcess
+	// 1. Get Instrument Token from Trading Symbol
+	instrumentTokenValue, tokenFound := zerodha.GetInstrumentToken(r.Context(), currentPosition.TradingSymbol)
+	if !tokenFound {
+		s.log.Error("Could not find instrument token for position in cache", map[string]interface{}{ // Log token not found
+			"trading_symbol": currentPosition.TradingSymbol,
+		})
+		// Cannot proceed without token to determine lot size reliably
+		sendErrorResponse(w, "Failed to retrieve instrument details for quantity calculation", http.StatusInternalServerError)
+		return
+	}
+	instrumentTokenStr, ok := instrumentTokenValue.(string)
+	if !ok {
+		s.log.Error("Instrument token retrieved from cache is not a string", map[string]interface{}{ // Log invalid token type
+			"trading_symbol": currentPosition.TradingSymbol,
+			"token_value":    instrumentTokenValue,
+		})
+		sendErrorResponse(w, "Internal error processing instrument details", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Get Index Name from Instrument Token
+	indexName, indexFound := zerodha.GetIndexFromInstrumentToken(r.Context(), instrumentTokenStr)
+
+	if !indexFound {
+		// Attempt to guess from trading symbol as a fallback
+		if strings.Contains(currentPosition.TradingSymbol, "NIFTY") {
+			indexName = "NIFTY"
+		} else if strings.Contains(currentPosition.TradingSymbol, "BANKNIFTY") {
+			indexName = "BANKNIFTY"
+		} else if strings.Contains(currentPosition.TradingSymbol, "SENSEX") {
+			indexName = "SENSEX"
+		} else {
+			// Log error and potentially default or return error if index cannot be determined
+			s.log.Error("Could not determine index name for lot size calculation", map[string]interface{}{ // Log index not found/guessed
+				"instrument_token": instrumentTokenStr,
+				"trading_symbol":   currentPosition.TradingSymbol,
+			})
+			// Defaulting to NIFTY as a last resort, but this might be inaccurate
+			indexName = "NIFTY"
+		}
+		indexFound = true // Proceed with the guessed/default name
+	}
+
 	// 3. Calculate the quantity to process based on the fraction
-	toProcessQuantity := calculateQuantityToProcess(currentPosition.Quantity, req.QuantityFrac, strikeInfo.InstrumentType)
+	toProcessQuantity, err := calculateQuantityToProcess(currentPosition.Quantity, req.QuantityFrac, strikeInfo.InstrumentType, indexName)
+	if err != nil {
+		s.log.Error("Failed to calculate quantity to process", map[string]interface{}{ // Log quantity calculation failure
+			"error":            err.Error(),
+			"instrument_token": req.InstrumentToken,
+			"trading_symbol":   req.TradingSymbol,
+		})
+		sendErrorResponse(w, fmt.Sprintf("Failed to calculate quantity to process: %v", err), http.StatusBadRequest)
+		return
+	}
 
 	if toProcessQuantity == 0 {
 		sendErrorResponse(w, "Calculated quantity to process is zero", http.StatusBadRequest)
@@ -117,22 +170,36 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	}
 
 	// Send a success response
-	s.log.Info("Successfully processed move operation", map[string]interface{}{
-		"move_type":      req.MoveType,
-		"position_id":    currentPosition.ID,
-		"trading_symbol": currentPosition.TradingSymbol,
-		"quantity":       toProcessQuantity,
+	// Lot size is already determined by the indexName fetched earlier
+	lotSize := getLotSize(indexName)
+	finalQuantity := int(math.Abs(float64(toProcessQuantity))) // toProcessQuantity is already lot-adjusted
+	finalLots := 0
+	if lotSize > 0 {
+		finalLots = finalQuantity / lotSize
+	} else {
+		s.log.Error("Lot size is zero or negative, cannot calculate lots for response", map[string]interface{}{
+			"index_name": indexName,
+			"lot_size":   lotSize,
+		})
+	}
+
+	s.log.Info("Final response values", map[string]interface{}{ // Adjusted log
+		"final_quantity": finalQuantity,
+		"lot_size":       lotSize,
+		"final_lots":     finalLots,
 	})
 
 	// Create a success response
 	response := map[string]interface{}{
 		"status":  "success",
 		"message": fmt.Sprintf("%s operation completed successfully", req.MoveType),
-		"data": map[string]interface{}{
+		"data": map[string]interface{}{ // Ensure this map uses the correct values
 			"move_type":      string(req.MoveType),
 			"trading_symbol": currentPosition.TradingSymbol,
-			"quantity":       math.Abs(float64(toProcessQuantity)),
+			"quantity":       finalQuantity, // Use absolute quantity
 			"position_id":    currentPosition.ID,
+			"lots":           finalLots,
+			"paper_trading":  currentPosition.PaperTrading,
 		},
 	}
 
@@ -207,26 +274,6 @@ func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeI
 			"instrument_token": req.InstrumentToken,
 			"trading_symbol":   req.TradingSymbol,
 		})
-
-		// Check if trading symbol ends with CE or PE
-		if strings.HasSuffix(req.TradingSymbol, "CE") {
-			instrumentType = "CE"
-			log.Info("Extracted instrument type from trading symbol", map[string]interface{}{
-				"trading_symbol":  req.TradingSymbol,
-				"instrument_type": instrumentType,
-			})
-		} else if strings.HasSuffix(req.TradingSymbol, "PE") {
-			instrumentType = "PE"
-			log.Info("Extracted instrument type from trading symbol", map[string]interface{}{
-				"trading_symbol":  req.TradingSymbol,
-				"instrument_type": instrumentType,
-			})
-		} else {
-			log.Error("Failed to extract instrument type from trading symbol", map[string]interface{}{
-				"trading_symbol": req.TradingSymbol,
-			})
-			return nil, fmt.Errorf("failed to get instrument type for token: %s", req.InstrumentToken)
-		}
 	} else {
 		log.Info("Got instrument type from cache", map[string]interface{}{
 			"instrument_token": req.InstrumentToken,
@@ -384,9 +431,18 @@ func findCurrentPosition(ctx context.Context, instrumentToken, tradingSymbol str
 	return nil, nil // No position found
 }
 
-// calculateQuantityToProcess calculates the quantity to process based on the fraction
-func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, instrumentType string) int {
+// calculateQuantityToProcess calculates the quantity to move/exit based on fraction and ensures it's a multiple of lot size.
+// It returns the quantity with the correct sign (negative for SELL, positive for BUY).
+func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, instrumentType string, indexName string) (int, error) {
 	log := logger.L()
+
+	if currentQuantity == 0 {
+		log.Error("Current position quantity is zero", map[string]interface{}{
+			"instrument_type": instrumentType,
+			"index_name":      indexName,
+		})
+		return 0, fmt.Errorf("current position quantity is zero")
+	}
 
 	// Get the absolute quantity
 	absQuantity := int(math.Abs(float64(currentQuantity)))
@@ -395,16 +451,50 @@ func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, 
 		"abs_quantity":     absQuantity,
 		"fraction":         fraction,
 		"instrument_type":  instrumentType,
+		"index_name":       indexName,
 	})
 
 	// Get the lot size for this instrument
-	lotSize := getLotSize(instrumentType)
+	lotSize := getLotSize(indexName)
+	if lotSize <= 0 {
+		log.Error("Invalid lot size calculated", map[string]interface{}{ // Log error
+			"instrument_type": instrumentType,
+			"index_name":      indexName,
+			"lot_size":        lotSize,
+		})
+		return 0, fmt.Errorf("invalid lot size %d for instrument type %s", lotSize, instrumentType)
+	}
 	log.Info("Got lot size for instrument", map[string]interface{}{
 		"instrument_type": instrumentType,
+		"index_name":      indexName,
 		"lot_size":        lotSize,
 	})
 
-	// Calculate the fraction
+	// Calculate in terms of lots rather than individual contracts
+	// This is the key change to ensure proper lot-based splitting
+	totalLots := absQuantity / lotSize
+	if absQuantity%lotSize != 0 {
+		log.Error("Current position quantity is not a multiple of lot size", map[string]interface{}{
+			"current_quantity": currentQuantity,
+			"lot_size":         lotSize,
+			"remainder":        absQuantity % lotSize,
+		})
+
+		// Round to the nearest number of lots
+		totalLots = int(math.Round(float64(absQuantity) / float64(lotSize)))
+		log.Info("Rounded to nearest number of lots", map[string]interface{}{
+			"original_quantity": absQuantity,
+			"total_lots":        totalLots,
+			"lot_size":          lotSize,
+		})
+	}
+
+	log.Info("Position in lots", map[string]interface{}{
+		"total_lots": totalLots,
+		"lot_size":   lotSize,
+	})
+
+	// Calculate the target quantity based on the fraction
 	var fractionValue float64
 	switch fraction {
 	case HalfPosition:
@@ -412,27 +502,34 @@ func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, 
 	case QuarterPosition:
 		fractionValue = 0.25
 	default:
-		fractionValue = 1.0
+		log.Error("Invalid fraction specified", map[string]interface{}{ // Log invalid fraction
+			"fraction": fraction,
+		})
+		return 0, fmt.Errorf("invalid quantity fraction: %s", fraction)
 	}
 
-	// Calculate the quantity to process
-	toProcess := int(math.Round(float64(absQuantity) * fractionValue))
-	log.Info("Initial quantity calculation", map[string]interface{}{
-		"fraction_value": fractionValue,
-		"to_process":     toProcess,
+	// Calculate based on lots first
+	lotsToProcess := int(math.Round(float64(totalLots) * fractionValue))
+	log.Info("Calculated lots to process based on fraction", map[string]interface{}{ // Log lots to process
+		"total_lots":    totalLots,
+		"fraction":      fraction,
+		"fractionValue": fractionValue,
+		"lotsToProcess": lotsToProcess,
 	})
 
-	// Ensure the quantity is a multiple of the lot size
-	if toProcess%lotSize != 0 {
-		// Round to the nearest multiple of the lot size
-		oldProcess := toProcess
-		toProcess = int(math.Round(float64(toProcess)/float64(lotSize))) * lotSize
-		log.Info("Rounded quantity to lot size multiple", map[string]interface{}{
-			"old_quantity": oldProcess,
-			"new_quantity": toProcess,
-			"lot_size":     lotSize,
-		})
+	// Ensure we process at least one lot
+	if lotsToProcess == 0 {
+		lotsToProcess = 1
+		log.Info("Adjusted lots to process to minimum 1 lot", map[string]interface{}{}) // Log adjustment
 	}
+
+	// Convert calculated lots back to quantity
+	toProcess := lotsToProcess * lotSize
+	log.Info("Converted lots to contracts", map[string]interface{}{ // Log conversion
+		"lots_to_process": lotsToProcess,
+		"lot_size":        lotSize,
+		"to_process":      toProcess,
+	})
 
 	// Check if the quantity is below the minimum lot size
 	if toProcess < lotSize {
@@ -440,7 +537,7 @@ func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, 
 			"calculated_quantity": toProcess,
 			"minimum_lot_size":    lotSize,
 		})
-		return 0 // Return 0 to indicate that the order cannot be processed
+		return 0, fmt.Errorf("quantity below minimum lot size")
 	}
 
 	// If the current position is negative (short), make the result negative too
@@ -451,23 +548,74 @@ func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, 
 	log.Info("Final quantity to process", map[string]interface{}{
 		"quantity":        toProcess,
 		"original":        currentQuantity,
+		"lots":            lotsToProcess,
 		"fraction":        fraction,
 		"instrument_type": instrumentType,
+		"index_name":      indexName,
 	})
 
-	return toProcess
+	return toProcess, nil
+}
+
+// calculateExitQuantity calculates the quantity required to exit the entire position.
+func calculateExitQuantity(currentQuantity int, instrumentType string, indexName string) (int, error) {
+	log := logger.L()
+	lotSize := getLotSize(indexName)
+	if lotSize <= 0 {
+		log.Error("Invalid lot size calculated for exit", map[string]interface{}{ // Log invalid lot size
+			"instrument_type": instrumentType,
+			"index_name":      indexName,
+			"lot_size":        lotSize,
+		})
+		return 0, fmt.Errorf("invalid lot size %d for instrument type %s", lotSize, instrumentType)
+	}
+	log.Info("Got lot size for exit", map[string]interface{}{
+		"instrument_type": instrumentType,
+		"index_name":      indexName,
+		"lot_size":        lotSize,
+	})
+
+	// Calculate the quantity to exit
+	exitQuantity := int(math.Abs(float64(currentQuantity)))
+	if exitQuantity%lotSize != 0 {
+		log.Error("Current position quantity is not a multiple of lot size for exit", map[string]interface{}{
+			"current_quantity": currentQuantity,
+			"lot_size":         lotSize,
+			"remainder":        exitQuantity % lotSize,
+		})
+
+		// Round to the nearest number of lots
+		exitQuantity = int(math.Round(float64(exitQuantity)/float64(lotSize))) * lotSize
+		log.Info("Rounded to nearest number of lots for exit", map[string]interface{}{
+			"original_quantity": exitQuantity,
+			"exit_quantity":     exitQuantity,
+			"lot_size":          lotSize,
+		})
+	}
+
+	log.Info("Final exit quantity", map[string]interface{}{
+		"exit_quantity":   exitQuantity,
+		"original":        currentQuantity,
+		"instrument_type": instrumentType,
+		"index_name":      indexName,
+	})
+
+	return exitQuantity, nil
 }
 
 // getLotSize returns the lot size for the given instrument type
-func getLotSize(instrumentType string) int {
-	// This is a simplified implementation - in reality, you would look up the lot size
-	// based on the instrument or index
-	if strings.Contains(instrumentType, "NIFTY") {
-		return 75 // Nifty lot size
-	} else if strings.Contains(instrumentType, "BANKNIFTY") {
+func getLotSize(indexName string) int {
+	// This is a simplified implementation - it should ideally fetch from a config or cache
+	log := logger.L()
+	log.Info("Getting lot size", map[string]interface{}{ // Log getting lot size
+		"index_name": indexName,
+	})
+	if strings.Contains(indexName, "BANK") {
 		return 20 // Bank Nifty lot size
-	} else if strings.Contains(instrumentType, "SENSEX") {
+	} else if strings.Contains(indexName, "SENSEX") {
 		return 20 // Sensex lot size
+	} else if strings.Contains(indexName, "NIFTY") {
+		return 75 // Nifty lot size
 	}
 
 	// Default lot size
@@ -483,6 +631,40 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 		side = "SELL"
 	}
 
+	// Extract instrument type from the trading symbol to get the lot size
+	var instrumentType string
+	if strings.Contains(currentPosition.TradingSymbol, "CE") {
+		instrumentType = "CE"
+	} else if strings.Contains(currentPosition.TradingSymbol, "PE") {
+		instrumentType = "PE"
+	} else {
+		// Default to NIFTY if we can't determine
+		instrumentType = "NIFTY"
+	}
+
+	// Get the lot size for the instrument type
+	lotSize := getLotSize(instrumentType)
+
+	// Ensure quantity is a multiple of lot size
+	absQuantity := int(math.Abs(float64(toProcessQuantity)))
+	quantityInLots := int(math.Round(float64(absQuantity) / float64(lotSize)))
+
+	// Ensure it's at least 1 lot
+	if quantityInLots < 1 {
+		quantityInLots = 1
+		s.log.Info("Adjusted lots to process to minimum 1 lot", map[string]interface{}{}) // Log adjustment
+	}
+
+	// Convert calculated lots back to quantity
+	quantityInContracts := quantityInLots * lotSize
+
+	s.log.Info("Calculated exit quantity", map[string]interface{}{
+		"original_quantity":     toProcessQuantity,
+		"lot_size":              lotSize,
+		"quantity_in_lots":      quantityInLots,
+		"quantity_in_contracts": quantityInContracts,
+	})
+
 	// Create a new order request
 	exitOrderReq := &PlaceOrderAPIRequest{
 		InstrumentToken: req.InstrumentToken,
@@ -490,7 +672,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 		Exchange:        currentPosition.Exchange,
 		OrderType:       "MARKET", // Use market order for exit
 		Side:            side,
-		Quantity:        int(math.Abs(float64(toProcessQuantity))),
+		Quantity:        quantityInContracts,
 		Product:         currentPosition.Product,
 		Validity:        "DAY",
 		Tag:             "exit_position",

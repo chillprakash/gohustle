@@ -65,6 +65,21 @@ toProcessQuantity to be added to new position.
 
 in case of exit, the toProcessQuantity to be removed from current position only.
 
+Move Quantity logic:
+The basic unit for ordering is 1 lot.
+the quantity for the same is 75 for Nifty and 20 for Sensex.
+if quantity is 1, toProcessQuantity is full
+if quantity is 0.5, toProcessQuantity is half:
+While calualting the half, the basic unit should be 75/20 and multiples of 75/20 basex on index.
+say the quanity is 375, while splitting into half it should be 
+= 375/2 = 187.5
+But, we should split this cleanly.
+Logic: 375/(75) minimal lot.
+answer is 5.
+To spluit the 5/2 will be 2.5, but we need the nearest whole number.
+so, the nearest number would be 3. so split should be 3+2
+3*75 and 2*75.
+Can we calulate based on this?
 
 
 

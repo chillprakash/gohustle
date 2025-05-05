@@ -226,6 +226,84 @@ func StoreLTP(ctx context.Context, instrumentToken interface{}, ltp float64) err
 	return GetMarketDataManager().StoreLTP(ctx, instrumentToken, ltp)
 }
 
+// GetInstrumentType retrieves the instrument type (CE/PE) for a given instrument token
+// Returns the instrument type and a boolean indicating if it was found
+func (m *MarketDataManager) GetInstrumentType(ctx context.Context, instrumentToken interface{}) (string, bool) {
+	if instrumentToken == nil {
+		m.log.Error("Empty instrument token provided", nil)
+		return "", false
+	}
+
+	// Get the in-memory cache instance
+	inMemoryCache := cache.GetInMemoryCacheInstance()
+	if inMemoryCache == nil {
+		m.log.Error("Failed to get in-memory cache instance", nil)
+		return "", false
+	}
+
+	// Construct the key for instrument type
+	key := fmt.Sprintf("instrument_type:%s", instrumentToken)
+
+	// Try to get the instrument type from the cache
+	instrumentType, found := inMemoryCache.Get(key)
+	if found {
+		m.log.Debug("Found instrument type in cache", map[string]interface{}{
+			"instrument_token": instrumentToken,
+			"instrument_type":  instrumentType,
+		})
+		return fmt.Sprintf("%v", instrumentType), true
+	}
+
+	m.log.Debug("Instrument type not found for instrument token", map[string]interface{}{
+		"instrument_token": instrumentToken,
+	})
+	return "", false
+}
+
+// GetInstrumentType is a convenience function that uses the singleton MarketDataManager
+func GetInstrumentType(ctx context.Context, instrumentToken interface{}) (string, bool) {
+	return GetMarketDataManager().GetInstrumentType(ctx, instrumentToken)
+}
+
+// GetExpiry retrieves the expiry date for a given instrument token
+// Returns the expiry date and a boolean indicating if it was found
+func (m *MarketDataManager) GetExpiry(ctx context.Context, instrumentToken interface{}) (string, bool) {
+	if instrumentToken == nil {
+		m.log.Error("Empty instrument token provided", nil)
+		return "", false
+	}
+
+	// Get the in-memory cache instance
+	inMemoryCache := cache.GetInMemoryCacheInstance()
+	if inMemoryCache == nil {
+		m.log.Error("Failed to get in-memory cache instance", nil)
+		return "", false
+	}
+
+	// Construct the key for expiry date
+	key := fmt.Sprintf("expiry:%v", instrumentToken)
+
+	// Try to get the expiry date from the cache
+	expiry, found := inMemoryCache.Get(key)
+	if found {
+		m.log.Debug("Found expiry date in cache", map[string]interface{}{
+			"instrument_token": instrumentToken,
+			"expiry":           expiry,
+		})
+		return fmt.Sprintf("%v", expiry), true
+	}
+
+	m.log.Debug("Expiry date not found for instrument token", map[string]interface{}{
+		"instrument_token": instrumentToken,
+	})
+	return "", false
+}
+
+// GetExpiry is a convenience function that uses the singleton MarketDataManager
+func GetExpiry(ctx context.Context, instrumentToken interface{}) (string, bool) {
+	return GetMarketDataManager().GetExpiry(ctx, instrumentToken)
+}
+
 // GetInstrumentToken is a convenience function that uses the singleton MarketDataManager
 func GetInstrumentToken(ctx context.Context, tradingSymbol string) (interface{}, bool) {
 	return GetMarketDataManager().GetInstrumentToken(ctx, tradingSymbol)

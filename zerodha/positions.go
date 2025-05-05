@@ -163,11 +163,11 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 	// Process each position
 	for _, pos := range positions {
 		// Create a unique position ID
-		positionID := fmt.Sprintf("%s_%s_%s", pos.Tradingsymbol, pos.Exchange, pos.Product)
+		positionIDStr := fmt.Sprintf("%s_%s_%s", pos.Tradingsymbol, pos.Exchange, pos.Product)
 
 		// Create a position record
 		posRecord := &db.PositionRecord{
-			PositionID:    positionID,
+			PositionID:    &positionIDStr,
 			TradingSymbol: pos.Tradingsymbol,
 			Exchange:      pos.Exchange,
 			Product:       pos.Product,
@@ -195,7 +195,7 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 		if err := timescaleDB.UpsertPosition(ctx, posRecord); err != nil {
 			pm.log.Error("Failed to upsert position in database", map[string]interface{}{
 				"error":          err.Error(),
-				"position_id":    positionID,
+				"position_id":    positionIDStr,
 				"trading_symbol": pos.Tradingsymbol,
 			})
 			// Continue with other positions even if one fails

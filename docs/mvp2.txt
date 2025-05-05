@@ -5,6 +5,70 @@ I connect to Zerodha/Fyers websocket.
 I Subscribe around 500-600 instruments.
 In worst case, each instument can send a tick per second.
 
+Logic for orders -> Positions
+For order, there will be quantity and instrument_token.
+
+orders can be either placed at Zerodha or paper trading.
+No differnce in logic except the papert trading flag in request  input.
+
+Order Status can be below on Zerodha Side
+Order statuses¶
+The status field in the order response shows the current state of the order. The status values are largely self explanatory. The most common statuses are OPEN, COMPLETE, CANCELLED, and REJECTED.
+
+An order can traverse through several interim and temporary statuses during its lifetime. For example, when an order is first placed or modified, it instantly passes through several stages before reaching its end state. Some of these are highlighted below.
+
+status	 
+PUT ORDER REQ RECEIVED	Order request has been received by the backend
+VALIDATION PENDING	Order pending validation by the RMS (Risk Management System)
+OPEN PENDING	Order is pending registration at the exchange
+MODIFY VALIDATION PENDING	Order's modification values are pending validation by the RMS
+MODIFY PENDING	Order's modification values are pending registration at the exchange
+TRIGGER PENDING	Order's placed but the fill is pending based on a trigger price.
+CANCEL PENDING	Order's cancellation request is pending registration at the exchange
+AMO REQ RECEIVED	Same as PUT ORDER REQ RECEIVED, but for AMOs
+
+A scheduler will be running on every second, to fetch/update the order and its status.
+Once Order is placed, the position will have to be updated. There is a scheduler that fetches positons and sync that to db.
+So,the Actual Zerodha orders/positions should work properly.
+
+For Paper trading,
+the same instrument token will be recived and an order will be placed. But, the positions, has to be calculated manually.
+
+For Placing orders, now API's are there.
+New API's
+http://localhost:8080/api/orders/place
+queryParam -> type -> move_away/ move_closer/ exit
+              steps -> 1/2
+              quantity -> 1/0.5/0.25
+
+Normal Payload:
+{"instrumentToken":"9885186","orderType":"MARKET","side":"SELL","quantity":75,"price":0,"triggerPrice":0,"product":"NRML","validity":"DAY","disclosedQty":0,"tag":"GoHustle","paperTrading":true}
+
+API should work like this.
+type, steps and quantity will be the queryParam
+From the instrument_token, fetch the strike, expiry, instrument_type
+if instument_tyoe is CE, then 
+move away is strike + steps * 50(100 for Sensex)
+if instument_tyoe is PE, then 
+move away is strike - steps * 50(100 for Sensex)
+
+for the strike, instrument_type and expiry fetch the insrument_token.
+
+get the current position quantity and get the quantity from the queryParam
+the toProcessQuantity should be multiples of 75 for Nifty and 20 for sensex.
+if quantity is 1, toProcessQuantity is full
+if quantity is 0.5, toProcessQuantity is half
+if quantity is 0.25, toProcessQuantity is quarter (round to the nearest 75 or 20 based on index.)
+
+then, in case of move, the toProcessQuantity to be removed from current posision and 
+toProcessQuantity to be added to new position.
+
+in case of exit, the toProcessQuantity to be removed from current position only.
+
+
+
+
+
 The tick response will be of strucutre:
 {
     "tradable": true,

@@ -770,6 +770,7 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 		// Cache keys for instrument metadata
 		strike_key := fmt.Sprintf("strike:%s", inst.InstrumentToken)
 		expiry_key := fmt.Sprintf("expiry:%s", inst.InstrumentToken)
+		instrument_type_key := fmt.Sprintf("instrument_type:%s", inst.InstrumentType)
 		strike, err := strconv.ParseFloat(inst.StrikePrice, 64)
 		if err != nil {
 			log.Error("Failed to parse strike price", map[string]interface{}{
@@ -793,6 +794,9 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 
 			// Cache strike price
 			cache.Set(strike_key, inst.StrikePrice, 7*24*time.Hour)
+
+			// Cache instrument type
+			cache.Set(instrument_type_key, inst.InstrumentType, 7*24*time.Hour)
 
 			// Cache expiry date
 			if inst.Expiry != "" {

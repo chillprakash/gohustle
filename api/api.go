@@ -27,6 +27,24 @@ import (
 
 // PlaceOrderAPIRequest is the API payload for placing a regular order
 // (mirrors zerodha.PlaceOrderRequest, but with camelCase for JSON)
+// MoveType represents the type of option position movement
+type MoveType string
+
+const (
+	MoveAway   MoveType = "move_away"
+	MoveCloser MoveType = "move_closer"
+	Exit       MoveType = "exit"
+)
+
+// QuantityFraction represents the fraction of the position to process
+type QuantityFraction string
+
+const (
+	FullPosition    QuantityFraction = "1"
+	HalfPosition    QuantityFraction = "0.5"
+	QuarterPosition QuantityFraction = "0.25"
+)
+
 type PlaceOrderAPIRequest struct {
 	// Either provide InstrumentToken OR both TradingSymbol and Exchange
 	InstrumentToken string  `json:"instrumentToken,omitempty"`
@@ -42,6 +60,12 @@ type PlaceOrderAPIRequest struct {
 	DisclosedQty    int     `json:"disclosedQty,omitempty"`
 	Tag             string  `json:"tag,omitempty"`
 	PaperTrading    bool    `json:"paperTrading,omitempty"`
+
+	// New fields for option movement functionality
+	// These are populated from query parameters
+	MoveType     MoveType         `json:"-"` // move_away, move_closer, or exit
+	Steps        int              `json:"-"` // Number of strike steps to move (1 or 2)
+	QuantityFrac QuantityFraction `json:"-"` // Fraction of position to process (1, 0.5, 0.25)
 }
 
 // PlaceGTTAPIRequest is the API payload for placing a GTT order
@@ -89,9 +113,58 @@ func (s *Server) handleGetOrders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters for option movement functionality
+	queryParams := r.URL.Query()
+
+	// Parse request body
 	var req PlaceOrderAPIRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendErrorResponse(w, "Invalid request payload", http.StatusBadRequest)
+		return
+	}
+
+	// Check if this is a move operation by looking for the 'type' query parameter
+	moveTypeStr := queryParams.Get("type")
+	if moveTypeStr != "" {
+		// This is a move operation, parse the parameters
+		req.MoveType = MoveType(moveTypeStr)
+
+		// Validate move type
+		if req.MoveType != MoveAway && req.MoveType != MoveCloser && req.MoveType != Exit {
+			sendErrorResponse(w, "Invalid move type. Must be one of: move_away, move_closer, exit", http.StatusBadRequest)
+			return
+		}
+
+		// Parse steps parameter
+		stepsStr := queryParams.Get("steps")
+		if stepsStr != "" {
+			steps, err := strconv.Atoi(stepsStr)
+			if err != nil || (steps != 1 && steps != 2) {
+				sendErrorResponse(w, "Invalid steps value. Must be 1 or 2", http.StatusBadRequest)
+				return
+			}
+			req.Steps = steps
+		} else if req.MoveType != Exit {
+			// Steps is required for move_away and move_closer
+			sendErrorResponse(w, "Steps parameter is required for move operations", http.StatusBadRequest)
+			return
+		}
+
+		// Parse quantity fraction parameter
+		quantityStr := queryParams.Get("quantity")
+		if quantityStr != "" {
+			req.QuantityFrac = QuantityFraction(quantityStr)
+			if req.QuantityFrac != FullPosition && req.QuantityFrac != HalfPosition && req.QuantityFrac != QuarterPosition {
+				sendErrorResponse(w, "Invalid quantity value. Must be 1, 0.5, or 0.25", http.StatusBadRequest)
+				return
+			}
+		} else {
+			// Default to full position if not specified
+			req.QuantityFrac = FullPosition
+		}
+
+		// If this is a move operation, we need to handle it differently
+		s.handleMoveOperation(w, r, &req)
 		return
 	}
 

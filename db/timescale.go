@@ -181,7 +181,7 @@ type OrderRecord struct {
 // PositionRecord represents a record in the positions table
 type PositionRecord struct {
 	ID            int64       `db:"id"`
-	PositionID    string      `db:"position_id"`
+	PositionID    *string     `db:"position_id"`
 	TradingSymbol string      `db:"trading_symbol"`
 	Exchange      string      `db:"exchange"`
 	Product       string      `db:"product"`

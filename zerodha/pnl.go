@@ -38,21 +38,21 @@ type StrategyPnLSummary struct {
 
 // PositionPnL represents P&L for a specific position
 type PositionPnL struct {
-	TradingSymbol string  `json:"trading_symbol"`
-	Exchange      string  `json:"exchange"`
-	Product       string  `json:"product"`
-	Quantity      int     `json:"quantity"`
-	AveragePrice  float64 `json:"average_price"`
-	LastPrice     float64 `json:"last_price"`
-	RealizedPnL   float64 `json:"realized_pnl"`
-	UnrealizedPnL float64 `json:"unrealized_pnl"`
-	TotalPnL      float64 `json:"total_pnl"`
-	BuyValue      float64 `json:"buy_value"`
-	SellValue     float64 `json:"sell_value"`
-	Multiplier    float64 `json:"multiplier"`
-	StrategyID    int     `json:"strategy_id"`
-	PaperTrading  bool    `json:"paper_trading"`
-	PositionID    string  `json:"position_id"`
+	TradingSymbol string   `json:"trading_symbol"`
+	Exchange      string   `json:"exchange"`
+	Product       string   `json:"product"`
+	Quantity      int      `json:"quantity"`
+	AveragePrice  float64  `json:"average_price"`
+	LastPrice     float64  `json:"last_price"`
+	RealizedPnL   float64  `json:"realized_pnl"`
+	UnrealizedPnL float64  `json:"unrealized_pnl"`
+	TotalPnL      float64  `json:"total_pnl"`
+	BuyValue      float64  `json:"buy_value"`
+	SellValue     float64  `json:"sell_value"`
+	Multiplier    float64  `json:"multiplier"`
+	StrategyID    int      `json:"strategy_id"`
+	PaperTrading  bool     `json:"paper_trading"`
+	PositionID    *string  `json:"position_id"`
 }
 
 var (
@@ -192,7 +192,14 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 				}
 
 				// Add position to strategy summary
-				strategySummary.Positions[pos.PositionID] = positionPnL
+				positionKey := "unknown"
+				if pos.PositionID != nil {
+					positionKey = *pos.PositionID
+				} else {
+					// Use ID as fallback if PositionID is nil
+					positionKey = fmt.Sprintf("id_%d", pos.ID)
+				}
+				strategySummary.Positions[positionKey] = positionPnL
 				strategySummary.RealizedPnL += realizedPnL
 				strategySummary.UnrealizedPnL += unrealizedPnL
 				strategySummary.TotalPnL += totalPnL
@@ -216,7 +223,14 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 				}
 
 				// Add position to strategy summary
-				strategySummary.Positions[pos.PositionID] = positionPnL
+				positionKey := "unknown"
+				if pos.PositionID != nil {
+					positionKey = *pos.PositionID
+				} else {
+					// Use ID as fallback if PositionID is nil
+					positionKey = fmt.Sprintf("id_%d", pos.ID)
+				}
+				strategySummary.Positions[positionKey] = positionPnL
 				strategySummary.RealizedPnL += realizedPnL
 				strategySummary.UnrealizedPnL += unrealizedPnL
 				strategySummary.TotalPnL += totalPnL
@@ -227,7 +241,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		}
 
 		// Store updated P&L in database
-		if err := pm.updatePositionPnL(ctx, pos.PositionID, realizedPnL, unrealizedPnL, totalPnL, lastPrice); err != nil {
+		if err := pm.updatePositionPnL(ctx, pos.ID, realizedPnL, unrealizedPnL, totalPnL, lastPrice); err != nil {
 			pm.log.Error("Failed to update position P&L in database", map[string]interface{}{
 				"error":          err.Error(),
 				"position_id":    pos.PositionID,
@@ -261,14 +275,45 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 			summary.TotalRealizedPnL += realizedPnL
 			summary.TotalUnrealizedPnL += unrealizedPnL
 
-			// Create a position ID for consistency with DB positions
-			positionID := fmt.Sprintf("%s_%s_%s", pos.Tradingsymbol, pos.Exchange, pos.Product)
+			// For Zerodha positions, we need to look up the position ID in the database
+			// by trading symbol, exchange, and product
+			dbPositions, err := timescaleDB.ListPositions(ctx)
+			if err != nil {
+				pm.log.Error("Failed to list positions for P&L update", map[string]interface{}{
+					"error": err.Error(),
+				})
+				continue
+			}
+
+			// Find the matching position in the database
+			var positionID int64
+			positionFound := false
+			for _, dbPos := range dbPositions {
+				if dbPos.TradingSymbol == pos.Tradingsymbol && 
+				   dbPos.Exchange == pos.Exchange && 
+				   dbPos.Product == pos.Product && 
+				   !dbPos.PaperTrading {
+					positionID = dbPos.ID
+					positionFound = true
+					break
+				}
+			}
+
+			// Skip if position not found in database
+			if !positionFound {
+				pm.log.Debug("Position not found in database for P&L update", map[string]interface{}{
+					"trading_symbol": pos.Tradingsymbol,
+					"exchange":       pos.Exchange,
+					"product":        pos.Product,
+				})
+				continue
+			}
 
 			// Store updated P&L in database
 			if err := pm.updatePositionPnL(ctx, positionID, realizedPnL, unrealizedPnL, totalPnL, pos.LastPrice); err != nil {
 				pm.log.Error("Failed to update position P&L in database", map[string]interface{}{
 					"error":          err.Error(),
-					"position_id":    positionID,
+					"id":             positionID,
 					"trading_symbol": pos.Tradingsymbol,
 				})
 			}
@@ -282,7 +327,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 }
 
 // updatePositionPnL updates the P&L values for a position in the database
-func (pm *PnLManager) updatePositionPnL(ctx context.Context, positionID string, realizedPnL, unrealizedPnL, totalPnL, lastPrice float64) error {
+func (pm *PnLManager) updatePositionPnL(ctx context.Context, positionID int64, realizedPnL, unrealizedPnL, totalPnL, lastPrice float64) error {
 	timescaleDB := db.GetTimescaleDB()
 	if timescaleDB == nil {
 		return fmt.Errorf("timescale DB is nil")
@@ -298,7 +343,7 @@ func (pm *PnLManager) updatePositionPnL(ctx context.Context, positionID string, 
 		last_price = $4,
 		updated_at = NOW()
 	WHERE 
-		position_id = $5
+		id = $5
 	`
 
 	_, err := timescaleDB.Exec(ctx, query, totalPnL, realizedPnL, unrealizedPnL, lastPrice, positionID)

@@ -68,7 +68,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	}
 
 	if currentPosition == nil {
-		sendErrorResponse(w, "No position found for the specified instrument", http.StatusBadRequest)
+		sendErrorResponse(w, "Position not found", http.StatusNotFound)
 		return
 	}
 
@@ -136,7 +136,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	}
 
 	if toProcessQuantity == 0 {
-		sendErrorResponse(w, "Calculated quantity to process is zero", http.StatusBadRequest)
+		sendErrorResponse(w, "Calculated quantity to process is zero, cannot proceed", http.StatusBadRequest)
 		return
 	}
 
@@ -146,13 +146,13 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 		"to_process":        toProcessQuantity,
 	})
 
-	// 4. Handle the operation based on the move type
+	// 4. Handle the requested operation
 	switch req.MoveType {
-	case Exit:
-		// For exit, we just need to close the position
-		err = s.handleExitOperation(w, r, req, currentPosition, toProcessQuantity)
-	case MoveAway, MoveCloser:
-		// For move operations, we need to calculate the new strike and place orders
+	case "exit":
+		// Exit operations handle their own response
+		s.handleExitOperation(w, r, req)
+		return // Exit early as handleExitOperation handles its own response
+	case "move_away", "move_closer":
 		err = s.processMoveOperation(w, r, req, currentPosition, toProcessQuantity, strikeInfo)
 	default:
 		sendErrorResponse(w, "Invalid move type", http.StatusBadRequest)
@@ -489,20 +489,17 @@ func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, 
 		})
 	}
 
-	log.Info("Position in lots", map[string]interface{}{
-		"total_lots": totalLots,
-		"lot_size":   lotSize,
-	})
-
-	// Calculate the target quantity based on the fraction
+	// Determine the fraction value based on the QuantityFraction
 	var fractionValue float64
 	switch fraction {
-	case HalfPosition:
+	case "0.5", "half":
 		fractionValue = 0.5
-	case QuarterPosition:
+	case "0.25", "quarter":
 		fractionValue = 0.25
+	case "1":
+		fractionValue = 1.0
 	default:
-		log.Error("Invalid fraction specified", map[string]interface{}{ // Log invalid fraction
+		log.Error("Invalid fraction specified", map[string]interface{}{
 			"fraction": fraction,
 		})
 		return 0, fmt.Errorf("invalid quantity fraction: %s", fraction)
@@ -540,7 +537,9 @@ func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, 
 		return 0, fmt.Errorf("quantity below minimum lot size")
 	}
 
-	// If the current position is negative (short), make the result negative too
+	// Preserve the sign of the original position
+	// This is important for move operations where we want to maintain direction
+	// For exit operations, the sign will be flipped later in handleExitOperation
 	if currentQuantity < 0 {
 		toProcess = -toProcess
 	}
@@ -575,22 +574,34 @@ func calculateExitQuantity(currentQuantity int, instrumentType string, indexName
 		"lot_size":        lotSize,
 	})
 
-	// Calculate the quantity to exit
-	exitQuantity := int(math.Abs(float64(currentQuantity)))
-	if exitQuantity%lotSize != 0 {
+	// Calculate the quantity to exit - must be the opposite of current position
+	absQuantity := int(math.Abs(float64(currentQuantity)))
+
+	// Check if the quantity is a multiple of lot size
+	if absQuantity%lotSize != 0 {
 		log.Error("Current position quantity is not a multiple of lot size for exit", map[string]interface{}{
 			"current_quantity": currentQuantity,
 			"lot_size":         lotSize,
-			"remainder":        exitQuantity % lotSize,
+			"remainder":        absQuantity % lotSize,
 		})
 
 		// Round to the nearest number of lots
-		exitQuantity = int(math.Round(float64(exitQuantity)/float64(lotSize))) * lotSize
+		absQuantity = int(math.Round(float64(absQuantity)/float64(lotSize))) * lotSize
 		log.Info("Rounded to nearest number of lots for exit", map[string]interface{}{
-			"original_quantity": exitQuantity,
-			"exit_quantity":     exitQuantity,
+			"original_quantity": absQuantity,
+			"adjusted_quantity": absQuantity,
 			"lot_size":          lotSize,
 		})
+	}
+
+	// For exit, we need the OPPOSITE sign of the current position
+	exitQuantity := absQuantity
+	if currentQuantity > 0 {
+		// If position is positive (long), we need to SELL, so quantity should be negative
+		exitQuantity = -exitQuantity
+	} else if currentQuantity < 0 {
+		// If position is negative (short), we need to BUY, so quantity should be positive
+		// exitQuantity is already positive here
 	}
 
 	log.Info("Final exit quantity", map[string]interface{}{
@@ -622,65 +633,216 @@ func getLotSize(indexName string) int {
 	return 1
 }
 
-// handleExitOperation handles the exit operation
-func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest, currentPosition *db.PositionRecord, toProcessQuantity int) error {
-	// For exit, we just need to place an order to close the position
-	// The side should be the opposite of the current position
-	side := "BUY"
-	if currentPosition.Quantity > 0 {
-		side = "SELL"
+// handleExitOperation handles the exit operation for a position
+func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) {
+	// Get the KiteConnect instance
+	kc := zerodha.GetKiteConnect()
+	if kc == nil {
+		sendErrorResponse(w, "Zerodha connection not available", http.StatusInternalServerError)
+		return
 	}
 
-	// Extract instrument type from the trading symbol to get the lot size
-	var instrumentType string
-	if strings.Contains(currentPosition.TradingSymbol, "CE") {
-		instrumentType = "CE"
-	} else if strings.Contains(currentPosition.TradingSymbol, "PE") {
-		instrumentType = "PE"
-	} else {
-		// Default to NIFTY if we can't determine
-		instrumentType = "NIFTY"
+	// 1. Extract strike, expiry, and instrument type from the trading symbol or token
+	_, err := extractStrikeInfo(r.Context(), req)
+	if err != nil {
+		s.log.Error("Failed to extract strike info for exit", map[string]interface{}{
+			"error":            err.Error(),
+			"instrument_token": req.InstrumentToken,
+			"trading_symbol":   req.TradingSymbol,
+		})
+		sendErrorResponse(w, fmt.Sprintf("Failed to extract strike info: %v", err), http.StatusBadRequest)
+		return
 	}
 
-	// Get the lot size for the instrument type
-	lotSize := getLotSize(instrumentType)
-
-	// Ensure quantity is a multiple of lot size
-	absQuantity := int(math.Abs(float64(toProcessQuantity)))
-	quantityInLots := int(math.Round(float64(absQuantity) / float64(lotSize)))
-
-	// Ensure it's at least 1 lot
-	if quantityInLots < 1 {
-		quantityInLots = 1
-		s.log.Info("Adjusted lots to process to minimum 1 lot", map[string]interface{}{}) // Log adjustment
+	// 2. Find the current position for the instrument
+	currentPosition, err := findCurrentPosition(r.Context(), req.InstrumentToken, req.TradingSymbol)
+	if err != nil {
+		s.log.Error("Failed to find current position for exit", map[string]interface{}{
+			"error":            err.Error(),
+			"instrument_token": req.InstrumentToken,
+			"trading_symbol":   req.TradingSymbol,
+		})
+		sendErrorResponse(w, fmt.Sprintf("Failed to find current position: %v", err), http.StatusBadRequest)
+		return
 	}
 
-	// Convert calculated lots back to quantity
-	quantityInContracts := quantityInLots * lotSize
+	if currentPosition == nil {
+		sendErrorResponse(w, "Position not found", http.StatusNotFound)
+		return
+	}
 
-	s.log.Info("Calculated exit quantity", map[string]interface{}{
-		"original_quantity":     toProcessQuantity,
-		"lot_size":              lotSize,
-		"quantity_in_lots":      quantityInLots,
-		"quantity_in_contracts": quantityInContracts,
+	s.log.Info("Found position to exit", map[string]interface{}{
+		"position_id":      currentPosition.ID,
+		"trading_symbol":   currentPosition.TradingSymbol,
+		"current_quantity": currentPosition.Quantity,
+		"paper_trading":    currentPosition.PaperTrading,
 	})
 
-	// Create a new order request
+	// 3. Get Instrument Token from Trading Symbol
+	instrumentTokenValue, tokenFound := zerodha.GetInstrumentToken(r.Context(), currentPosition.TradingSymbol)
+	if !tokenFound {
+		s.log.Error("Could not find instrument token for position in cache for exit", map[string]interface{}{
+			"trading_symbol": currentPosition.TradingSymbol,
+		})
+		sendErrorResponse(w, "Failed to retrieve instrument details for exit", http.StatusInternalServerError)
+		return
+	}
+	instrumentTokenStr, ok := instrumentTokenValue.(string)
+	if !ok {
+		s.log.Error("Instrument token retrieved from cache is not a string for exit", map[string]interface{}{
+			"trading_symbol": currentPosition.TradingSymbol,
+			"token_value":    instrumentTokenValue,
+		})
+		sendErrorResponse(w, "Internal error processing instrument details for exit", http.StatusInternalServerError)
+		return
+	}
+
+	// 4. Get Index Name from Instrument Token
+	indexName, indexFound := zerodha.GetIndexFromInstrumentToken(r.Context(), instrumentTokenStr)
+	if !indexFound {
+		// Attempt to guess from trading symbol as a fallback
+		if strings.Contains(currentPosition.TradingSymbol, "NIFTY") {
+			indexName = "NIFTY"
+		} else if strings.Contains(currentPosition.TradingSymbol, "BANKNIFTY") {
+			indexName = "BANKNIFTY"
+		} else if strings.Contains(currentPosition.TradingSymbol, "SENSEX") {
+			indexName = "SENSEX"
+		} else {
+			s.log.Error("Could not determine index name for exit lot size calculation", map[string]interface{}{
+				"instrument_token": instrumentTokenStr,
+				"trading_symbol":   currentPosition.TradingSymbol,
+			})
+			indexName = "NIFTY" // Default as last resort
+		}
+	}
+
+	// 5. Calculate exit quantity based on fraction
+	var exitQuantity int
+
+	// Check if a specific fraction was requested
+	if req.QuantityFrac == "0.5" || req.QuantityFrac == "0.25" {
+		// Calculate the absolute quantity to exit based on fraction
+		absQuantity := int(math.Abs(float64(currentPosition.Quantity)))
+		lotSize := getLotSize(indexName)
+
+		// Convert to lots
+		totalLots := absQuantity / lotSize
+		if absQuantity%lotSize != 0 {
+			totalLots = int(math.Round(float64(absQuantity) / float64(lotSize)))
+		}
+
+		// Apply fraction to lots
+		var fractionValue float64
+		if req.QuantityFrac == "0.5" {
+			fractionValue = 0.5
+		} else { // "0.25"
+			fractionValue = 0.25
+		}
+
+		lotsToExit := int(math.Round(float64(totalLots) * fractionValue))
+		if lotsToExit == 0 {
+			lotsToExit = 1 // Minimum 1 lot
+		}
+
+		// Convert back to quantity
+		exitQuantity = lotsToExit * lotSize
+
+		s.log.Info("Calculated partial exit quantity", map[string]interface{}{
+			"fraction":      req.QuantityFrac,
+			"total_lots":    totalLots,
+			"lots_to_exit":  lotsToExit,
+			"exit_quantity": exitQuantity,
+		})
+	} else {
+		// For full exit, use the absolute value of current position
+		// (rounded to nearest lot if needed)
+		absQuantity := int(math.Abs(float64(currentPosition.Quantity)))
+		lotSize := getLotSize(indexName)
+
+		// Ensure it's a multiple of lot size
+		if absQuantity%lotSize != 0 {
+			lotsToExit := int(math.Round(float64(absQuantity) / float64(lotSize)))
+			exitQuantity = lotsToExit * lotSize
+		} else {
+			exitQuantity = absQuantity
+		}
+
+		s.log.Info("Calculated full exit quantity", map[string]interface{}{
+			"original_quantity": currentPosition.Quantity,
+			"exit_quantity":     exitQuantity,
+		})
+	}
+	if err != nil {
+		s.log.Error("Failed to calculate exit quantity", map[string]interface{}{
+			"error":            err.Error(),
+			"instrument_token": instrumentTokenStr,
+			"trading_symbol":   currentPosition.TradingSymbol,
+			"current_quantity": currentPosition.Quantity,
+			"index_name":       indexName,
+		})
+		sendErrorResponse(w, "Failed to calculate exit quantity", http.StatusInternalServerError)
+		return
+	}
+
+	// 6. Determine transaction type (opposite of current position)
+	transactionType := "SELL" // Default for long positions (positive quantity)
+	if currentPosition.Quantity < 0 {
+		transactionType = "BUY" // For short positions (negative quantity)
+	}
+
+	// The exitQuantity should always be positive when sending to the order system
+	// The direction (buy/sell) is determined by the transactionType
+	positiveExitQuantity := int(math.Abs(float64(exitQuantity)))
+
+	s.log.Info("Exit order details", map[string]interface{}{
+		"position_quantity": currentPosition.Quantity,
+		"exit_quantity":     positiveExitQuantity,
+		"transaction_type":  transactionType,
+	})
+
+	// 7. Prepare the order details
 	exitOrderReq := &PlaceOrderAPIRequest{
-		InstrumentToken: req.InstrumentToken,
+		InstrumentToken: instrumentTokenStr,
 		TradingSymbol:   currentPosition.TradingSymbol,
 		Exchange:        currentPosition.Exchange,
-		OrderType:       "MARKET", // Use market order for exit
-		Side:            side,
-		Quantity:        quantityInContracts,
+		OrderType:       "MARKET",
+		Side:            transactionType,
+		Quantity:        positiveExitQuantity, // Always positive
 		Product:         currentPosition.Product,
 		Validity:        "DAY",
 		Tag:             "exit_position",
 		PaperTrading:    currentPosition.PaperTrading,
 	}
 
-	// Place the exit order
-	return s.placeOrderInternal(w, r, exitOrderReq)
+	// 8. Place the exit order
+	err = s.placeOrderInternal(r.Context(), exitOrderReq)
+	if err != nil {
+		s.log.Error("Failed to place exit order", map[string]interface{}{
+			"error":            err.Error(),
+			"instrument_token": instrumentTokenStr,
+			"trading_symbol":   currentPosition.TradingSymbol,
+			"quantity":         exitQuantity,
+		})
+		sendErrorResponse(w, "Failed to place exit order", http.StatusInternalServerError)
+		return
+	}
+
+	// 9. Calculate lots for the response message
+	lotSize := getLotSize(indexName)
+	lotsExited := 0
+	if lotSize > 0 {
+		lotsExited = exitQuantity / lotSize
+	}
+
+	// 10. Send success response
+	successResponse := map[string]interface{}{
+		"order_id": "EX" + instrumentTokenStr[len(instrumentTokenStr)-6:],
+		"status":   "SUCCESS",
+		"message":  fmt.Sprintf("Exited %d lots (%d quantity) of %s", lotsExited, exitQuantity, currentPosition.TradingSymbol),
+		"lots":     lotsExited,
+		"quantity": exitQuantity,
+	}
+	sendJSONResponse(w, successResponse)
 }
 
 // processMoveOperation handles the move_away and move_closer operations
@@ -722,7 +884,7 @@ func (s *Server) processMoveOperation(w http.ResponseWriter, r *http.Request, re
 	}
 
 	// Place the exit order
-	err = s.placeOrderInternal(w, r, exitOrderReq)
+	err = s.placeOrderInternal(r.Context(), exitOrderReq)
 	if err != nil {
 		return fmt.Errorf("failed to place exit order: %w", err)
 	}
@@ -748,7 +910,7 @@ func (s *Server) processMoveOperation(w http.ResponseWriter, r *http.Request, re
 	}
 
 	// Place the entry order
-	return s.placeOrderInternal(w, r, entryOrderReq)
+	return s.placeOrderInternal(r.Context(), entryOrderReq)
 }
 
 // calculateNewStrike calculates the new strike price based on the move type and steps
@@ -798,7 +960,7 @@ func getInstrumentTokenForStrike(ctx context.Context, strike float64, instrument
 }
 
 // placeOrderInternal places an order using the internal order placement logic
-func (s *Server) placeOrderInternal(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) error {
+func (s *Server) placeOrderInternal(ctx context.Context, req *PlaceOrderAPIRequest) error {
 	// Convert the API request to a Zerodha order request
 	orderReq := zerodha.PlaceOrderRequest{
 		TradingSymbol: req.TradingSymbol,
@@ -836,7 +998,7 @@ func (s *Server) placeOrderInternal(w http.ResponseWriter, r *http.Request, req 
 				ltpDB := redisCache.GetLTPDB3()
 				if ltpDB != nil {
 					// Create a context with timeout for Redis operations
-					ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+					ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 					defer cancel()
 
 					// Format the key as expected in Redis

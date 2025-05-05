@@ -781,7 +781,7 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 		}
 		strikeStr := fmt.Sprintf("%d", int(strike))
 		next_move_lookup_key := fmt.Sprintf("next_move:%s:%s:%s", strikeStr, inst.InstrumentType, inst.Expiry)
-		log.Info("Looking up instrument token", map[string]interface{}{
+		log.Debug("Looking up instrument token", map[string]interface{}{
 			"key":         next_move_lookup_key,
 			"strike":      strikeStr,
 			"option_type": inst.InstrumentType,

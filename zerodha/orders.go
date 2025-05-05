@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -358,7 +357,7 @@ func SaveOrderAsync(orderReq interface{}, resp *OrderResponse, userID string, ki
 	go func() {
 		ctx := context.Background()
 		dbConn := db.GetTimescaleDB()
-		
+
 		// Insert the order record
 		err := dbConn.InsertOrder(ctx, orderRecord)
 		if err != nil {
@@ -372,7 +371,7 @@ func SaveOrderAsync(orderReq interface{}, resp *OrderResponse, userID string, ki
 				"paper_trading": orderRecord.PaperTrading,
 			})
 		}
-		
+
 		// Handle paper trading position management
 		if orderRecord.PaperTrading {
 			managePaperTradingPosition(ctx, orderRecord)
@@ -390,7 +389,7 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		"quantity":       order.Quantity,
 		"paper_trading":  order.PaperTrading,
 	})
-	
+
 	// Extract strategy from order tag if available
 	strategy := ""
 	if order.Tag != "" {
@@ -410,7 +409,7 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			})
 		}
 	}
-	
+
 	// Verify this is actually a paper trading order
 	if !order.PaperTrading {
 		log.Error("Attempted to manage position for non-paper trading order", map[string]interface{}{
@@ -418,20 +417,20 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		})
 		return
 	}
-	
+
 	dbConn := db.GetTimescaleDB()
 	if dbConn == nil {
 		log.Error("Failed to get database connection for paper position management", nil)
 		return
 	}
-	
-	// Create a unique position ID for this paper trading position
-	positionID := fmt.Sprintf("paper_%s_%s_%s", order.TradingSymbol, order.Exchange, order.Product)
-	
+
 	log.Info("Looking for existing paper positions", map[string]interface{}{
-		"position_id": positionID,
+		"trading_symbol": order.TradingSymbol,
+		"exchange":       order.Exchange,
+		"product":        order.Product,
+		"paper_trading":  true,
 	})
-	
+
 	// Check if a position already exists for this symbol
 	existingPositions, err := dbConn.ListPositions(ctx)
 	if err != nil {
@@ -440,146 +439,68 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		})
 		return
 	}
-	
+
 	// Look for an existing paper position for this symbol
 	var existingPosition *db.PositionRecord
 	for _, pos := range existingPositions {
-		if pos.PaperTrading && pos.TradingSymbol == order.TradingSymbol && 
-		   pos.Exchange == order.Exchange && pos.Product == order.Product {
+		if pos.PaperTrading && pos.TradingSymbol == order.TradingSymbol &&
+			pos.Exchange == order.Exchange && pos.Product == order.Product {
 			existingPosition = pos
 			log.Info("Found existing paper position", map[string]interface{}{
-				"position_id": pos.PositionID,
-				"quantity":    pos.Quantity,
+				"id":       pos.ID,
+				"quantity": pos.Quantity,
 			})
 			break
 		}
 	}
-	
+
 	// Calculate position quantity based on order side
 	quantity := order.Quantity
 	if order.Side == "SELL" {
 		quantity = -quantity // Negative quantity for short positions
 	}
-	
-	// Get the current market price
+
+	// Try to get the current market price
 	lastPrice := order.Price
-	if lastPrice == 0 {
-		// Try to get the latest price from Redis
-		redisCache, err := cache.GetRedisCache()
-		inMemoryCache := cache.GetInMemoryCacheInstance()
-		if err == nil && inMemoryCache != nil {
-			ltpDB := redisCache.GetLTPDB3()
-			if ltpDB != nil {
-				// First try to get instrument token from cache using trading symbol
-				var instrumentToken interface{}
-				var exists bool
-				
-				// Look up the instrument token from the cache using trading symbol
-				instrumentToken, exists = inMemoryCache.Get(order.TradingSymbol)
-				if exists {
-					log.Info("Found instrument token in cache", map[string]interface{}{
-						"trading_symbol":   order.TradingSymbol,
-						"instrument_token": instrumentToken,
-					})
-				}
-				
-				// If not found in cache, try to extract from KiteResponse
-				if !exists && order.KiteResponse != nil {
-					if kiteOrder, ok := order.KiteResponse.(map[string]interface{}); ok {
-						if token, hasToken := kiteOrder["instrument_token"]; hasToken {
-							instrumentToken = token
-							exists = true
-							log.Info("Found instrument token in KiteResponse", map[string]interface{}{
-								"instrument_token": instrumentToken,
-							})
-						}
-					}
-				}
-				
-				// Construct the LTP key
-				var ltpKey string
-				if exists {
-					// Format depends on the type of instrumentToken
-					switch v := instrumentToken.(type) {
-					case string:
-						ltpKey = fmt.Sprintf("%s_ltp", v)
-					case int, int64, float64:
-						ltpKey = fmt.Sprintf("%v_ltp", v)
-					default:
-						ltpKey = fmt.Sprintf("%v_ltp", v)
-					}
-				} else {
-					// Fall back to using trading symbol directly as a last resort
-					ltpKey = fmt.Sprintf("%s_ltp", order.TradingSymbol)
-					log.Info("Falling back to trading symbol for LTP key", map[string]interface{}{
-						"trading_symbol": order.TradingSymbol,
-					})
-				}
-				
-				log.Info("Trying to get LTP from Redis", map[string]interface{}{
-					"ltp_key": ltpKey,
+	if lastPrice == 0 && order.TradingSymbol != "" {
+		// Get the market data manager
+		marketDataMgr := GetMarketDataManager()
+
+		// First try to get the instrument token using our helper method
+		instrumentToken, exists := GetInstrumentToken(ctx, order.TradingSymbol)
+		if exists {
+			log.Info("Found instrument token for trading symbol", map[string]interface{}{
+				"trading_symbol":   order.TradingSymbol,
+				"instrument_token": instrumentToken,
+			})
+
+			// Try to get LTP using the instrument token
+			ltp, found := marketDataMgr.GetLTP(ctx, instrumentToken)
+			if found {
+				lastPrice = ltp
+				log.Info("Found LTP for paper trading position", map[string]interface{}{
+					"ltp":              ltp,
+					"instrument_token": instrumentToken,
+					"trading_symbol":   order.TradingSymbol,
 				})
-				
-				// Try to get the LTP from Redis
-				ltpStr, err := ltpDB.Get(ctx, ltpKey).Result()
-				if err == nil {
-					ltp, err := strconv.ParseFloat(ltpStr, 64)
-					if err == nil && ltp > 0 {
-						lastPrice = ltp
-						log.Info("Using LTP from Redis", map[string]interface{}{
-							"ltp":     ltp,
-							"ltp_key": ltpKey,
-						})
-					}
-				} else {
-					log.Error("LTP not found in Redis", map[string]interface{}{
-						"error":   err.Error(),
-						"ltp_key": ltpKey,
-					})
-					
-					// Try alternative keys if the first attempt failed
-					if exists {
-						// Try with just the instrument token without _ltp suffix
-						altKey := fmt.Sprintf("%v", instrumentToken)
-						ltpStr, err := ltpDB.Get(ctx, altKey).Result()
-						if err == nil {
-							ltp, err := strconv.ParseFloat(ltpStr, 64)
-							if err == nil && ltp > 0 {
-								lastPrice = ltp
-								log.Info("Using LTP from Redis (alternative key)", map[string]interface{}{
-									"ltp":     ltp,
-									"alt_key": altKey,
-								})
-							}
-						}
-					}
-				}
 			}
 		}
 	}
-	
-	// If we still don't have a price, use a default value
-	if lastPrice == 0 {
-		lastPrice = 100.0 // Default price for paper trading if no price is available
-		log.Info("Using default price for paper trading", map[string]interface{}{
-			"default_price": lastPrice,
-		})
-	}
-	
+
 	if existingPosition != nil {
 		// Update existing position
 		newQuantity := existingPosition.Quantity + quantity
-		
+
 		if newQuantity == 0 {
 			// Position is closed, remove it
-			if err := dbConn.DeletePosition(ctx, existingPosition.PositionID); err != nil {
+			if err := dbConn.DeletePosition(ctx, existingPosition.ID); err != nil {
 				log.Error("Failed to delete closed paper position", map[string]interface{}{
-					"position_id": existingPosition.PositionID,
-					"error":       err.Error(),
+					"id":    existingPosition.ID,
+					"error": err.Error(),
 				})
 			} else {
 				log.Info("Closed paper trading position", map[string]interface{}{
-					"position_id":     existingPosition.PositionID,
+					"id":             existingPosition.ID,
 					"trading_symbol": order.TradingSymbol,
 				})
 			}
@@ -587,14 +508,14 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			// Update position quantity and other details
 			existingPosition.Quantity = newQuantity
 			existingPosition.LastPrice = lastPrice
-			
+
 			// Update average price based on new order
 			if (existingPosition.Quantity > 0 && quantity > 0) || (existingPosition.Quantity < 0 && quantity < 0) {
 				// Adding to position, calculate new average price
-				existingPosition.AveragePrice = ((existingPosition.AveragePrice * float64(existingPosition.Quantity-quantity)) + 
-											(order.Price * float64(quantity))) / float64(existingPosition.Quantity)
+				existingPosition.AveragePrice = ((existingPosition.AveragePrice * float64(existingPosition.Quantity-quantity)) +
+					(order.Price * float64(quantity))) / float64(existingPosition.Quantity)
 			}
-			
+
 			// Update P&L
 			pnl := (lastPrice - existingPosition.AveragePrice) * float64(existingPosition.Quantity)
 			if existingPosition.Quantity < 0 {
@@ -603,16 +524,16 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			}
 			existingPosition.PnL = pnl
 			existingPosition.UpdatedAt = time.Now()
-			
+
 			// Update position in database
 			if err := dbConn.UpsertPosition(ctx, existingPosition); err != nil {
 				log.Error("Failed to update paper position", map[string]interface{}{
-					"position_id": existingPosition.PositionID,
-					"error":      err.Error(),
+					"id":    existingPosition.ID,
+					"error": err.Error(),
 				})
 			} else {
 				log.Info("Updated paper trading position", map[string]interface{}{
-					"position_id":     existingPosition.PositionID,
+					"id":             existingPosition.ID,
 					"trading_symbol": order.TradingSymbol,
 					"quantity":       existingPosition.Quantity,
 					"average_price":  existingPosition.AveragePrice,
@@ -621,39 +542,94 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		}
 	} else if quantity != 0 {
 		// Create new paper position
+		// Get strategy ID if a strategy name is provided
+		var strategyID *int
+		if strategy != "" {
+			// Here you would look up the strategy ID from the strategy name
+			// For now, we'll leave it as nil
+		}
+
 		newPosition := &db.PositionRecord{
-			PositionID:    positionID,
 			TradingSymbol: order.TradingSymbol,
 			Exchange:      order.Exchange,
 			Product:       order.Product,
 			Quantity:      quantity,
 			AveragePrice:  order.Price,
 			LastPrice:     lastPrice,
-			PnL:           0, // Initial P&L is zero
-			BuyQuantity:   max(0, quantity),
-			SellQuantity:  max(0, -quantity),
-			BuyPrice:      order.Price,
-			SellPrice:     order.Price,
-			BuyValue:      float64(max(0, quantity)) * order.Price,
-			SellValue:     float64(max(0, -quantity)) * order.Price,
-			PositionType:  "net",
-			// Remove Strategy field as it doesn't exist in the database
-			// StrategyID will be set later if needed
+			PnL:           0, // Will be calculated below
+			Multiplier:    1, // Default multiplier
+			BuyQuantity:   0,
+			SellQuantity:  0,
+			BuyPrice:      0,
+			SellPrice:     0,
+			BuyValue:      0,
+			SellValue:     0,
+			PositionType:  "DAY",
+			StrategyID:    strategyID,
 			UserID:        order.UserID,
 			UpdatedAt:     time.Now(),
 			PaperTrading:  true,
-			// KiteResponse is nil for paper trading
+			KiteResponse:  nil, // No Kite response for paper trading
 		}
-		
-		// Insert new position into database
+
+		// For paper trading positions, ensure we have the instrument token and update the last price if needed
+		if order.TradingSymbol != "" {
+			// Use the new GetInstrumentToken method to get the token
+			instrumentToken, exists := GetInstrumentToken(ctx, order.TradingSymbol)
+
+			// If token not found through the helper, try to extract from KiteResponse
+			if !exists && order.KiteResponse != nil {
+				if kiteOrder, ok := order.KiteResponse.(map[string]interface{}); ok {
+					if token, hasToken := kiteOrder["instrument_token"]; hasToken {
+						instrumentToken = token
+						exists = true
+
+						// Store the mapping in cache for future use
+						inMemoryCache := cache.GetInMemoryCacheInstance()
+						if inMemoryCache != nil {
+							inMemoryCache.Set(order.TradingSymbol, instrumentToken, 7*24*time.Hour)
+							log.Info("Stored trading symbol to token mapping for new position", map[string]interface{}{
+								"trading_symbol":   order.TradingSymbol,
+								"instrument_token": instrumentToken,
+							})
+						}
+					}
+				}
+			}
+
+			// If we have an instrument token, update the last price if needed
+			if exists && lastPrice == 0 {
+				// Use the MarketDataManager to get the LTP
+				marketDataMgr := GetMarketDataManager()
+				ltp, found := marketDataMgr.GetLTP(ctx, instrumentToken)
+				if found {
+					lastPrice = ltp
+					newPosition.LastPrice = ltp
+					log.Info("Updated position last price from LTP", map[string]interface{}{
+						"ltp":              ltp,
+						"instrument_token": instrumentToken,
+					})
+				}
+			}
+		}
+
+		// Calculate P&L
+		pnl := (lastPrice - newPosition.AveragePrice) * float64(newPosition.Quantity)
+		if newPosition.Quantity < 0 {
+			// For short positions, P&L is reversed
+			pnl = -pnl
+		}
+		newPosition.PnL = pnl
+
+		// Insert position into database
 		if err := dbConn.UpsertPosition(ctx, newPosition); err != nil {
-			log.Error("Failed to create paper position", map[string]interface{}{
-				"position_id": newPosition.PositionID,
-				"error":      err.Error(),
+			log.Error("Failed to insert new paper position", map[string]interface{}{
+				"trading_symbol": newPosition.TradingSymbol,
+				"error":          err.Error(),
 			})
 		} else {
 			log.Info("Created new paper trading position", map[string]interface{}{
-				"position_id":     newPosition.PositionID,
+				"id":             newPosition.ID,
 				"trading_symbol": order.TradingSymbol,
 				"quantity":       newPosition.Quantity,
 				"average_price":  newPosition.AveragePrice,

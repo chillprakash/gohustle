@@ -71,13 +71,13 @@ type StrikeData struct {
 }
 
 type OptionChainResponse struct {
-	Index           string        `json:"index"`
-	Expiry          string        `json:"expiry"`
-	UnderlyingPrice float64       `json:"underlying_price"`
-	Chain           []*StrikeData `json:"chain"`
-	ATMStrike       float64       `json:"atm_strike"`
-	Timestamp       int64         `json:"timestamp"`
-	RequestedStrikes int          `json:"requested_strikes"`
+	Index            string        `json:"index"`
+	Expiry           string        `json:"expiry"`
+	UnderlyingPrice  float64       `json:"underlying_price"`
+	Chain            []*StrikeData `json:"chain"`
+	ATMStrike        float64       `json:"atm_strike"`
+	Timestamp        int64         `json:"timestamp"`
+	RequestedStrikes int           `json:"requested_strikes"`
 }
 
 func NewOptionChainManager(ctx context.Context) *OptionChainManager {
@@ -215,14 +215,14 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 				}
 
 				// Run cleanup in a separate goroutine
-				go func() {
-					if err := db.GetTimescaleDB().CleanupOldMetrics(interval.TTL); err != nil {
-						m.log.Error("Failed to cleanup old metrics", map[string]interface{}{
-							"error":    err.Error(),
-							"interval": interval.Name,
-						})
-					}
-				}()
+				// go func() {
+				// 	if err := db.GetTimescaleDB().CleanupOldMetrics(interval.TTL); err != nil {
+				// 		m.log.Error("Failed to cleanup old metrics", map[string]interface{}{
+				// 			"error":    err.Error(),
+				// 			"interval": interval.Name,
+				// 		})
+				// 	}
+				// }()
 			}(interval)
 		}
 	}
@@ -508,12 +508,12 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	}
 
 	response := &OptionChainResponse{
-		Index:           index,
-		Expiry:          expiry,
-		UnderlyingPrice: underlyingPrice,
-		Chain:           chain,
-		ATMStrike:       atmStrike,
-		Timestamp:       time.Now().UnixNano(),
+		Index:            index,
+		Expiry:           expiry,
+		UnderlyingPrice:  underlyingPrice,
+		Chain:            chain,
+		ATMStrike:        atmStrike,
+		Timestamp:        time.Now().UnixNano(),
 		RequestedStrikes: strikesCount,
 	}
 

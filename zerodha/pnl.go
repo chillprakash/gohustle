@@ -14,6 +14,7 @@ import (
 // PnLManager handles P&L calculations for positions
 type PnLManager struct {
 	log *logger.Logger
+	kite *KiteConnect
 }
 
 // PnLSummary represents a summary of P&L across all positions
@@ -38,21 +39,21 @@ type StrategyPnLSummary struct {
 
 // PositionPnL represents P&L for a specific position
 type PositionPnL struct {
-	TradingSymbol string   `json:"trading_symbol"`
-	Exchange      string   `json:"exchange"`
-	Product       string   `json:"product"`
-	Quantity      int      `json:"quantity"`
-	AveragePrice  float64  `json:"average_price"`
-	LastPrice     float64  `json:"last_price"`
-	RealizedPnL   float64  `json:"realized_pnl"`
-	UnrealizedPnL float64  `json:"unrealized_pnl"`
-	TotalPnL      float64  `json:"total_pnl"`
-	BuyValue      float64  `json:"buy_value"`
-	SellValue     float64  `json:"sell_value"`
-	Multiplier    float64  `json:"multiplier"`
-	StrategyID    int      `json:"strategy_id"`
-	PaperTrading  bool     `json:"paper_trading"`
-	PositionID    *string  `json:"position_id"`
+	TradingSymbol string  `json:"trading_symbol"`
+	Exchange      string  `json:"exchange"`
+	Product       string  `json:"product"`
+	Quantity      int     `json:"quantity"`
+	AveragePrice  float64 `json:"average_price"`
+	LastPrice     float64 `json:"last_price"`
+	RealizedPnL   float64 `json:"realized_pnl"`
+	UnrealizedPnL float64 `json:"unrealized_pnl"`
+	TotalPnL      float64 `json:"total_pnl"`
+	BuyValue      float64 `json:"buy_value"`
+	SellValue     float64 `json:"sell_value"`
+	Multiplier    float64 `json:"multiplier"`
+	StrategyID    int     `json:"strategy_id"`
+	PaperTrading  bool    `json:"paper_trading"`
+	PositionID    *string `json:"position_id"`
 }
 
 var (
@@ -289,10 +290,10 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 			var positionID int64
 			positionFound := false
 			for _, dbPos := range dbPositions {
-				if dbPos.TradingSymbol == pos.Tradingsymbol && 
-				   dbPos.Exchange == pos.Exchange && 
-				   dbPos.Product == pos.Product && 
-				   !dbPos.PaperTrading {
+				if dbPos.TradingSymbol == pos.Tradingsymbol &&
+					dbPos.Exchange == pos.Exchange &&
+					dbPos.Product == pos.Product &&
+					!dbPos.PaperTrading {
 					positionID = dbPos.ID
 					positionFound = true
 					break
@@ -380,4 +381,111 @@ func (pm *PnLManager) SchedulePnLCalculation(ctx context.Context, intervalSecond
 	pm.log.Info("Scheduled P&L calculation", map[string]interface{}{
 		"interval_seconds": intervalSeconds,
 	})
+}
+
+// Note: High-frequency P&L tracking has been replaced by strategy-level P&L tracking
+
+// CalculateAndStorePositionPnL calculates and stores P&L for all positions
+func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {
+	// Get Redis cache for LTP data
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return fmt.Errorf("failed to get Redis cache: %w", err)
+	}
+	ltpDB := redisCache.GetLTPDB3()
+	inmemoryCache := cache.GetInMemoryCacheInstance()
+
+	// Get positions from database
+	timescaleDB := db.GetTimescaleDB()
+	if timescaleDB == nil {
+		return fmt.Errorf("timescale DB is nil")
+	}
+
+	// Fetch all positions from database
+	dbPositions, err := timescaleDB.ListPositions(ctx)
+	if err != nil {
+		pm.log.Error("Failed to fetch positions from database for high-frequency tracking", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return fmt.Errorf("failed to get positions from database: %w", err)
+	}
+
+	// Prepare batch insert
+	var positionPnLs []db.PositionPnLTimeseriesRecord
+	timestamp := time.Now()
+
+	// Process each position
+	for _, pos := range dbPositions {
+		// Get latest LTP
+		lastPrice := pos.LastPrice
+		if instrumentToken, exists := inmemoryCache.Get(pos.TradingSymbol); exists {
+			ltpKey := fmt.Sprintf("%v_ltp", instrumentToken)
+			ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
+			if err == nil && ltpVal > 0 {
+				lastPrice = ltpVal
+			}
+		}
+
+		// Calculate P&L components
+		realizedPnL := pos.SellValue - pos.BuyValue
+		unrealizedPnL := float64(pos.Quantity) * lastPrice * pos.Multiplier
+		totalPnL := realizedPnL + unrealizedPnL
+
+		// Create position P&L timeseries record
+		positionID := "unknown"
+		if pos.PositionID != nil {
+			positionID = *pos.PositionID
+		} else {
+			positionID = fmt.Sprintf("id_%d", pos.ID)
+		}
+
+		strategyID := 0
+		if pos.StrategyID != nil {
+			strategyID = *pos.StrategyID
+		}
+
+		positionPnL := db.PositionPnLTimeseriesRecord{
+			PositionID:    positionID,
+			TradingSymbol: pos.TradingSymbol,
+			StrategyID:    strategyID,
+			Quantity:      pos.Quantity,
+			AveragePrice:  pos.AveragePrice,
+			LastPrice:     lastPrice,
+			RealizedPnL:   realizedPnL,
+			UnrealizedPnL: unrealizedPnL,
+			TotalPnL:      totalPnL,
+			PaperTrading:  pos.PaperTrading,
+			Timestamp:     timestamp,
+		}
+
+		positionPnLs = append(positionPnLs, positionPnL)
+
+		// Also update the position record with the latest P&L values
+		if err := pm.updatePositionPnL(ctx, pos.ID, realizedPnL, unrealizedPnL, totalPnL, lastPrice); err != nil {
+			pm.log.Error("Failed to update position P&L", map[string]interface{}{
+				"error":          err.Error(),
+				"position_id":    positionID,
+				"trading_symbol": pos.TradingSymbol,
+			})
+			// Continue with other positions even if one fails
+		}
+	}
+
+	// Batch insert all position P&L records if there are any
+	if len(positionPnLs) > 0 {
+		if err := timescaleDB.BatchInsertPositionPnLTimeseries(ctx, positionPnLs); err != nil {
+			pm.log.Error("Failed to batch insert position P&L timeseries", map[string]interface{}{
+				"error": err.Error(),
+				"count": len(positionPnLs),
+			})
+			return fmt.Errorf("failed to insert position P&L timeseries: %w", err)
+		}
+
+		pm.log.Debug("Successfully stored high-frequency P&L data", map[string]interface{}{
+			"count":     len(positionPnLs),
+			"timestamp": timestamp,
+		})
+	}
+
+	return nil
 }

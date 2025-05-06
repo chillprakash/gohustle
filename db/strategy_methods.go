@@ -616,12 +616,12 @@ func (t *TimescaleDB) GetStrategyPerformance(ctx context.Context, strategyName s
 
 	// Return performance metrics
 	return map[string]interface{}{
-		"total_trades":    totalTrades,
-		"winning_trades":  winningTrades,
-		"losing_trades":   losingTrades,
-		"win_rate":        winRate,
-		"total_pnl":       totalPnL,
-		"unrealized_pnl":  unrealizedPnL,
-		"profit_factor":   profitFactor,
+		"total_trades":   totalTrades,
+		"winning_trades": winningTrades,
+		"losing_trades":  losingTrades,
+		"win_rate":       winRate,
+		"total_pnl":      totalPnL,
+		"unrealized_pnl": unrealizedPnL,
+		"profit_factor":  profitFactor,
 	}, nil
 }

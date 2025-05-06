@@ -219,6 +219,29 @@ func InitializePnLCalculation(ctx context.Context) {
 	scheduler.Start(ctx)
 }
 
+// InitializeHighFrequencyPnLTracking sets up high-frequency P&L tracking (every second)
+func InitializeHighFrequencyPnLTracking(ctx context.Context) {
+	scheduler := GetScheduler()
+	pnlManager := zerodha.GetPnLManager()
+
+	task := &Task{
+		Name:     "HighFrequencyPnLTracking",
+		Interval: time.Second,
+		Execute: func(ctx context.Context) error {
+			if !isMarketOpen() {
+				return nil
+			}
+			return pnlManager.CalculateAndStorePositionPnL(ctx)
+		},
+	}
+
+	scheduler.AddTask(task)
+	scheduler.Start(ctx)
+	logger.L().Info("Initialized high-frequency P&L tracking", map[string]interface{}{
+		"frequency": "1 second",
+	})
+}
+
 // InitializeIndexOptionChainPolling sets up option chain polling for all indices
 func InitializeIndexOptionChainPolling(ctx context.Context) {
 	scheduler := GetScheduler()

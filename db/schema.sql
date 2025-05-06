@@ -124,7 +124,6 @@ CREATE TABLE orders (
     paper_trading       BOOLEAN DEFAULT FALSE  -- Whether this is a paper trade (not sent to broker)
 );
 
--- Create strategies table first (since positions references it)
 CREATE TABLE strategies (
     id                SERIAL PRIMARY KEY,
     name              VARCHAR(64) UNIQUE NOT NULL,  -- Unique strategy name
@@ -170,3 +169,42 @@ CREATE TABLE positions (
 );
 
 
+-- Create strategy_pnl_timeseries table for tracking strategy P&L over time
+CREATE TABLE strategy_pnl_timeseries (
+    id BIGSERIAL,
+    strategy_id INTEGER NOT NULL,        -- Strategy ID
+    strategy_name TEXT NOT NULL,         -- Strategy name for easier querying
+    total_pnl DOUBLE PRECISION NOT NULL, -- Total P&L for the strategy
+    paper_trading BOOLEAN NOT NULL,      -- Whether this is paper trading or real
+    timestamp TIMESTAMPTZ NOT NULL,      -- Timestamp of the P&L snapshot
+    
+    -- Primary key must include the partitioning column for TimescaleDB
+    PRIMARY KEY (id, timestamp)
+);
+
+-- Convert to TimescaleDB hypertable
+SELECT create_hypertable('strategy_pnl_timeseries', 'timestamp');
+
+-- Create indexes for faster queries
+CREATE INDEX idx_strategy_pnl_strategy_id ON strategy_pnl_timeseries (strategy_id, timestamp DESC);
+CREATE INDEX idx_strategy_pnl_paper_trading ON strategy_pnl_timeseries (paper_trading, timestamp DESC);
+
+-- Add compression policy (compress data older than 1 day)
+SELECT add_compression_policy('strategy_pnl_timeseries', INTERVAL '1 day');
+
+-- Add retention policy (keep data for 90 days)
+SELECT add_retention_policy('strategy_pnl_timeseries', INTERVAL '90 days');
+
+-- Create continuous aggregate for hourly data
+CREATE MATERIALIZED VIEW strategy_pnl_hourly WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', timestamp) AS bucket,
+    strategy_id,
+    strategy_name,
+    paper_trading,
+    AVG(total_pnl) AS avg_pnl,
+    MIN(total_pnl) AS min_pnl,
+    MAX(total_pnl) AS max_pnl,
+    LAST(total_pnl, timestamp) AS last_pnl
+FROM strategy_pnl_timeseries
+GROUP BY bucket, strategy_id, strategy_name, paper_trading;

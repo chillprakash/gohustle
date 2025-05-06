@@ -302,8 +302,9 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 				})
 			}
 		} else {
-			// Only create a new record if the quantity is non-zero
-			// This prevents creating records for positions that have already been closed
+			// Create a record for all positions, including those with zero quantity
+			// This ensures we track all positions that were opened during the day
+			// which is important for accurate P&L calculations
 			if pos.Quantity != 0 {
 				pm.log.Info("Creating new position", map[string]interface{}{
 					"position_id":    positionIDStr,
@@ -311,13 +312,13 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 					"quantity":       pos.Quantity,
 				})
 			} else {
-				// For positions with zero quantity that don't exist in our DB,
-				// we can skip them as they're already closed in Zerodha
-				pm.log.Debug("Skipping zero-quantity position", map[string]interface{}{
+				// Store zero-quantity positions as well for historical tracking
+				pm.log.Info("Creating zero-quantity position for historical tracking", map[string]interface{}{
 					"position_id":    positionIDStr,
 					"trading_symbol": pos.Tradingsymbol,
+					"buy_value":      pos.BuyValue,
+					"sell_value":     pos.SellValue,
 				})
-				continue
 			}
 		}
 

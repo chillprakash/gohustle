@@ -692,8 +692,9 @@ func (s *Server) setupRoutes() {
 	// Positions endpoint
 	authenticatedRouter.HandleFunc("/positions", s.handleGetPositions).Methods("GET", "OPTIONS")
 
-	// P&L endpoint
+	// P&L endpoints
 	authenticatedRouter.HandleFunc("/pnl", s.handleGetPnL).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/pnl/summary", HandleGetLatestPnLSummary).Methods("GET", "OPTIONS")
 
 	// Time series metrics endpoint
 	authenticatedRouter.HandleFunc("/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")

@@ -712,6 +712,13 @@ func (s *Server) setupRoutes() {
 	export := v1.PathPrefix("/export").Subrouter()
 	export.HandleFunc("/wal-to-parquet", s.handleWalToParquet).Methods("POST", "OPTIONS")
 
+	// Tick data export endpoints
+	authenticatedRouter.HandleFunc("/ticks/dates", handleGetAvailableTickDates).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/ticks/export", handleExportTickData).Methods("POST", "OPTIONS")
+	authenticatedRouter.HandleFunc("/ticks/delete", handleDeleteTickData).Methods("POST", "OPTIONS")
+	authenticatedRouter.HandleFunc("/ticks/files", handleListExportedFiles).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/ticks/samples", handleGetTickSamples).Methods("POST", "OPTIONS")
+
 	// General endpoint
 	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET", "OPTIONS")
 }

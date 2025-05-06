@@ -361,6 +361,217 @@ Common HTTP status codes:
 - `404 Not Found`: Resource not found
 - `500 Internal Server Error`: Server-side error
 
+## Tick Data Export API
+
+The Tick Data Export API allows you to manage historical tick data, including listing available dates, exporting data to Parquet format, and deleting historical data.
+
+### List Available Tick Dates
+
+Retrieves a list of dates with available tick data. By default, returns data for both NIFTY and SENSEX indices, but can be filtered to a specific index.
+
+**Endpoint:** `GET /api/ticks/dates`
+
+**Query Parameters:**
+- `index_name` (optional): Filter results to a specific index ("NIFTY" or "SENSEX")
+
+**Example:** `GET /api/ticks/dates?index_name=NIFTY`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "NIFTY": [
+      {
+        "date": "2025-05-01",
+        "tick_count": 12500,
+        "estimated_size_mb": 2.5
+      },
+      {
+        "date": "2025-05-02",
+        "tick_count": 13200,
+        "estimated_size_mb": 2.7
+      }
+    ],
+    "SENSEX": [
+      {
+        "date": "2025-05-01",
+        "tick_count": 11800,
+        "estimated_size_mb": 2.4
+      },
+      {
+        "date": "2025-05-02",
+        "tick_count": 12100,
+        "estimated_size_mb": 2.5
+      }
+    ]
+  }
+}
+```
+
+**Response Fields:**
+- `date`: Date in YYYY-MM-DD format
+- `tick_count`: Number of tick data points available for that date
+- `estimated_size_mb`: Estimated size of the data in megabytes
+
+### Export Tick Data
+
+Exports tick data for a specific index and date range to a Parquet file.
+
+**Endpoint:** `POST /api/ticks/export`
+
+**Request:**
+```json
+{
+  "index_name": "NIFTY",
+  "start_date": "2025-05-01",
+  "end_date": "2025-05-06"
+}
+```
+
+**Parameters:**
+- `index_name`: Index name ("NIFTY" or "SENSEX")
+- `start_date`: Start date in YYYY-MM-DD format
+- `end_date`: End date in YYYY-MM-DD format
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "file_path": "NIFTY_2025-05-01_to_2025-05-06.parquet",
+    "tick_count": 65000,
+    "size_mb": 13.2
+  }
+}
+```
+
+**Response Fields:**
+- `file_path`: Path to the exported Parquet file
+- `tick_count`: Number of tick data points exported
+- `size_mb`: Size of the exported file in megabytes
+
+### Delete Tick Data
+
+Deletes tick data for a specific index and date range from the database.
+
+**Endpoint:** `POST /api/ticks/delete`
+
+**Request:**
+```json
+{
+  "index_name": "NIFTY",
+  "start_date": "2025-05-01",
+  "end_date": "2025-05-01"
+}
+```
+
+**Parameters:**
+- `index_name`: Index name ("NIFTY" or "SENSEX")
+- `start_date`: Start date in YYYY-MM-DD format
+- `end_date`: End date in YYYY-MM-DD format
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "deleted_count": 12500
+  }
+}
+```
+
+**Response Fields:**
+- `deleted_count`: Number of tick data points deleted
+
+### List Exported Files
+
+Retrieves a list of all exported Parquet files.
+
+**Endpoint:** `GET /api/ticks/files`
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "files": [
+      {
+        "file_name": "NIFTY_2025-05-01_to_2025-05-06.parquet",
+        "size_mb": 13.2,
+        "created_at": "2025-05-06T14:30:00+05:30"
+      },
+      {
+        "file_name": "SENSEX_2025-05-01_to_2025-05-03.parquet",
+        "size_mb": 7.5,
+        "created_at": "2025-05-03T18:45:00+05:30"
+      }
+    ]
+  }
+}
+```
+
+**Response Fields:**
+- `file_name`: Name of the exported Parquet file
+- `size_mb`: Size of the file in megabytes
+- `created_at`: Timestamp when the file was created
+
+### Get Tick Samples
+
+Retrieves sample tick data from an exported Parquet file.
+
+**Endpoint:** `POST /api/ticks/samples`
+
+**Request:**
+```json
+{
+  "file_path": "NIFTY_2025-05-01_to_2025-05-06.parquet",
+  "num_samples": 10
+}
+```
+
+**Parameters:**
+- `file_path`: Path to the exported Parquet file
+- `num_samples`: Number of sample data points to retrieve
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "file_path": "NIFTY_2025-05-01_to_2025-05-06.parquet",
+    "samples": [
+      {
+        "instrument_token": "256265",
+        "exchange_unix_timestamp": 1714545000,
+        "last_price": 19450.25,
+        "open_interest": 150000,
+        "volume_traded": 12500,
+        "average_trade_price": 19448.75
+      },
+      {
+        "instrument_token": "256265",
+        "exchange_unix_timestamp": 1714545005,
+        "last_price": 19451.50,
+        "open_interest": 150100,
+        "volume_traded": 12550,
+        "average_trade_price": 19449.25
+      }
+    ]
+  }
+}
+```
+
+**Response Fields:**
+- `file_path`: Path to the exported Parquet file
+- `samples`: Array of sample tick data points
+  - `instrument_token`: Instrument token
+  - `exchange_unix_timestamp`: Exchange timestamp in Unix format
+  - `last_price`: Last traded price
+  - `open_interest`: Open interest
+  - `volume_traded`: Volume traded
+  - `average_trade_price`: Volume weighted average price
+
 ## Websocket API
 
 Real-time data is available via WebSocket connection.

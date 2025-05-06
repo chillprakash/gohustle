@@ -26,12 +26,12 @@ type PositionManager struct {
 
 // PositionSummary represents the summary of all positions
 type PositionSummary struct {
-	TotalCallValue      float64 `json:"total_call_value"`
-	TotalPutValue       float64 `json:"total_put_value"`
-	TotalValue          float64 `json:"total_value"`
-	TotalCallPending    float64 `json:"total_call_pending"`
-	TotalPutPending     float64 `json:"total_put_pending"`
-	TotalPendingValue   float64 `json:"total_pending_value"`
+	TotalCallValue    float64 `json:"total_call_value"`
+	TotalPutValue     float64 `json:"total_put_value"`
+	TotalValue        float64 `json:"total_value"`
+	TotalCallPending  float64 `json:"total_call_pending"`
+	TotalPutPending   float64 `json:"total_put_pending"`
+	TotalPendingValue float64 `json:"total_pending_value"`
 }
 
 // MoveStep represents a possible position adjustment step
@@ -577,11 +577,48 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 			Moves:           pm.calculateMoves(ctx, pseudoPos, strikePrice, expiryDate),
 		}
 
-		// Calculate position value (based on average price) and pending value (based on LTP)
-		// We use absolute values to properly account for both buy and sell positions
-		positionValue := math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice)
-		pendingValue := math.Abs(float64(dbPos.Quantity) * detailedPos.LTP)
+		// Calculate position value (original capital deployed)
+		quantity := float64(dbPos.Quantity)
+		positionValue := math.Abs(quantity * dbPos.AveragePrice)
+
+		// Calculate position values based on option premium perspective
+		var pendingValue float64
+		var pnl float64
 		
+		if quantity < 0 {
+			// Sell/Short position - premium we collect (positive value)
+			// For options we've sold, we've already collected the premium
+			// The pending value is what we'd need to pay to close the position
+			pendingValue = math.Abs(quantity * detailedPos.LTP)
+			
+			// For sold options, profit = premium collected - current value
+			premiumCollected := math.Abs(quantity * dbPos.AveragePrice)
+			currentCost := math.Abs(quantity * detailedPos.LTP)
+			pnl = premiumCollected - currentCost
+		} else {
+			// Buy/Long position - premium we pay (negative value)
+			// For options we've bought, we've paid the premium
+			// The pending value is what we'd get if we close the position
+			pendingValue = -math.Abs(quantity * detailedPos.LTP)
+			
+			// For bought options, profit = current value - premium paid
+			premiumPaid := math.Abs(quantity * dbPos.AveragePrice)
+			currentValue := math.Abs(quantity * detailedPos.LTP)
+			pnl = currentValue - premiumPaid
+		}
+
+		// Log position values for debugging
+		pm.log.Info("Position value calculation", map[string]interface{}{
+			"symbol":         dbPos.TradingSymbol,
+			"quantity":       quantity,
+			"avg_price":      dbPos.AveragePrice,
+			"ltp":            detailedPos.LTP,
+			"position_value": positionValue,
+			"pending_value":  pendingValue,
+			"pnl":            pnl,
+			"position_type":  optionType,
+		})
+
 		// Update summary based on option type
 		if optionType == "CE" {
 			analysis.Summary.TotalCallValue += positionValue

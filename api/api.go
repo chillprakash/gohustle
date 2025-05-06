@@ -719,6 +719,12 @@ func (s *Server) setupRoutes() {
 	authenticatedRouter.HandleFunc("/ticks/files", handleListExportedFiles).Methods("GET", "OPTIONS")
 	authenticatedRouter.HandleFunc("/ticks/samples", handleGetTickSamples).Methods("POST", "OPTIONS")
 
+	// Archive management endpoints
+	authenticatedRouter.HandleFunc("/archive/jobs", handleGetArchiveJobs).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/archive/retry", handleRetryArchiveJob).Methods("POST", "OPTIONS")
+	authenticatedRouter.HandleFunc("/archive/run", handleRunArchiveJob).Methods("POST", "OPTIONS")
+	authenticatedRouter.HandleFunc("/archive/consolidate", handleRunConsolidationJob).Methods("POST", "OPTIONS")
+
 	// General endpoint
 	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET", "OPTIONS")
 }

@@ -3,13 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/signal"
-	"strconv"
-	"syscall"
-	"time"
-
 	"gohustle/api"
+	"gohustle/archive"
 	"gohustle/auth"
 	"gohustle/cache"
 	"gohustle/config"
@@ -18,6 +13,11 @@ import (
 	"gohustle/nats"
 	"gohustle/scheduler"
 	"gohustle/zerodha"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
 )
 
 func startDataProcessing(ctx context.Context, cfg *config.Config) error {
@@ -108,6 +108,11 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	scheduler.InitializeStrategyPnLTracking(ctx)
 
 	scheduler.InitializeIndexOptionChainPolling(ctx)
+
+	// Initialize tick data archiving (hourly) and consolidation (outside market hours)
+	archive.InitializeTickDataArchiving(ctx)
+	archive.InitializeTickDataConsolidation(ctx)
+	logger.L().Info("Initialized tick data archiving and consolidation", nil)
 
 	// Block until context is cancelled
 	<-ctx.Done()

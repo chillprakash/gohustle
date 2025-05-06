@@ -208,3 +208,30 @@ SELECT
     LAST(total_pnl, timestamp) AS last_pnl
 FROM strategy_pnl_timeseries
 GROUP BY bucket, strategy_id, strategy_name, paper_trading;
+
+-- Create tick_archive_jobs table for tracking tick data archiving processes
+CREATE TABLE tick_archive_jobs (
+    id SERIAL PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    index_name TEXT NOT NULL,
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL, -- 'pending', 'running', 'completed', 'failed', 'failed_permanent'
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    tick_count INT,
+    file_path TEXT,
+    file_size_bytes BIGINT,
+    error_message TEXT,
+    retry_count INT DEFAULT 0,
+    next_retry_at TIMESTAMPTZ
+);
+
+-- Create indexes for faster queries
+CREATE INDEX idx_tick_archive_jobs_status ON tick_archive_jobs(status);
+CREATE INDEX idx_tick_archive_jobs_index_date ON tick_archive_jobs(index_name, start_time);
+CREATE INDEX idx_tick_archive_jobs_next_retry ON tick_archive_jobs(next_retry_at) WHERE next_retry_at IS NOT NULL;
+
+-- Add table comment
+COMMENT ON TABLE tick_archive_jobs IS 'Tracks tick data archiving processes for export to Parquet and deletion';

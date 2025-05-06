@@ -584,13 +584,13 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		// Calculate position values based on option premium perspective
 		var pendingValue float64
 		var pnl float64
-		
+
 		if quantity < 0 {
 			// Sell/Short position - premium we collect (positive value)
 			// For options we've sold, we've already collected the premium
 			// The pending value is what we'd need to pay to close the position
 			pendingValue = math.Abs(quantity * detailedPos.LTP)
-			
+
 			// For sold options, profit = premium collected - current value
 			premiumCollected := math.Abs(quantity * dbPos.AveragePrice)
 			currentCost := math.Abs(quantity * detailedPos.LTP)
@@ -600,7 +600,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 			// For options we've bought, we've paid the premium
 			// The pending value is what we'd get if we close the position
 			pendingValue = -math.Abs(quantity * detailedPos.LTP)
-			
+
 			// For bought options, profit = current value - premium paid
 			premiumPaid := math.Abs(quantity * dbPos.AveragePrice)
 			currentValue := math.Abs(quantity * detailedPos.LTP)
@@ -608,7 +608,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		}
 
 		// Log position values for debugging
-		pm.log.Info("Position value calculation", map[string]interface{}{
+		pm.log.Debug("Position value calculation", map[string]interface{}{
 			"symbol":         dbPos.TradingSymbol,
 			"quantity":       quantity,
 			"avg_price":      dbPos.AveragePrice,

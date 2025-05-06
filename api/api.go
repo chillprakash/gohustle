@@ -980,6 +980,8 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse strikes_count (default to 5)
+	// This represents the number of strikes to include on EACH SIDE of the ATM strike
+	// So the total number of strikes returned will be approximately (2*numStrikes + 1)
 	numStrikes := 5
 	if strikes_count != "" {
 		var err error
@@ -1003,7 +1005,8 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	// Try to get from in-memory first unless force calculate is true
 	if !force_calculate {
-		response = optionChainMgr.GetLatestChain(index, expiry)
+		// Include strikes count in cache key for proper caching
+		response = optionChainMgr.GetLatestChain(index, expiry, numStrikes)
 		if response != nil {
 			// Check if data is fresh (less than 2 seconds old)
 			if time.Since(time.Unix(0, response.Timestamp)) < 2*time.Second {

@@ -77,6 +77,7 @@ type OptionChainResponse struct {
 	Chain           []*StrikeData `json:"chain"`
 	ATMStrike       float64       `json:"atm_strike"`
 	Timestamp       int64         `json:"timestamp"`
+	RequestedStrikes int          `json:"requested_strikes"`
 }
 
 func NewOptionChainManager(ctx context.Context) *OptionChainManager {
@@ -143,7 +144,8 @@ func (m *OptionChainManager) handleBroadcasts() {
 		case <-m.ctx.Done():
 			return
 		case update := <-m.broadcastChan:
-			key := fmt.Sprintf("%s:%s", update.Index, update.Expiry)
+			// Include requested strikes in the cache key
+			key := fmt.Sprintf("%s:%s:%d", update.Index, update.Expiry, update.RequestedStrikes)
 
 			// Update latest data
 			m.mu.Lock()
@@ -166,9 +168,10 @@ func (m *OptionChainManager) handleBroadcasts() {
 	}
 }
 
-// GetLatestChain returns the most recent option chain data for the given index and expiry
-func (m *OptionChainManager) GetLatestChain(index, expiry string) *OptionChainResponse {
-	key := fmt.Sprintf("%s:%s", index, expiry)
+// GetLatestChain returns the most recent option chain data for the given index, expiry, and strikes count
+func (m *OptionChainManager) GetLatestChain(index, expiry string, strikesCount int) *OptionChainResponse {
+	// Include strikes count in the cache key
+	key := fmt.Sprintf("%s:%s:%d", index, expiry, strikesCount)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.latestData[key]
@@ -332,9 +335,30 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 		return nil, fmt.Errorf("ATM strike not found in strikes list")
 	}
 
+	// Original logic: select strikesCount strikes on each side of the ATM
 	startIndex := max(0, middleIndex-strikesCount)
 	endIndex := min(len(allStrikes), middleIndex+strikesCount+1)
 	selectedStrikes := allStrikes[startIndex:endIndex]
+
+	// Log the number of strikes selected for debugging
+	m.log.Info("Selected strikes for option chain", map[string]interface{}{
+		"requested_count": strikesCount,
+		"selected_count":  len(selectedStrikes),
+		"atm_strike":      atmStrike_tentative,
+		"start_index":     startIndex,
+		"end_index":       endIndex,
+		"middle_index":    middleIndex,
+		"all_strikes_len": len(allStrikes),
+	})
+
+	// Log the actual selected strikes for verification
+	strikeValues := make([]string, 0, len(selectedStrikes))
+	for _, strike := range selectedStrikes {
+		strikeValues = append(strikeValues, strike)
+	}
+	m.log.Info("Selected strike values", map[string]interface{}{
+		"strikes": strings.Join(strikeValues, ","),
+	})
 
 	// Get instrument tokens for selected strikes
 	ceTokens := make([]string, 0)
@@ -490,7 +514,15 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 		Chain:           chain,
 		ATMStrike:       atmStrike,
 		Timestamp:       time.Now().UnixNano(),
+		RequestedStrikes: strikesCount,
 	}
+
+	// Log the final chain size for debugging
+	m.log.Info("Final option chain size", map[string]interface{}{
+		"requested_strikes": strikesCount,
+		"selected_strikes":  len(selectedStrikes),
+		"final_chain_size":  len(chain),
+	})
 
 	// Store time series metrics
 	if err := m.storeTimeSeriesMetrics(ctx, index, chain, underlyingPrice); err != nil {

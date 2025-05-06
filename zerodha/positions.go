@@ -26,9 +26,12 @@ type PositionManager struct {
 
 // PositionSummary represents the summary of all positions
 type PositionSummary struct {
-	TotalCallValue float64 `json:"total_call_value"`
-	TotalPutValue  float64 `json:"total_put_value"`
-	TotalValue     float64 `json:"total_value"`
+	TotalCallValue      float64 `json:"total_call_value"`
+	TotalPutValue       float64 `json:"total_put_value"`
+	TotalValue          float64 `json:"total_value"`
+	TotalCallPending    float64 `json:"total_call_pending"`
+	TotalPutPending     float64 `json:"total_put_pending"`
+	TotalPendingValue   float64 `json:"total_pending_value"`
 }
 
 // MoveStep represents a possible position adjustment step
@@ -574,17 +577,26 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 			Moves:           pm.calculateMoves(ctx, pseudoPos, strikePrice, expiryDate),
 		}
 
-		// Update summary
+		// Calculate position value (based on average price) and pending value (based on LTP)
+		// We use absolute values to properly account for both buy and sell positions
+		positionValue := math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice)
+		pendingValue := math.Abs(float64(dbPos.Quantity) * detailedPos.LTP)
+		
+		// Update summary based on option type
 		if optionType == "CE" {
-			analysis.Summary.TotalCallValue += detailedPos.Value
+			analysis.Summary.TotalCallValue += positionValue
+			analysis.Summary.TotalCallPending += pendingValue
 		} else {
-			analysis.Summary.TotalPutValue += detailedPos.Value
+			analysis.Summary.TotalPutValue += positionValue
+			analysis.Summary.TotalPutPending += pendingValue
 		}
 
 		analysis.Positions = append(analysis.Positions, detailedPos)
 	}
 
+	// Calculate totals
 	analysis.Summary.TotalValue = analysis.Summary.TotalCallValue + analysis.Summary.TotalPutValue
+	analysis.Summary.TotalPendingValue = analysis.Summary.TotalCallPending + analysis.Summary.TotalPutPending
 	return analysis, nil
 }
 

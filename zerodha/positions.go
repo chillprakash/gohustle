@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
-	sync "sync"
+	"sync"
 	"time"
 
 	"gohustle/cache"
@@ -52,6 +53,7 @@ type DetailedPosition struct {
 	OptionType      string          `json:"option_type"` // CE or PE
 	Quantity        int64           `json:"quantity"`
 	AveragePrice    float64         `json:"average_price"`
+	BuyPrice        float64         `json:"buy_price"` // Price at which the position was bought
 	SellPrice       float64         `json:"sell_price"`
 	LTP             float64         `json:"ltp"`
 	Diff            float64         `json:"diff"`
@@ -110,6 +112,10 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 	if err != nil {
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
+	pm.log.Info("Fetched positions for sync", map[string]interface{}{
+		"count":     len(positions.Net),
+		"positions": positions.Net,
+	})
 
 	// Use a wait group to wait for both operations to complete
 	var wg sync.WaitGroup
@@ -160,10 +166,84 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 		return fmt.Errorf("timescale DB is nil")
 	}
 
-	// Process each position
+	// First, get all existing positions to check for duplicates
+	existingPositions, err := timescaleDB.ListPositions(ctx)
+	if err != nil {
+		pm.log.Error("Failed to list existing positions", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Continue with the sync even if we can't get existing positions
+	} else {
+		pm.log.Info("Fetched existing positions for sync", map[string]interface{}{
+			"count": len(existingPositions),
+		})
+	}
+
+	// Create maps to track positions by trading symbol
+	// We'll use this to find duplicates and to find the most recent position for each symbol
+	existingPositionsBySymbol := make(map[string][]*db.PositionRecord)
+	for _, existingPos := range existingPositions {
+		// Only include non-paper trading positions in the map
+		// This ensures we don't update paper trading positions with real ones
+		if !existingPos.PaperTrading {
+			key := fmt.Sprintf("%s_%s_%s", existingPos.TradingSymbol, existingPos.Exchange, existingPos.Product)
+			existingPositionsBySymbol[key] = append(existingPositionsBySymbol[key], existingPos)
+		}
+	}
+
+	// Clean up duplicate positions first
+	for key, positionList := range existingPositionsBySymbol {
+		if len(positionList) > 1 {
+			// We have duplicates for this trading symbol
+			pm.log.Info("Found duplicate positions", map[string]interface{}{
+				"key":             key,
+				"duplicate_count": len(positionList),
+				"trading_symbol":  positionList[0].TradingSymbol,
+			})
+
+			// Sort positions by ID (descending) to keep the most recent one
+			sort.Slice(positionList, func(i, j int) bool {
+				return positionList[i].ID > positionList[j].ID
+			})
+
+			// Keep the position with the highest ID (most recent) and delete others
+			for i := 1; i < len(positionList); i++ {
+				pm.log.Info("Deleting duplicate position", map[string]interface{}{
+					"position_id":    key,
+					"trading_symbol": positionList[i].TradingSymbol,
+					"database_id":    positionList[i].ID,
+					"quantity":       positionList[i].Quantity,
+				})
+
+				// Delete the duplicate position using the TimescaleDB's DeletePosition method
+				if err := timescaleDB.DeletePosition(ctx, positionList[i].ID); err != nil {
+					pm.log.Error("Failed to delete duplicate position", map[string]interface{}{
+						"error":          err.Error(),
+						"position_id":    key,
+						"database_id":    positionList[i].ID,
+						"trading_symbol": positionList[i].TradingSymbol,
+					})
+				}
+			}
+		}
+	}
+
+	// Create a map with only the most recent position for each symbol
+	existingPositionMap := make(map[string]*db.PositionRecord)
+	for key, positionList := range existingPositionsBySymbol {
+		if len(positionList) > 0 {
+			// Use the first position (which is the most recent after sorting)
+			existingPositionMap[key] = positionList[0]
+		}
+	}
+
+	// Process each position from Zerodha
 	for _, pos := range positions {
 		// Create a unique position ID
 		positionIDStr := fmt.Sprintf("%s_%s_%s", pos.Tradingsymbol, pos.Exchange, pos.Product)
+
+		// Check if we already have this position
+		existingPos, exists := existingPositionMap[positionIDStr]
 
 		// Create a position record
 		posRecord := &db.PositionRecord{
@@ -191,6 +271,56 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 			KiteResponse:  pos,   // Store the original Kite position
 		}
 
+		// If position exists, update its ID to ensure we update rather than insert
+		if exists {
+			// Always update the ID to ensure we update rather than insert
+			posRecord.ID = existingPos.ID
+
+			// Check if the quantity has changed
+			if existingPos.Quantity != pos.Quantity {
+				pm.log.Info("Updating position quantity", map[string]interface{}{
+					"position_id":    positionIDStr,
+					"trading_symbol": pos.Tradingsymbol,
+					"old_quantity":   existingPos.Quantity,
+					"new_quantity":   pos.Quantity,
+					"database_id":    existingPos.ID,
+				})
+
+				// If the position is now zero, log that it's been closed
+				if pos.Quantity == 0 && existingPos.Quantity != 0 {
+					pm.log.Info("Position closed in Zerodha", map[string]interface{}{
+						"position_id":    positionIDStr,
+						"trading_symbol": pos.Tradingsymbol,
+						"previous_qty":   existingPos.Quantity,
+					})
+				}
+			} else {
+				pm.log.Debug("Position quantity unchanged", map[string]interface{}{
+					"position_id":    positionIDStr,
+					"trading_symbol": pos.Tradingsymbol,
+					"quantity":       pos.Quantity,
+				})
+			}
+		} else {
+			// Only create a new record if the quantity is non-zero
+			// This prevents creating records for positions that have already been closed
+			if pos.Quantity != 0 {
+				pm.log.Info("Creating new position", map[string]interface{}{
+					"position_id":    positionIDStr,
+					"trading_symbol": pos.Tradingsymbol,
+					"quantity":       pos.Quantity,
+				})
+			} else {
+				// For positions with zero quantity that don't exist in our DB,
+				// we can skip them as they're already closed in Zerodha
+				pm.log.Debug("Skipping zero-quantity position", map[string]interface{}{
+					"position_id":    positionIDStr,
+					"trading_symbol": pos.Tradingsymbol,
+				})
+				continue
+			}
+		}
+
 		// Upsert the position in the database
 		if err := timescaleDB.UpsertPosition(ctx, posRecord); err != nil {
 			pm.log.Error("Failed to upsert position in database", map[string]interface{}{
@@ -200,6 +330,13 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 			})
 			// Continue with other positions even if one fails
 			continue
+		} else {
+			pm.log.Debug("Successfully updated position in database", map[string]interface{}{
+				"position_id":    positionIDStr,
+				"trading_symbol": pos.Tradingsymbol,
+				"quantity":       pos.Quantity,
+				"database_id":    posRecord.ID,
+			})
 		}
 	}
 
@@ -426,6 +563,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 			OptionType:      optionType,
 			Quantity:        int64(dbPos.Quantity),
 			AveragePrice:    dbPos.AveragePrice,
+			BuyPrice:        dbPos.BuyPrice,
 			SellPrice:       dbPos.SellPrice,
 			LTP:             ltp,
 			Diff:            ltp - dbPos.AveragePrice,

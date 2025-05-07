@@ -279,6 +279,20 @@ type RunArchiveJobRequest struct {
 	IndexName string `json:"index_name"` // Optional, if empty will run for all indices
 }
 
+// ArchiveFileInfo represents information about an archived file
+type ArchiveFileInfo struct {
+	FileName     string    `json:"file_name"`
+	FilePath     string    `json:"file_path"`
+	IndexName    string    `json:"index_name"`
+	SizeBytes    int64     `json:"size_bytes"`
+	SizeMB       float64   `json:"size_mb"`
+	CreatedAt    time.Time `json:"created_at"`
+	TickCount    int       `json:"tick_count,omitempty"`
+	StartTime    time.Time `json:"start_time,omitempty"`
+	EndTime      time.Time `json:"end_time,omitempty"`
+	IsDaily      bool      `json:"is_daily"`
+}
+
 // handleRunArchiveJob manually triggers an archive job
 func handleRunArchiveJob(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodOptions {
@@ -334,7 +348,7 @@ func handleRunArchiveJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRunConsolidationJob manually triggers a consolidation job
+// handleRunConsolidationJob manually triggers the consolidation process
 func handleRunConsolidationJob(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodOptions {
 		sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -350,7 +364,7 @@ func handleRunConsolidationJob(w http.ResponseWriter, r *http.Request) {
 	// Run the consolidation job in a goroutine
 	go func() {
 		ctx := context.Background()
-		if err := archive.ExecuteTickConsolidationJob(ctx); err != nil {
+		if err := archive.ExecuteConsolidationJob(ctx); err != nil {
 			logger.L().Error("Failed to run consolidation job", map[string]interface{}{
 				"error": err.Error(),
 			})
@@ -361,5 +375,73 @@ func handleRunConsolidationJob(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, Response{
 		Success: true,
 		Message: "Consolidation job triggered",
+	})
+}
+
+// handleListArchiveFiles lists all archive files with their details
+func handleListArchiveFiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodOptions {
+		sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Handle CORS preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Get query parameters
+	indexName := r.URL.Query().Get("index_name")
+	fileType := r.URL.Query().Get("type") // "hourly" or "daily"
+
+	// Get the archive manager
+	manager := archive.GetTickArchiveManager()
+
+	// Get the archive directory
+	archiveDir := manager.GetArchiveDirectory()
+
+	// List files in the archive directory
+	files, err := manager.ListArchiveFiles(r.Context(), archiveDir, indexName, fileType)
+	if err != nil {
+		logger.L().Error("Failed to list archive files", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to list archive files", http.StatusInternalServerError)
+		return
+	}
+
+	// Convert to response format
+	var fileInfos []ArchiveFileInfo
+	for _, file := range files {
+		fileInfo := ArchiveFileInfo{
+			FileName:  file.Name,
+			FilePath:  file.Path,
+			IndexName: file.IndexName,
+			SizeBytes: file.Size,
+			SizeMB:    float64(file.Size) / (1024 * 1024),
+			CreatedAt: file.ModTime,
+			IsDaily:   file.IsDaily,
+		}
+
+		// Try to parse additional info from filename
+		if startTime, endTime, err := manager.ParseTimeRangeFromFilename(file.Name); err == nil {
+			fileInfo.StartTime = startTime
+			fileInfo.EndTime = endTime
+		}
+
+		// Get tick count if available
+		if tickCount, err := manager.GetTickCountForFile(r.Context(), file.Path); err == nil {
+			fileInfo.TickCount = tickCount
+		}
+
+		fileInfos = append(fileInfos, fileInfo)
+	}
+
+	// Return as JSON response
+	sendJSONResponse(w, Response{
+		Success: true,
+		Message: "Archive files retrieved successfully",
+		Data:    fileInfos,
 	})
 }

@@ -97,7 +97,7 @@ func InitializeTickDataConsolidation(ctx context.Context) {
 			}
 			
 			logger.L().Info("Running tick data consolidation job", nil)
-			return ExecuteTickConsolidationJob(ctx)
+			return ExecuteConsolidationJob(ctx)
 		},
 	}
 	

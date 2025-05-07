@@ -724,6 +724,7 @@ func (s *Server) setupRoutes() {
 	authenticatedRouter.HandleFunc("/archive/retry", handleRetryArchiveJob).Methods("POST", "OPTIONS")
 	authenticatedRouter.HandleFunc("/archive/run", handleRunArchiveJob).Methods("POST", "OPTIONS")
 	authenticatedRouter.HandleFunc("/archive/consolidate", handleRunConsolidationJob).Methods("POST", "OPTIONS")
+	authenticatedRouter.HandleFunc("/archive/files", handleListArchiveFiles).Methods("GET", "OPTIONS")
 
 	// General endpoint
 	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET", "OPTIONS")

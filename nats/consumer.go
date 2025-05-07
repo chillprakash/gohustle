@@ -193,6 +193,13 @@ func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 		ticksByTable := make(map[string][]*pb.TickData)
 		for _, tick := range batch {
 			tableName := core.GetTableNameForToken(ctx, tick.InstrumentToken)
+			if tableName == "" {
+				c.log.Error("Invalid table name", map[string]interface{}{
+					"worker_id": workerId,
+					"token":     tick.InstrumentToken,
+				})
+				continue
+			}
 			ticksByTable[tableName] = append(ticksByTable[tableName], tick)
 		}
 		// Write each group to DB

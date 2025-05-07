@@ -9,6 +9,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,10 +19,21 @@ import (
 )
 
 // TickArchiveManager handles the archiving process for tick data
+// ArchiveFileEntry represents an archived file with metadata
+type ArchiveFileEntry struct {
+	Name      string
+	Path      string
+	Size      int64
+	ModTime   time.Time
+	IndexName string
+	IsDaily   bool
+}
+
 type TickArchiveManager struct {
-	db    *db.TimescaleDB
-	store *filestore.ParquetStore
-	mu    sync.Mutex
+	db         *db.TimescaleDB
+	store      *filestore.ParquetStore
+	mu         sync.Mutex
+	archiveDir string
 }
 
 var (
@@ -31,31 +44,208 @@ var (
 // GetTickArchiveManager returns a singleton instance of TickArchiveManager
 func GetTickArchiveManager() *TickArchiveManager {
 	once.Do(func() {
+		// Default archive directory is in the current working directory
+		cwd, err := os.Getwd()
+		if err != nil {
+			logger.L().Error("Failed to get current working directory", map[string]interface{}{
+				"error": err.Error(),
+			})
+			cwd = "."
+		}
+		archiveDir := filepath.Join(cwd, "archive_data")
+		
 		instance = &TickArchiveManager{
-			db:    db.GetTimescaleDB(),
-			store: filestore.GetParquetStore(),
+			db:         db.GetTimescaleDB(),
+			store:      filestore.GetParquetStore(),
+			archiveDir: archiveDir,
+		}
+		
+		// Ensure archive directory exists
+		if err := os.MkdirAll(archiveDir, 0755); err != nil {
+			logger.L().Error("Failed to create archive directory", map[string]interface{}{
+				"dir":   archiveDir,
+				"error": err.Error(),
+			})
 		}
 	})
 	return instance
 }
 
+// GetArchiveDirectory returns the base directory for archived files
+func (m *TickArchiveManager) GetArchiveDirectory() string {
+	return m.archiveDir
+}
+
+// ListArchiveFiles lists all archive files with optional filtering
+func (m *TickArchiveManager) ListArchiveFiles(ctx context.Context, archiveDir, indexName, fileType string) ([]ArchiveFileEntry, error) {
+	// Validate inputs
+	if archiveDir == "" {
+		archiveDir = m.archiveDir
+	}
+
+	// Check if directory exists
+	if _, err := os.Stat(archiveDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("archive directory does not exist: %s", archiveDir)
+	}
+
+	// Walk the directory and collect files
+	var files []ArchiveFileEntry
+	err := filepath.Walk(archiveDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip directories
+		if info.IsDir() {
+			return nil
+		}
+
+		// Only include .parquet files
+		if !strings.HasSuffix(info.Name(), ".parquet") {
+			return nil
+		}
+
+		// Parse file name to get index name
+		fileIndexName := ""
+		if strings.HasPrefix(info.Name(), "NIFTY_") {
+			fileIndexName = "NIFTY"
+		} else if strings.HasPrefix(info.Name(), "SENSEX_") {
+			fileIndexName = "SENSEX"
+		} else {
+			// Skip files that don't match our naming convention
+			return nil
+		}
+
+		// Apply index name filter if specified
+		if indexName != "" && fileIndexName != indexName {
+			return nil
+		}
+
+		// Determine if this is a daily or hourly file
+		isDaily := strings.Contains(info.Name(), "_daily_")
+
+		// Apply file type filter if specified
+		if fileType == "daily" && !isDaily {
+			return nil
+		} else if fileType == "hourly" && isDaily {
+			return nil
+		}
+
+		// Add file to the list
+		files = append(files, ArchiveFileEntry{
+			Name:      info.Name(),
+			Path:      path,
+			Size:      info.Size(),
+			ModTime:   info.ModTime(),
+			IndexName: fileIndexName,
+			IsDaily:   isDaily,
+		})
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("error walking archive directory: %w", err)
+	}
+
+	// Sort files by modification time (newest first)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModTime.After(files[j].ModTime)
+	})
+
+	return files, nil
+}
+
+// ParseTimeRangeFromFilename extracts the time range from a file name
+func (m *TickArchiveManager) ParseTimeRangeFromFilename(filename string) (time.Time, time.Time, error) {
+	// Handle daily files (e.g., NIFTY_daily_2025-05-06.parquet)
+	if strings.Contains(filename, "_daily_") {
+		parts := strings.Split(filename, "_daily_")
+		if len(parts) != 2 {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid daily file name format: %s", filename)
+		}
+
+		dateStr := strings.TrimSuffix(parts[1], ".parquet")
+		date, err := time.Parse("2006-01-02", dateStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("failed to parse date from filename: %w", err)
+		}
+
+		// For daily files, start time is 00:00:00 and end time is 23:59:59
+		startTime := date
+		endTime := date.Add(24*time.Hour - time.Second)
+		return startTime, endTime, nil
+	}
+
+	// Handle hourly files (e.g., NIFTY_2025-05-06T14_to_2025-05-06T15.parquet)
+	if strings.Contains(filename, "_to_") {
+		// Extract index name prefix
+		parts := strings.SplitN(filename, "_", 2)
+		if len(parts) != 2 {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid hourly file name format: %s", filename)
+		}
+
+		// Extract time range
+		timeRangeParts := strings.Split(parts[1], "_to_")
+		if len(timeRangeParts) != 2 {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid time range format in filename: %s", filename)
+		}
+
+		// Parse start time
+		startTimeStr := timeRangeParts[0]
+		startTime, err := time.Parse("2006-01-02T15", startTimeStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("failed to parse start time from filename: %w", err)
+		}
+
+		// Parse end time
+		endTimeStr := strings.TrimSuffix(timeRangeParts[1], ".parquet")
+		endTime, err := time.Parse("2006-01-02T15", endTimeStr)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("failed to parse end time from filename: %w", err)
+		}
+
+		return startTime, endTime, nil
+	}
+
+	return time.Time{}, time.Time{}, fmt.Errorf("unrecognized file name format: %s", filename)
+}
+
+// GetTickCountForFile estimates the number of ticks in a Parquet file
+func (m *TickArchiveManager) GetTickCountForFile(ctx context.Context, filePath string) (int, error) {
+	// For now, we'll estimate based on file size
+	// In a real implementation, you might want to query the Parquet file metadata
+	
+	// Get file info
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get file info: %w", err)
+	}
+	
+	// Estimate tick count based on file size
+	// Assuming average of 200 bytes per tick record
+	estimatedTickCount := int(fileInfo.Size() / 200)
+	
+	return estimatedTickCount, nil
+}
+
 // TickArchiveJob represents a job for archiving tick data
 type TickArchiveJob struct {
-	ID            int       `db:"id"`
-	JobID         string    `db:"job_id"`
-	IndexName     string    `db:"index_name"`
-	StartTime     time.Time `db:"start_time"`
-	EndTime       time.Time `db:"end_time"`
-	Status        string    `db:"status"`
-	CreatedAt     time.Time `db:"created_at"`
-	StartedAt     time.Time `db:"started_at"`
-	CompletedAt   time.Time `db:"completed_at"`
-	TickCount     int       `db:"tick_count"`
-	FilePath      string    `db:"file_path"`
-	FileSizeBytes int64     `db:"file_size_bytes"`
-	ErrorMessage  string    `db:"error_message"`
-	RetryCount    int       `db:"retry_count"`
-	NextRetryAt   time.Time `db:"next_retry_at"`
+	ID            int        `db:"id"`
+	JobID         string     `db:"job_id"`
+	IndexName     string     `db:"index_name"`
+	StartTime     time.Time  `db:"start_time"`
+	EndTime       time.Time  `db:"end_time"`
+	Status        string     `db:"status"`
+	CreatedAt     time.Time  `db:"created_at"`
+	StartedAt     *time.Time `db:"started_at"`
+	CompletedAt   *time.Time `db:"completed_at"`
+	TickCount     *int       `db:"tick_count"`
+	FilePath      *string    `db:"file_path"`
+	FileSizeBytes *int64     `db:"file_size_bytes"`
+	ErrorMessage  *string    `db:"error_message"`
+	RetryCount    int        `db:"retry_count"`
+	NextRetryAt   *time.Time `db:"next_retry_at"`
 }
 
 // ExecuteTickArchiveJob is the main entry point for the archiving process for all indices
@@ -921,8 +1111,8 @@ func (m *TickArchiveManager) scheduleRetry(ctx context.Context, jobID int, error
 	return nil
 }
 
-// ExecuteTickConsolidationJob consolidates hourly archives into daily files
-func ExecuteTickConsolidationJob(ctx context.Context) error {
+// ExecuteConsolidationJob consolidates hourly archives into daily files
+func ExecuteConsolidationJob(ctx context.Context) error {
 	manager := GetTickArchiveManager()
 
 	// Get yesterday's date

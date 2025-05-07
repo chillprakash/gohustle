@@ -789,9 +789,12 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 			"expiry":      inst.Expiry,
 		})
 		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
-			// Cache the index name for this instrument token
+			// Cache the index name for this instrument token with prefix
 			instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", inst.InstrumentToken)
 			cache.Set(instrumentNameKey, inst.Name, 7*24*time.Hour)
+
+			// Also store with direct key format for backward compatibility
+			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
 
 			// Cache strike price
 			cache.Set(strike_key, inst.StrikePrice, 7*24*time.Hour)
@@ -813,8 +816,17 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 	}
 
 	for _, index := range core.GetIndices().GetIndicesToSubscribeForIntraday() {
+		// Store with prefix format
 		instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", index.InstrumentToken)
 		cache.Set(instrumentNameKey, index.NameInOptions, 7*24*time.Hour)
+
+		// Also store with direct key format for backward compatibility
+		cache.Set(index.InstrumentToken, index.NameInOptions, 7*24*time.Hour)
+
+		log.Debug("Cached index lookup", map[string]interface{}{
+			"token": index.InstrumentToken,
+			"name":  index.NameInOptions,
+		})
 	}
 }
 

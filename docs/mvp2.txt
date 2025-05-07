@@ -81,7 +81,20 @@ so, the nearest number would be 3. so split should be 3+2
 3*75 and 2*75.
 Can we calulate based on this?
 
+Jobs for Export:
+Need the complete picture here.
+can we work on the Jobs.
+We need below data.
+Scan through the nifty_ticks and sensex_ticks table.
 
+Show the first time from which data is available.
+also, show the latest job run time.
+I wanna have the complete picute
+1) data available and its start time, number of ticks
+2) provision to trigger
+3) Info on already executed jobs, exported files.
+
+Can we re-think
 
 
 The tick response will be of strucutre:

@@ -509,6 +509,31 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			existingPosition.Quantity = newQuantity
 			existingPosition.LastPrice = lastPrice
 
+			// Update buy/sell price based on order side
+			if order.Side == "BUY" {
+				// For buy orders, update the buy price
+				if existingPosition.BuyPrice == 0 || existingPosition.BuyQuantity == 0 {
+					existingPosition.BuyPrice = order.Price
+				} else {
+					// Calculate weighted average buy price
+					existingPosition.BuyPrice = ((existingPosition.BuyPrice * float64(existingPosition.BuyQuantity)) + 
+						(order.Price * float64(quantity))) / float64(existingPosition.BuyQuantity + quantity)
+				}
+				existingPosition.BuyQuantity += quantity
+				existingPosition.BuyValue = existingPosition.BuyPrice * float64(existingPosition.BuyQuantity)
+			} else if order.Side == "SELL" {
+				// For sell orders, update the sell price
+				if existingPosition.SellPrice == 0 || existingPosition.SellQuantity == 0 {
+					existingPosition.SellPrice = order.Price
+				} else {
+					// Calculate weighted average sell price
+					existingPosition.SellPrice = ((existingPosition.SellPrice * float64(existingPosition.SellQuantity)) + 
+						(order.Price * float64(-quantity))) / float64(existingPosition.SellQuantity - quantity)
+				}
+				existingPosition.SellQuantity -= quantity // Subtract because quantity is negative for sells
+				existingPosition.SellValue = existingPosition.SellPrice * float64(existingPosition.SellQuantity)
+			}
+
 			// Update average price based on new order
 			if (existingPosition.Quantity > 0 && quantity > 0) || (existingPosition.Quantity < 0 && quantity < 0) {
 				// Adding to position, calculate new average price
@@ -542,14 +567,12 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		}
 	} else if quantity != 0 {
 		// Create new paper position
-		// Get strategy ID if a strategy name is provided
-		var strategyID *int
-		if strategy != "" {
-			// Here you would look up the strategy ID from the strategy name
-			// For now, we'll leave it as nil
-		}
+		// Create a unique position ID for this paper trading position
+		positionIDStr := fmt.Sprintf("%s_%s_%s", order.TradingSymbol, order.Exchange, order.Product)
 
+		// Create a new position record
 		newPosition := &db.PositionRecord{
+			PositionID:    &positionIDStr,
 			TradingSymbol: order.TradingSymbol,
 			Exchange:      order.Exchange,
 			Product:       order.Product,
@@ -564,52 +587,66 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			SellPrice:     0,
 			BuyValue:      0,
 			SellValue:     0,
-			PositionType:  "DAY",
-			StrategyID:    strategyID,
+			PositionType:  "net",
 			UserID:        order.UserID,
 			UpdatedAt:     time.Now(),
 			PaperTrading:  true,
-			KiteResponse:  nil, // No Kite response for paper trading
 		}
 
-		// For paper trading positions, ensure we have the instrument token and update the last price if needed
-		if order.TradingSymbol != "" {
-			// Use the new GetInstrumentToken method to get the token
-			instrumentToken, exists := GetInstrumentToken(ctx, order.TradingSymbol)
+		// Set buy/sell price based on order side
+		if order.Side == "BUY" {
+			newPosition.BuyPrice = order.Price
+			newPosition.BuyQuantity = quantity
+			newPosition.BuyValue = order.Price * float64(quantity)
+		} else if order.Side == "SELL" {
+			newPosition.SellPrice = order.Price
+			newPosition.SellQuantity = -quantity // Negative quantity becomes positive for sell quantity
+			newPosition.SellValue = order.Price * float64(-quantity)
+		}
 
-			// If token not found through the helper, try to extract from KiteResponse
-			if !exists && order.KiteResponse != nil {
-				if kiteOrder, ok := order.KiteResponse.(map[string]interface{}); ok {
-					if token, hasToken := kiteOrder["instrument_token"]; hasToken {
-						instrumentToken = token
-						exists = true
+		// Get strategy ID if a strategy name is provided
+		var strategyID *int
+		if strategy != "" {
+			// Here you would look up the strategy ID from the strategy name
+			// For now, we'll leave it as nil
+			newPosition.StrategyID = strategyID
+		}
 
-						// Store the mapping in cache for future use
-						inMemoryCache := cache.GetInMemoryCacheInstance()
-						if inMemoryCache != nil {
-							inMemoryCache.Set(order.TradingSymbol, instrumentToken, 7*24*time.Hour)
-							log.Info("Stored trading symbol to token mapping for new position", map[string]interface{}{
-								"trading_symbol":   order.TradingSymbol,
-								"instrument_token": instrumentToken,
-							})
-						}
+		// Try to get the instrument token
+		instrumentToken, exists := GetInstrumentToken(ctx, order.TradingSymbol)
+
+		// If token not found through the helper, try to extract from KiteResponse
+		if !exists && order.KiteResponse != nil {
+			if kiteOrder, ok := order.KiteResponse.(map[string]interface{}); ok {
+				if token, hasToken := kiteOrder["instrument_token"]; hasToken {
+					instrumentToken = token
+					exists = true
+
+					// Store the mapping in cache for future use
+					inMemoryCache := cache.GetInMemoryCacheInstance()
+					if inMemoryCache != nil {
+						inMemoryCache.Set(order.TradingSymbol, instrumentToken, 7*24*time.Hour)
+						log.Info("Stored trading symbol to token mapping for new position", map[string]interface{}{
+							"trading_symbol":   order.TradingSymbol,
+							"instrument_token": instrumentToken,
+						})
 					}
 				}
 			}
+		}
 
 			// If we have an instrument token, update the last price if needed
-			if exists && lastPrice == 0 {
-				// Use the MarketDataManager to get the LTP
-				marketDataMgr := GetMarketDataManager()
-				ltp, found := marketDataMgr.GetLTP(ctx, instrumentToken)
-				if found {
-					lastPrice = ltp
-					newPosition.LastPrice = ltp
-					log.Info("Updated position last price from LTP", map[string]interface{}{
-						"ltp":              ltp,
-						"instrument_token": instrumentToken,
-					})
-				}
+		if exists && lastPrice == 0 {
+			// Use the MarketDataManager to get the LTP
+			marketDataMgr := GetMarketDataManager()
+			ltp, found := marketDataMgr.GetLTP(ctx, instrumentToken)
+			if found {
+				lastPrice = ltp
+				newPosition.LastPrice = ltp
+				log.Info("Updated position last price from LTP", map[string]interface{}{
+					"ltp":              ltp,
+					"instrument_token": instrumentToken,
+				})
 			}
 		}
 

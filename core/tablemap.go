@@ -12,16 +12,8 @@ func GetTableNameForToken(ctx context.Context, instrumentToken uint32) string {
 	cacheInst := cache.GetInMemoryCacheInstance()
 	// Try with the instrument_name_key prefix first
 	instrumentNameKey := fmt.Sprintf("instrument_name_key:%d", instrumentToken)
-	indexName, exists := cacheInst.Get(instrumentNameKey)
-	
-	// If not found, try the direct key as fallback
-	if !exists {
-		indexName, exists = cacheInst.Get(fmt.Sprintf("%d", instrumentToken))
-		if !exists {
-			return ""
-		}
-	}
-	
+	indexName, _ := cacheInst.Get(instrumentNameKey)
+
 	indexNameStr, ok := indexName.(string)
 	if !ok {
 		return ""

@@ -2,11 +2,13 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"gohustle/archive"
 	"gohustle/db"
 	"gohustle/logger"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,21 +16,21 @@ import (
 
 // ArchiveJobResponse represents the response for archive job endpoints
 type ArchiveJobResponse struct {
-	ID            int       `json:"id"`
-	JobID         string    `json:"job_id"`
-	IndexName     string    `json:"index_name"`
-	StartTime     time.Time `json:"start_time"`
-	EndTime       time.Time `json:"end_time"`
-	Status        string    `json:"status"`
-	CreatedAt     time.Time `json:"created_at"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	CompletedAt   time.Time `json:"completed_at,omitempty"`
-	TickCount     int       `json:"tick_count,omitempty"`
-	FilePath      string    `json:"file_path,omitempty"`
-	FileSizeBytes int64     `json:"file_size_bytes,omitempty"`
-	ErrorMessage  string    `json:"error_message,omitempty"`
-	RetryCount    int       `json:"retry_count"`
-	NextRetryAt   time.Time `json:"next_retry_at,omitempty"`
+	ID            int        `json:"id"`
+	JobID         string     `json:"job_id"`
+	IndexName     string     `json:"index_name"`
+	StartTime     time.Time  `json:"start_time"`
+	EndTime       time.Time  `json:"end_time"`
+	Status        string     `json:"status"`
+	CreatedAt     time.Time  `json:"created_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	TickCount     *int       `json:"tick_count,omitempty"`
+	FilePath      *string    `json:"file_path,omitempty"`
+	FileSizeBytes *int64     `json:"file_size_bytes,omitempty"`
+	ErrorMessage  *string    `json:"error_message,omitempty"`
+	RetryCount    int        `json:"retry_count"`
+	NextRetryAt   *time.Time `json:"next_retry_at,omitempty"`
 }
 
 // RetryJobRequest represents a request to retry a failed job
@@ -104,7 +106,13 @@ func handleGetArchiveJobs(w http.ResponseWriter, r *http.Request) {
 		var job ArchiveJobResponse
 		var startedAt, completedAt, nextRetryAt interface{}
 		
-		err := rows.Scan(
+		// Use sql.Null types to handle nullable fields
+	var tickCount sql.NullInt64
+	var filePath sql.NullString
+	var fileSizeBytes sql.NullInt64
+	var errorMessage sql.NullString
+
+	err := rows.Scan(
 			&job.ID,
 			&job.JobID,
 			&job.IndexName,
@@ -114,13 +122,31 @@ func handleGetArchiveJobs(w http.ResponseWriter, r *http.Request) {
 			&job.CreatedAt,
 			&startedAt,
 			&completedAt,
-			&job.TickCount,
-			&job.FilePath,
-			&job.FileSizeBytes,
-			&job.ErrorMessage,
+			&tickCount,
+			&filePath,
+			&fileSizeBytes,
+			&errorMessage,
 			&job.RetryCount,
 			&nextRetryAt,
 		)
+		
+	// Convert sql.Null types to pointer types
+	if tickCount.Valid {
+		tCount := int(tickCount.Int64)
+		job.TickCount = &tCount
+	}
+	if filePath.Valid {
+		fPath := filePath.String
+		job.FilePath = &fPath
+	}
+	if fileSizeBytes.Valid {
+		fSize := fileSizeBytes.Int64
+		job.FileSizeBytes = &fSize
+	}
+	if errorMessage.Valid {
+		errMsg := errorMessage.String
+		job.ErrorMessage = &errMsg
+	}
 		if err != nil {
 			logger.L().Error("Failed to scan job row", map[string]interface{}{
 				"error": err.Error(),
@@ -131,19 +157,22 @@ func handleGetArchiveJobs(w http.ResponseWriter, r *http.Request) {
 		// Handle nullable fields
 		if startedAt != nil {
 			if t, ok := startedAt.(time.Time); ok {
-				job.StartedAt = t
+				tCopy := t // Create a copy to avoid referencing a loop variable
+				job.StartedAt = &tCopy
 			}
 		}
 		
 		if completedAt != nil {
 			if t, ok := completedAt.(time.Time); ok {
-				job.CompletedAt = t
+				tCopy := t // Create a copy to avoid referencing a loop variable
+				job.CompletedAt = &tCopy
 			}
 		}
 		
 		if nextRetryAt != nil {
 			if t, ok := nextRetryAt.(time.Time); ok {
-				job.NextRetryAt = t
+				tCopy := t // Create a copy to avoid referencing a loop variable
+				job.NextRetryAt = &tCopy
 			}
 		}
 
@@ -245,6 +274,11 @@ func handleRetryArchiveJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// RunArchiveJobRequest represents a request to run an archive job for a specific index
+type RunArchiveJobRequest struct {
+	IndexName string `json:"index_name"` // Optional, if empty will run for all indices
+}
+
 // handleRunArchiveJob manually triggers an archive job
 func handleRunArchiveJob(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost && r.Method != http.MethodOptions {
@@ -258,20 +292,45 @@ func handleRunArchiveJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse request body to get index name (if specified)
+	var req RunArchiveJobRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		logger.L().Error("Failed to parse request body", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Continue with empty index name (will run for all indices)
+	}
+
 	// Run the archive job in a goroutine
 	go func() {
 		ctx := context.Background()
-		if err := archive.ExecuteTickArchiveJob(ctx); err != nil {
-			logger.L().Error("Failed to run archive job", map[string]interface{}{
-				"error": err.Error(),
-			})
+		if req.IndexName != "" {
+			// Run for specific index
+			if err := archive.ExecuteTickArchiveJobForIndex(ctx, req.IndexName); err != nil {
+				logger.L().Error("Failed to run archive job for index", map[string]interface{}{
+					"index_name": req.IndexName,
+					"error":      err.Error(),
+				})
+			}
+		} else {
+			// Run for all indices
+			if err := archive.ExecuteTickArchiveJob(ctx); err != nil {
+				logger.L().Error("Failed to run archive job", map[string]interface{}{
+					"error": err.Error(),
+				})
+			}
 		}
 	}()
 
 	// Return success response
 	sendJSONResponse(w, Response{
 		Success: true,
-		Message: "Archive job triggered",
+		Message: "Archive job triggered for " + func() string {
+			if req.IndexName != "" {
+				return req.IndexName
+			}
+			return "all indices"
+		}(),
 	})
 }
 

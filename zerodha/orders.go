@@ -175,7 +175,7 @@ func (om *OrderManager) updateOrderStatusesInDB(orders []kiteconnect.Order) erro
 		// Update the order status in the database
 		// For now, just log that we would update the status
 		// You'll need to implement the actual DB update method
-		om.log.Info("Would update order status in DB", map[string]interface{}{
+		om.log.Debug("Would update order status in DB", map[string]interface{}{
 			"order_id":        order.OrderID,
 			"status":          order.Status,
 			"filled_quantity": order.FilledQuantity,

@@ -115,7 +115,7 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 	if err != nil {
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
-	pm.log.Info("Fetched positions for sync", map[string]interface{}{
+	pm.log.Debug("Fetched positions for sync", map[string]interface{}{
 		"count":     len(positions.Net),
 		"positions": positions.Net,
 	})
@@ -177,7 +177,7 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 		})
 		// Continue with the sync even if we can't get existing positions
 	} else {
-		pm.log.Info("Fetched existing positions for sync", map[string]interface{}{
+		pm.log.Debug("Fetched existing positions for sync", map[string]interface{}{
 			"count": len(existingPositions),
 		})
 	}
@@ -455,7 +455,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		return nil, fmt.Errorf("failed to get positions from database: %w", err)
 	}
 
-	pm.log.Info("Fetched positions from database", map[string]interface{}{
+	pm.log.Debug("Fetched positions from database", map[string]interface{}{
 		"count": len(dbPositions),
 	})
 

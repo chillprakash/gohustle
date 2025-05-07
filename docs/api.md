@@ -572,6 +572,139 @@ Retrieves sample tick data from an exported Parquet file.
   - `volume_traded`: Volume traded
   - `average_trade_price`: Volume weighted average price
 
+## Tick Data Archive API
+
+The Tick Data Archive API allows you to manage the automated archiving of tick data to Parquet files. This includes listing archive jobs, retrying failed jobs, and manually triggering archive operations.
+
+### List Archive Jobs
+
+Retrieves a list of tick data archive jobs with optional filtering by status and index name.
+
+**Endpoint:** `GET /api/archive/jobs`
+
+**Query Parameters:**
+- `status` (optional): Filter by job status ("pending", "running", "completed", "failed", "failed_permanent")
+- `index_name` (optional): Filter by index name ("NIFTY" or "SENSEX")
+- `limit` (optional): Maximum number of jobs to return (default: 50)
+
+**Example:** `GET /api/archive/jobs?status=completed&index_name=NIFTY&limit=10`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Archive jobs retrieved successfully",
+  "data": [
+    {
+      "id": 42,
+      "job_id": "550e8400-e29b-41d4-a716-446655440000",
+      "index_name": "NIFTY",
+      "start_time": "2025-05-06T14:00:00+05:30",
+      "end_time": "2025-05-06T15:00:00+05:30",
+      "status": "completed",
+      "created_at": "2025-05-06T15:01:00+05:30",
+      "started_at": "2025-05-06T15:01:05+05:30",
+      "completed_at": "2025-05-06T15:02:30+05:30",
+      "tick_count": 3500,
+      "file_path": "NIFTY_2025-05-06T14_to_2025-05-06T15.parquet",
+      "file_size_bytes": 720000,
+      "error_message": null,
+      "retry_count": 0,
+      "next_retry_at": null
+    },
+    {
+      "id": 41,
+      "job_id": "550e8400-e29b-41d4-a716-446655440001",
+      "index_name": "NIFTY",
+      "start_time": "2025-05-06T13:00:00+05:30",
+      "end_time": "2025-05-06T14:00:00+05:30",
+      "status": "completed",
+      "created_at": "2025-05-06T14:01:00+05:30",
+      "started_at": "2025-05-06T14:01:05+05:30",
+      "completed_at": "2025-05-06T14:02:20+05:30",
+      "tick_count": 3200,
+      "file_path": "NIFTY_2025-05-06T13_to_2025-05-06T14.parquet",
+      "file_size_bytes": 680000,
+      "error_message": null,
+      "retry_count": 0,
+      "next_retry_at": null
+    }
+  ]
+}
+```
+
+**Response Fields:**
+- `id`: Database ID of the archive job
+- `job_id`: Unique identifier for the job
+- `index_name`: Index name ("NIFTY" or "SENSEX")
+- `start_time`: Start time of the data range to archive
+- `end_time`: End time of the data range to archive
+- `status`: Current job status
+- `created_at`: When the job was created
+- `started_at`: When the job started running
+- `completed_at`: When the job completed
+- `tick_count`: Number of ticks archived
+- `file_path`: Path to the archived Parquet file
+- `file_size_bytes`: Size of the archived file in bytes
+- `error_message`: Error message if the job failed
+- `retry_count`: Number of retry attempts
+- `next_retry_at`: When the job will be retried next
+
+### Retry Archive Job
+
+Manually retries a failed archive job.
+
+**Endpoint:** `POST /api/archive/retry`
+
+**Request:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440002"
+}
+```
+
+**Parameters:**
+- `job_id`: ID of the failed job to retry
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Job scheduled for retry",
+  "data": {
+    "job_id": "550e8400-e29b-41d4-a716-446655440002"
+  }
+}
+```
+
+### Run Archive Job
+
+Manually triggers the archive process to run immediately.
+
+**Endpoint:** `POST /api/archive/run`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Archive job triggered"
+}
+```
+
+### Run Consolidation Job
+
+Manually triggers the consolidation process to combine hourly archive files into daily files.
+
+**Endpoint:** `POST /api/archive/consolidate`
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Consolidation job triggered"
+}
+```
+
 ## Websocket API
 
 Real-time data is available via WebSocket connection.

@@ -58,7 +58,7 @@ type TickArchiveJob struct {
 	NextRetryAt   time.Time `db:"next_retry_at"`
 }
 
-// ExecuteTickArchiveJob is the main entry point for the archiving process
+// ExecuteTickArchiveJob is the main entry point for the archiving process for all indices
 func ExecuteTickArchiveJob(ctx context.Context) error {
 	manager := GetTickArchiveManager()
 
@@ -103,32 +103,169 @@ func ExecuteTickArchiveJob(ctx context.Context) error {
 	return nil
 }
 
-// getOrCreatePendingJobs finds pending jobs or creates new ones if none exist
+// ExecuteTickArchiveJobForIndex is the entry point for archiving a specific index
+func ExecuteTickArchiveJobForIndex(ctx context.Context, indexName string) error {
+	manager := GetTickArchiveManager()
+
+	// Validate index name
+	if indexName != "NIFTY" && indexName != "SENSEX" {
+		return fmt.Errorf("invalid index name: %s, must be NIFTY or SENSEX", indexName)
+	}
+
+	// 1. Find pending jobs or create new ones for the specific index
+	jobs, err := manager.getOrCreatePendingJobsForIndex(ctx, indexName)
+	if err != nil {
+		return fmt.Errorf("failed to get or create pending jobs for index %s: %w", indexName, err)
+	}
+
+	if len(jobs) == 0 {
+		logger.L().Info("No tick archive jobs to process for index", map[string]interface{}{
+			"index_name": indexName,
+		})
+		return nil
+	}
+
+	// 2. Process each job
+	for _, job := range jobs {
+		logger.L().Info("Processing tick archive job for index", map[string]interface{}{
+			"job_id":     job.JobID,
+			"index_name": job.IndexName,
+			"start_time": job.StartTime.Format(time.RFC3339),
+			"end_time":   job.EndTime.Format(time.RFC3339),
+		})
+
+		if err := manager.processJob(ctx, job); err != nil {
+			logger.L().Error("Failed to process archive job for index", map[string]interface{}{
+				"job_id":     job.JobID,
+				"index_name": job.IndexName,
+				"error":      err.Error(),
+			})
+
+			// Update job status to failed and schedule retry if appropriate
+			if err := manager.scheduleRetry(ctx, job.ID, err.Error()); err != nil {
+				logger.L().Error("Failed to schedule retry for archive job", map[string]interface{}{
+					"job_id": job.JobID,
+					"error":  err.Error(),
+				})
+			}
+			continue
+		}
+	}
+
+	return nil
+}
+
+// getOrCreatePendingJobs finds pending jobs or creates new ones if none exist for all indices
 func (m *TickArchiveManager) getOrCreatePendingJobs(ctx context.Context) ([]*TickArchiveJob, error) {
 	// First, check for any pending jobs that are ready to be processed
 	pendingJobs, err := m.getPendingJobs(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get pending jobs: %w", err)
 	}
 
-	// If we have pending jobs, return them
 	if len(pendingJobs) > 0 {
 		return pendingJobs, nil
 	}
 
-	// Check for jobs scheduled for retry
-	retryJobs, err := m.getJobsForRetry(ctx)
+	// No pending jobs, create new ones for each index
+	indices := []string{"NIFTY", "SENSEX"}
+	var newJobs []*TickArchiveJob
+
+	for _, indexName := range indices {
+		// Create jobs for the current hour (or previous hour if we're near the start of the hour)
+		currentTime := time.Now()
+		var startTime, endTime time.Time
+
+		// If we're within the first 5 minutes of the hour, process the previous hour
+		if currentTime.Minute() < 5 {
+			endTime = time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), currentTime.Hour(), 0, 0, 0, currentTime.Location())
+			startTime = endTime.Add(-1 * time.Hour)
+		} else {
+			// Process the current hour up to now
+			startTime = time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), currentTime.Hour(), 0, 0, 0, currentTime.Location())
+			endTime = currentTime
+		}
+
+		// Check if we already have a job for this time range and index
+		existingJob, err := m.getJobForTimeRange(ctx, indexName, startTime, endTime)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check for existing job: %w", err)
+		}
+
+		if existingJob != nil {
+			// Skip if we already have a job for this time range
+			continue
+		}
+
+		// Create a new job
+		newJob, err := m.createJob(ctx, indexName, startTime, endTime)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create job for index %s: %w", indexName, err)
+		}
+
+		newJobs = append(newJobs, newJob)
+	}
+
+	return newJobs, nil
+}
+
+// getOrCreatePendingJobsForIndex finds pending jobs or creates new ones if none exist for a specific index
+func (m *TickArchiveManager) getOrCreatePendingJobsForIndex(ctx context.Context, indexName string) ([]*TickArchiveJob, error) {
+	// First, check for any pending jobs for this index that are ready to be processed
+	pendingJobs, err := m.getPendingJobsForIndex(ctx, indexName)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get pending jobs for index %s: %w", indexName, err)
 	}
 
-	// If we have jobs scheduled for retry, return them
-	if len(retryJobs) > 0 {
-		return retryJobs, nil
+	if len(pendingJobs) > 0 {
+		return pendingJobs, nil
 	}
 
-	// If no pending or retry jobs, create new ones
-	return m.createNewArchiveJobs(ctx)
+	// No pending jobs, create new ones for the specified index
+	var newJobs []*TickArchiveJob
+
+	// Create jobs for the current hour (or previous hour if we're near the start of the hour)
+	currentTime := time.Now()
+	var startTime, endTime time.Time
+
+	// If we're within the first 5 minutes of the hour, process the previous hour
+	if currentTime.Minute() < 5 {
+		endTime = time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), currentTime.Hour(), 0, 0, 0, currentTime.Location())
+		startTime = endTime.Add(-1 * time.Hour)
+	} else {
+		// Process the current hour up to now
+		startTime = time.Date(currentTime.Year(), currentTime.Month(), currentTime.Day(), currentTime.Hour(), 0, 0, 0, currentTime.Location())
+		endTime = currentTime
+	}
+
+	// Check if we already have a job for this time range and index
+	existingJob, err := m.getJobForTimeRange(ctx, indexName, startTime, endTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check for existing job: %w", err)
+	}
+
+	if existingJob != nil {
+		// If we already have a job but it's not pending, create a new one
+		if existingJob.Status != "pending" {
+			newJob, err := m.createJob(ctx, indexName, startTime, endTime)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create job for index %s: %w", indexName, err)
+			}
+			newJobs = append(newJobs, newJob)
+		} else {
+			// Return the existing pending job
+			newJobs = append(newJobs, existingJob)
+		}
+	} else {
+		// Create a new job
+		newJob, err := m.createJob(ctx, indexName, startTime, endTime)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create job for index %s: %w", indexName, err)
+		}
+		newJobs = append(newJobs, newJob)
+	}
+
+	return newJobs, nil
 }
 
 // getPendingJobs retrieves jobs with 'pending' status
@@ -178,6 +315,157 @@ func (m *TickArchiveManager) getPendingJobs(ctx context.Context) ([]*TickArchive
 	}
 
 	return jobs, nil
+}
+
+// getPendingJobsForIndex retrieves jobs with 'pending' status for a specific index
+func (m *TickArchiveManager) getPendingJobsForIndex(ctx context.Context, indexName string) ([]*TickArchiveJob, error) {
+	query := `
+		SELECT * FROM tick_archive_jobs
+		WHERE status = 'pending' AND index_name = $1
+		ORDER BY created_at ASC
+		LIMIT 10
+	`
+
+	var jobs []*TickArchiveJob
+	// Use the pool.Query method from TimescaleDB
+	rows, err := m.db.GetPool().Query(ctx, query, indexName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending jobs for index %s: %w", indexName, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var job TickArchiveJob
+		err := rows.Scan(
+			&job.ID,
+			&job.JobID,
+			&job.IndexName,
+			&job.StartTime,
+			&job.EndTime,
+			&job.Status,
+			&job.CreatedAt,
+			&job.StartedAt,
+			&job.CompletedAt,
+			&job.TickCount,
+			&job.FilePath,
+			&job.FileSizeBytes,
+			&job.ErrorMessage,
+			&job.RetryCount,
+			&job.NextRetryAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan job row: %w", err)
+		}
+		jobs = append(jobs, &job)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating job rows: %w", err)
+	}
+
+	return jobs, nil
+}
+
+// getJobForTimeRange checks if a job already exists for the given time range and index
+func (m *TickArchiveManager) getJobForTimeRange(ctx context.Context, indexName string, startTime, endTime time.Time) (*TickArchiveJob, error) {
+	query := `
+		SELECT * FROM tick_archive_jobs
+		WHERE index_name = $1
+		  AND start_time = $2
+		  AND end_time = $3
+		LIMIT 1
+	`
+
+	rows, err := m.db.GetPool().Query(ctx, query, indexName, startTime, endTime)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query job for time range: %w", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		// No job found
+		return nil, nil
+	}
+
+	var job TickArchiveJob
+	err = rows.Scan(
+		&job.ID,
+		&job.JobID,
+		&job.IndexName,
+		&job.StartTime,
+		&job.EndTime,
+		&job.Status,
+		&job.CreatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+		&job.TickCount,
+		&job.FilePath,
+		&job.FileSizeBytes,
+		&job.ErrorMessage,
+		&job.RetryCount,
+		&job.NextRetryAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan job row: %w", err)
+	}
+
+	return &job, nil
+}
+
+// createJob creates a new archive job in the database
+func (m *TickArchiveManager) createJob(ctx context.Context, indexName string, startTime, endTime time.Time) (*TickArchiveJob, error) {
+	// Generate a unique job ID
+	jobID := uuid.New().String()
+
+	// Create the job in the database
+	query := `
+		INSERT INTO tick_archive_jobs (
+			job_id, index_name, start_time, end_time, status, created_at, retry_count
+		) VALUES ($1, $2, $3, $4, 'pending', $5, 0)
+		RETURNING *
+	`
+
+	rows, err := m.db.GetPool().Query(
+		ctx,
+		query,
+		jobID,
+		indexName,
+		startTime,
+		endTime,
+		time.Now(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create job: %w", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		return nil, fmt.Errorf("no rows returned after job creation")
+	}
+
+	var job TickArchiveJob
+	err = rows.Scan(
+		&job.ID,
+		&job.JobID,
+		&job.IndexName,
+		&job.StartTime,
+		&job.EndTime,
+		&job.Status,
+		&job.CreatedAt,
+		&job.StartedAt,
+		&job.CompletedAt,
+		&job.TickCount,
+		&job.FilePath,
+		&job.FileSizeBytes,
+		&job.ErrorMessage,
+		&job.RetryCount,
+		&job.NextRetryAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan job row: %w", err)
+	}
+
+	return &job, nil
 }
 
 // getJobsForRetry retrieves jobs scheduled for retry that are due

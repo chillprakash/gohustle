@@ -341,7 +341,7 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	selectedStrikes := allStrikes[startIndex:endIndex]
 
 	// Log the number of strikes selected for debugging
-	m.log.Info("Selected strikes for option chain", map[string]interface{}{
+	m.log.Debug("Selected strikes for option chain", map[string]interface{}{
 		"requested_count": strikesCount,
 		"selected_count":  len(selectedStrikes),
 		"atm_strike":      atmStrike_tentative,
@@ -353,10 +353,8 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 
 	// Log the actual selected strikes for verification
 	strikeValues := make([]string, 0, len(selectedStrikes))
-	for _, strike := range selectedStrikes {
-		strikeValues = append(strikeValues, strike)
-	}
-	m.log.Info("Selected strike values", map[string]interface{}{
+	strikeValues = append(strikeValues, selectedStrikes...)
+	m.log.Debug("Selected strike values", map[string]interface{}{
 		"strikes": strings.Join(strikeValues, ","),
 	})
 
@@ -518,7 +516,7 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	}
 
 	// Log the final chain size for debugging
-	m.log.Info("Final option chain size", map[string]interface{}{
+	m.log.Debug("Final option chain size", map[string]interface{}{
 		"requested_strikes": strikesCount,
 		"selected_strikes":  len(selectedStrikes),
 		"final_chain_size":  len(chain),

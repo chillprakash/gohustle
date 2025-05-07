@@ -240,10 +240,16 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 		}
 	}
 
+	// Track which positions we've seen from Zerodha
+	seenPositions := make(map[string]bool)
+
 	// Process each position from Zerodha
 	for _, pos := range positions {
 		// Create a unique position ID
 		positionIDStr := fmt.Sprintf("%s_%s_%s", pos.Tradingsymbol, pos.Exchange, pos.Product)
+
+		// Mark this position as seen
+		seenPositions[positionIDStr] = true
 
 		// Check if we already have this position
 		existingPos, exists := existingPositionMap[positionIDStr]
@@ -325,22 +331,41 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 			}
 		}
 
-		// Upsert the position in the database
+		// Store the position in the database
 		if err := timescaleDB.UpsertPosition(ctx, posRecord); err != nil {
-			pm.log.Error("Failed to upsert position in database", map[string]interface{}{
+			pm.log.Error("Failed to upsert position", map[string]interface{}{
 				"error":          err.Error(),
 				"position_id":    positionIDStr,
 				"trading_symbol": pos.Tradingsymbol,
 			})
-			// Continue with other positions even if one fails
+		}
+	}
+
+	// Remove positions that exist in the database but are no longer in Zerodha
+	for key, existingPos := range existingPositionMap {
+		// Skip paper trading positions
+		if existingPos.PaperTrading {
 			continue
-		} else {
-			pm.log.Debug("Successfully updated position in database", map[string]interface{}{
-				"position_id":    positionIDStr,
-				"trading_symbol": pos.Tradingsymbol,
-				"quantity":       pos.Quantity,
-				"database_id":    posRecord.ID,
+		}
+
+		// If we didn't see this position in the Zerodha response, delete it
+		if !seenPositions[key] {
+			pm.log.Info("Removing position no longer in Zerodha", map[string]interface{}{
+				"position_id":    key,
+				"trading_symbol": existingPos.TradingSymbol,
+				"database_id":    existingPos.ID,
+				"quantity":       existingPos.Quantity,
 			})
+
+			// Delete the position from the database
+			if err := timescaleDB.DeletePosition(ctx, existingPos.ID); err != nil {
+				pm.log.Error("Failed to delete stale position", map[string]interface{}{
+					"error":          err.Error(),
+					"position_id":    key,
+					"database_id":    existingPos.ID,
+					"trading_symbol": existingPos.TradingSymbol,
+				})
+			}
 		}
 	}
 

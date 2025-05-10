@@ -11,8 +11,9 @@ import (
 )
 
 type RedisCache struct {
-	ltpDB3        *redis.Client
+	cacheDB1      *redis.Client
 	positionsDB2  *redis.Client
+	ltpDB3        *redis.Client
 	timeSeriesDB4 *redis.Client // New client for time series data
 }
 
@@ -62,6 +63,14 @@ func GetRedisCache() (*RedisCache, error) {
 func initializeRedisCache() (*RedisCache, error) {
 	cfg := config.GetConfig()
 
+	cacheDB1 := redis.NewClient(&redis.Options{
+		Addr:         fmt.Sprintf("%s:%s", cfg.Redis.Host, cfg.Redis.Port),
+		Password:     cfg.Redis.Password,
+		DB:           1,
+		MinIdleConns: cfg.Redis.MinConnections,
+		PoolSize:     cfg.Redis.MaxConnections,
+	})
+
 	// Initialize Redis client for relational DB 1
 	positionsDB2 := redis.NewClient(&redis.Options{
 		Addr:         fmt.Sprintf("%s:%s", cfg.Redis.Host, cfg.Redis.Port),
@@ -108,6 +117,9 @@ func initializeRedisCache() (*RedisCache, error) {
 	go func() {
 		errChan <- timeSeriesDB4.Ping(ctx).Err()
 	}()
+	go func() {
+		errChan <- cacheDB1.Ping(ctx).Err()
+	}()
 
 	// Wait for all pings
 	for i := 0; i < 3; i++ { // Changed to 3
@@ -116,6 +128,7 @@ func initializeRedisCache() (*RedisCache, error) {
 			positionsDB2.Close()
 			ltpDB3.Close()
 			timeSeriesDB4.Close()
+			cacheDB1.Close()
 			return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 		}
 	}
@@ -124,6 +137,7 @@ func initializeRedisCache() (*RedisCache, error) {
 		ltpDB3:        ltpDB3,
 		positionsDB2:  positionsDB2,
 		timeSeriesDB4: timeSeriesDB4,
+		cacheDB1:      cacheDB1,
 	}, nil
 }
 
@@ -139,6 +153,10 @@ func (r *RedisCache) GetPositionsDB2() *redis.Client {
 // GetTimeSeriesDB returns the Redis client for time series database
 func (r *RedisCache) GetTimeSeriesDB() *redis.Client {
 	return r.timeSeriesDB4
+}
+
+func (r *RedisCache) GetCacheDB1() *redis.Client {
+	return r.cacheDB1
 }
 
 // Close closes all Redis connections
@@ -177,6 +195,15 @@ func (r *RedisCache) Close() error {
 		}
 	}()
 
+	go func() {
+		defer wg.Done()
+		if r.cacheDB1 != nil {
+			if err := r.cacheDB1.Close(); err != nil {
+				errChan <- fmt.Errorf("failed to close Cache DB 1: %w", err)
+			}
+		}
+	}()
+
 	// Wait for all closures and collect errors
 	wg.Wait()
 	close(errChan)
@@ -210,6 +237,7 @@ func (c *RedisCache) Ping() error {
 		{"LTP_DB3", c.GetLTPDB3()},
 		{"Positions_DB2", c.GetPositionsDB2()},
 		{"TimeSeries_DB4", c.GetTimeSeriesDB()},
+		{"Cache_DB1", c.GetCacheDB1()},
 	}
 
 	for _, db := range dbs {

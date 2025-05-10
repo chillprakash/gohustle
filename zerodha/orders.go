@@ -66,6 +66,11 @@ func (om *OrderManager) PollOrdersAndUpdateInRedis(ctx context.Context) error {
 		return fmt.Errorf("failed to get orders: %w", err)
 	}
 
+	// If no orders to process, return early
+	if len(orders) == 0 {
+		return nil
+	}
+
 	// Use a wait group to wait for both operations to complete
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -73,12 +78,17 @@ func (om *OrderManager) PollOrdersAndUpdateInRedis(ctx context.Context) error {
 	// Channel to collect errors from goroutines
 	errChan := make(chan error, 2)
 
+	// Create a separate context for Redis operations with a longer timeout
+	redisCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
 	// Store orders in Redis concurrently
 	go func() {
 		defer wg.Done()
-		if err := om.storeOrdersInRedis(ctx, orders); err != nil {
+		if err := om.storeOrdersInRedis(redisCtx, orders); err != nil {
 			om.log.Error("Failed to store orders in Redis", map[string]interface{}{
 				"error": err.Error(),
+				"count": len(orders),
 			})
 			errChan <- err
 		}
@@ -90,6 +100,7 @@ func (om *OrderManager) PollOrdersAndUpdateInRedis(ctx context.Context) error {
 		if err := om.updateOrderStatusesInDB(orders); err != nil {
 			om.log.Error("Failed to update order statuses in DB", map[string]interface{}{
 				"error": err.Error(),
+				"count": len(orders),
 			})
 			// Don't send this error to errChan as we want to continue even if DB update fails
 		}
@@ -120,39 +131,91 @@ func (om *OrderManager) storeOrdersInRedis(ctx context.Context, orders []kitecon
 		return fmt.Errorf("orders Redis DB is nil")
 	}
 
-	// Create a context with timeout for Redis operations
-	redisCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	// Create a context with a more generous timeout for Redis operations
+	// Increased from 500ms to 3s to handle potential Redis latency
+	redisCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	// Store each order in Redis with key format: order_{order_id}_status
-	for _, order := range orders {
-		// Store order status
-		statusKey := fmt.Sprintf("order_%s_status", order.OrderID)
-		if err := ordersDB.Set(redisCtx, statusKey, order.Status, 24*time.Hour).Err(); err != nil {
-			om.log.Error("Failed to store order status in Redis", map[string]interface{}{
-				"order_id": order.OrderID,
-				"status":   order.Status,
-				"error":    err.Error(),
-			})
-			continue
+	// Process orders in batches to avoid overwhelming Redis
+	const batchSize = 10
+	for i := 0; i < len(orders); i += batchSize {
+		end := i + batchSize
+		if end > len(orders) {
+			end = len(orders)
 		}
+		batch := orders[i:end]
 
-		// Store the entire order as JSON for detailed information
-		orderKey := fmt.Sprintf("order_%s", order.OrderID)
-		orderJSON, err := json.Marshal(order)
-		if err != nil {
-			om.log.Error("Failed to marshal order to JSON", map[string]interface{}{
-				"order_id": order.OrderID,
-				"error":    err.Error(),
-			})
-			continue
+		// Process this batch of orders
+		for _, order := range batch {
+			// Store order status with retry logic
+			statusKey := fmt.Sprintf("order_%s_status", order.OrderID)
+			
+			// Try up to 3 times with exponential backoff
+			var redisErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				redisErr = ordersDB.Set(redisCtx, statusKey, order.Status, 24*time.Hour).Err()
+				if redisErr == nil {
+					break // Success
+				}
+				
+				// If context deadline exceeded, don't retry
+				if strings.Contains(redisErr.Error(), "context deadline exceeded") {
+					break
+				}
+				
+				// Exponential backoff before retry
+				backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
+				time.Sleep(backoff)
+			}
+			
+			if redisErr != nil {
+				om.log.Error("Failed to store order status in Redis after retries", map[string]interface{}{
+					"order_id": order.OrderID,
+					"status":   order.Status,
+					"error":    redisErr.Error(),
+				})
+				continue
+			}
+
+			// Store the entire order as JSON for detailed information
+			orderKey := fmt.Sprintf("order_%s", order.OrderID)
+			orderJSON, err := json.Marshal(order)
+			if err != nil {
+				om.log.Error("Failed to marshal order to JSON", map[string]interface{}{
+					"order_id": order.OrderID,
+					"error":    err.Error(),
+				})
+				continue
+			}
+
+			// Try up to 3 times with exponential backoff for storing JSON
+			for attempt := 0; attempt < 3; attempt++ {
+				redisErr = ordersDB.Set(redisCtx, orderKey, orderJSON, 24*time.Hour).Err()
+				if redisErr == nil {
+					break // Success
+				}
+				
+				// If context deadline exceeded, don't retry
+				if strings.Contains(redisErr.Error(), "context deadline exceeded") {
+					break
+				}
+				
+				// Exponential backoff before retry
+				backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
+				time.Sleep(backoff)
+			}
+			
+			if redisErr != nil {
+				om.log.Error("Failed to store order JSON in Redis after retries", map[string]interface{}{
+					"order_id": order.OrderID,
+					"error":    redisErr.Error(),
+				})
+			}
 		}
-
-		if err := ordersDB.Set(redisCtx, orderKey, orderJSON, 24*time.Hour).Err(); err != nil {
-			om.log.Error("Failed to store order in Redis", map[string]interface{}{
-				"order_id": order.OrderID,
-				"error":    err.Error(),
-			})
+		
+		// Add a small delay between batches to avoid overwhelming Redis
+		if i+batchSize < len(orders) {
+			time.Sleep(50 * time.Millisecond)
 		}
 	}
 

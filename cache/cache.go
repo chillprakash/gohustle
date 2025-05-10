@@ -1,9 +1,9 @@
 package cache
 
 import (
+	"gohustle/utils"
 	"sync"
 	"time"
-	"gohustle/utils"
 )
 
 type InMemoryCache struct {

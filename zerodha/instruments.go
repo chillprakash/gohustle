@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 	"google.golang.org/protobuf/proto"
 )
@@ -168,7 +169,7 @@ func (k *KiteConnect) GetInstrumentInfoWithStrike(strikes []string) map[string]s
 // DownloadInstrumentData downloads and saves instrument data
 func (k *KiteConnect) DownloadInstrumentData(ctx context.Context, instrumentNames []core.Index) error {
 	log := logger.L()
-	currentDate := utils.NowIST().Format("02-01-2006")
+	currentDate := utils.GetCurrentKiteDate()
 	fileStore := filestore.NewDiskFileStore()
 
 	// Check if file already exists for today
@@ -201,11 +202,280 @@ func (k *KiteConnect) DownloadInstrumentData(ctx context.Context, instrumentName
 	return k.saveInstrumentsToFile(filteredInstruments)
 }
 
+func (k *KiteConnect) SyncAllInstrumentDataToCache(ctx context.Context) error {
+	log := logger.L()
+	log.Info("Starting comprehensive instrument data sync", nil)
+
+	// 1. Read instrument data from file
+	currentDate := utils.GetCurrentKiteDate()
+	fileStore := filestore.NewDiskFileStore()
+
+	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
+	if err != nil {
+		log.Error("Failed to read instrument data", map[string]interface{}{
+			"error": err.Error(),
+			"date":  currentDate,
+		})
+		return err
+	}
+
+	// 2. Unmarshal the protobuf data
+	instrumentList := &InstrumentList{}
+	if err := proto.Unmarshal(data, instrumentList); err != nil {
+		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// 3. Process expiry dates
+	expiryMap := make(map[string]map[time.Time]bool)
+	allowedIndices := core.GetIndices().GetAllNames()
+
+	// 4. First pass: collect all expiries
+	for _, inst := range instrumentList.Instruments {
+		// Skip if not in allowed indices
+		if !slices.Contains(allowedIndices, inst.Name) {
+			continue
+		}
+
+		// Parse expiry date
+		expiry, err := utils.ParseKiteDate(inst.Expiry)
+		if err != nil {
+			log.Error("Failed to parse expiry date", map[string]interface{}{
+				"error":         err.Error(),
+				"instrument":    inst.Name,
+				"tradingsymbol": inst.Tradingsymbol,
+				"expiry":        inst.Expiry,
+			})
+			continue
+		}
+
+		// Add expiry to map
+		if expiryMap[inst.Name] == nil {
+			expiryMap[inst.Name] = make(map[time.Time]bool)
+		}
+		expiryMap[inst.Name][expiry] = true
+	}
+
+	// Process expiry maps to get the limited set of valid expiries
+	// (This part is now in the section you already modified)
+
+	// Process expiry maps to get the limited set of valid expiries
+	// and prepare for instrument filtering
+	validExpiries := make(map[string]map[time.Time]bool)
+
+	// 6. Convert expiry map to sorted slices and limit to MaxExpiriesToProcess
+	sortedExpiryMap := make(map[string][]time.Time)
+
+	// Create a map to collect unique strikes for each index and expiry
+	// Structure: map[indexName]map[expiry]map[strike]bool
+	indexStrikeMap := make(map[string]map[string]map[string]bool)
+
+	for name, dates := range expiryMap {
+		expiries := make([]time.Time, 0, len(dates))
+		for date := range dates {
+			expiries = append(expiries, date)
+		}
+
+		// Get today's date for filtering
+		today := utils.GetTodayIST()
+
+		// Filter out dates before today
+		futureExpiries := make([]time.Time, 0, len(expiries))
+		for _, date := range expiries {
+			if !date.Before(today) {
+				futureExpiries = append(futureExpiries, date)
+			}
+		}
+		expiries = futureExpiries
+
+		// Sort expiries
+		sort.Slice(expiries, func(i, j int) bool {
+			return expiries[i].Before(expiries[j])
+		})
+
+		// Limit to MaxExpiriesToProcess nearest expiries
+		if len(expiries) > cache.MaxExpiriesToProcess {
+			expiries = expiries[:cache.MaxExpiriesToProcess]
+		}
+
+		// Initialize the valid expiries map for this instrument
+		validExpiries[name] = make(map[time.Time]bool)
+		for _, expiry := range expiries {
+			validExpiries[name][expiry] = true
+		}
+
+		sortedExpiryMap[name] = expiries
+
+		log.Info("Limited expiries for processing", map[string]interface{}{
+			"instrument":         name,
+			"total_expiries":     len(dates),
+			"processed_expiries": len(expiries),
+			"valid_expiries":     validExpiries,
+		})
+	}
+
+	// 5. Filter instruments to only include those with the nearest expiries
+	filteredInstrumentData := make([]cache.InstrumentData, 0)
+	processedCount := 0
+	skippedCount := 0
+
+	for _, inst := range instrumentList.Instruments {
+		// Skip if not in allowed indices
+		if !slices.Contains(allowedIndices, inst.Name) {
+			continue
+		}
+
+		// Parse expiry date to check if it's in our valid list
+		expiry, err := utils.ParseKiteDate(inst.Expiry)
+		if err != nil {
+			log.Error("Failed to parse expiry date for filtering", map[string]interface{}{
+				"error":         err.Error(),
+				"instrument":    inst.Name,
+				"tradingsymbol": inst.Tradingsymbol,
+				"expiry":        inst.Expiry,
+			})
+			continue
+		}
+
+		// Skip if this expiry is not in our valid list for this instrument
+		if validExpiries[inst.Name] == nil || !validExpiries[inst.Name][expiry] {
+			skippedCount++
+			continue
+		}
+
+		// Add filtered instrument data for caching
+		filteredInstrumentData = append(filteredInstrumentData, cache.InstrumentData{
+			Name:           inst.Name,
+			TradingSymbol:  inst.Tradingsymbol,
+			InstrumentType: inst.InstrumentType,
+			StrikePrice:    inst.StrikePrice,
+			Expiry:         inst.Expiry,
+			Exchange:       inst.Exchange,
+			Token:          inst.InstrumentToken,
+		})
+		processedCount++
+
+		// Collect strike prices for each index and expiry
+		// Only collect for CE and PE option types
+		if inst.InstrumentType == "CE" || inst.InstrumentType == "PE" {
+			// Format expiry date for consistent key format
+			expiryStr := expiry.Format("2006-01-02")
+
+			// Initialize maps if needed
+			if indexStrikeMap[inst.Name] == nil {
+				indexStrikeMap[inst.Name] = make(map[string]map[string]bool)
+			}
+			if indexStrikeMap[inst.Name][expiryStr] == nil {
+				indexStrikeMap[inst.Name][expiryStr] = make(map[string]bool)
+			}
+
+			// Add strike price to the map
+			indexStrikeMap[inst.Name][expiryStr][inst.StrikePrice] = true
+		}
+	}
+
+	// Log the filtering results
+	log.Info("Filtered instruments by expiry", map[string]interface{}{
+		"total_instruments": len(instrumentList.Instruments),
+		"processed_count":   processedCount,
+		"skipped_count":     skippedCount,
+	})
+
+	// Note: sortedExpiryMap and validExpiries are already declared above
+
+	for name, dates := range expiryMap {
+		expiries := make([]time.Time, 0, len(dates))
+		for date := range dates {
+			expiries = append(expiries, date)
+		}
+
+		// Get today's date for filtering
+		today := utils.GetTodayIST()
+
+		// Filter out dates before today
+		futureExpiries := make([]time.Time, 0, len(expiries))
+		for _, date := range expiries {
+			if !date.Before(today) {
+				futureExpiries = append(futureExpiries, date)
+			}
+		}
+		expiries = futureExpiries
+
+		// Sort expiries
+		sort.Slice(expiries, func(i, j int) bool {
+			return expiries[i].Before(expiries[j])
+		})
+
+		// Limit to MaxExpiriesToProcess nearest expiries
+		if len(expiries) > cache.MaxExpiriesToProcess {
+			expiries = expiries[:cache.MaxExpiriesToProcess]
+		}
+
+		// Initialize the valid expiries map for this instrument
+		validExpiries[name] = make(map[time.Time]bool)
+		for _, expiry := range expiries {
+			validExpiries[name][expiry] = true
+		}
+
+		sortedExpiryMap[name] = expiries
+
+		log.Info("Limited expiries for processing", map[string]interface{}{
+			"instrument":         name,
+			"total_expiries":     len(dates),
+			"processed_expiries": len(expiries),
+			"valid_expiries":     validExpiries,
+		})
+	}
+
+	// 7. Get CacheMeta singleton instance
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		log.Error("Failed to get cache meta instance", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// 8. Sync expiries to cache
+	if err := cacheMeta.SyncInstrumentExpiries(ctx, sortedExpiryMap, allowedIndices); err != nil {
+		log.Error("Failed to sync instrument expiries", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// 9. Sync instrument metadata to cache
+	if err := cacheMeta.SyncInstrumentMetadata(ctx, filteredInstrumentData); err != nil {
+		log.Error("Failed to sync instrument metadata", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// 10. Store unique strikes for each expiry
+	if err := cacheMeta.StoreExpiryStrikes(ctx, indexStrikeMap); err != nil {
+		log.Error("Failed to store expiry strikes", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Don't return error here, continue with the rest of the function
+		// This is a new feature and we don't want it to block existing functionality
+	} else {
+		log.Info("Successfully stored expiry strikes", map[string]interface{}{
+			"indices_count": len(indexStrikeMap),
+		})
+	}
+
+	log.Info("Successfully synced all instrument data to cache", nil)
+	return nil
+}
+
 func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context) error {
 	log := logger.L()
 
 	// Read expiries from file
-	expiries, err := k.readInstrumentExpiriesFromFile(ctx)
+	expiries, err := k.readInstrumentExpiriesFromFile()
 	if err != nil {
 		log.Error("Failed to read expiries from file", map[string]interface{}{
 			"error": err.Error(),
@@ -214,30 +484,21 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 	}
 
 	cache := cache.GetInMemoryCacheInstance()
-	now := utils.NowIST().Truncate(24 * time.Hour)
-
-	// Get allowed indices from core package
-	allowedIndices := core.GetIndices().GetAllNames()
+	now := utils.GetTodayIST()
 
 	// Store expiries in memory cache
 	for instrument, dates := range expiries {
-		// Filter: only process instruments in our allowed list
-		if !slices.Contains(allowedIndices, instrument) {
-			log.Info("Skipping instrument not in allowed list", map[string]interface{}{
-				"instrument": instrument,
-			})
-			continue
-		}
 
 		// Get today's date truncated to start of day
-		today := utils.NowIST().Truncate(24 * time.Hour)
+		today := utils.GetTodayIST()
 
 		// Filter and convert valid dates to string format
 		dateStrs := make([]string, 0, len(dates))
 		for _, date := range dates {
 			// Only include dates equal to or after today
 			if !date.Before(today) {
-				dateStrs = append(dateStrs, date.Format("2006-01-02"))
+				// Use utils.FormatKiteDate for consistent date formatting
+				dateStrs = append(dateStrs, utils.FormatKiteDate(date))
 			}
 		}
 
@@ -251,13 +512,26 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 
 			// Find and store nearest expiry
 			var nearestExpiry string
+			var nearestDate time.Time
 			for _, dateStr := range dateStrs {
-				date, _ := time.Parse("2006-01-02", dateStr)
+				date, err := utils.ParseKiteDate(dateStr)
+				if err != nil {
+					log.Error("Failed to parse date", map[string]interface{}{
+						"date":  dateStr,
+						"error": err.Error(),
+					})
+					continue
+				}
+
+				// Skip dates in the past
 				if date.Before(now) {
 					continue
 				}
-				if nearestExpiry == "" || date.Before(now) {
+
+				// If this is the first valid date or it's earlier than our current nearest
+				if nearestExpiry == "" || date.Before(nearestDate) {
 					nearestExpiry = dateStr
+					nearestDate = date
 				}
 			}
 
@@ -276,7 +550,7 @@ func (k *KiteConnect) SyncInstrumentExpiriesFromFileToCache(ctx context.Context)
 	instrumentsKey := "instrument:expiries:list"
 	instruments := make([]string, 0)
 	for instrument := range expiries {
-		if slices.Contains(allowedIndices, instrument) {
+		if slices.Contains(core.GetIndices().GetAllNames(), instrument) {
 			instruments = append(instruments, instrument)
 		}
 	}
@@ -312,9 +586,9 @@ func (k *KiteConnect) GetCachedInstruments() ([]string, bool) {
 }
 
 // GetInstrumentExpiries reads the gzipped instrument data and returns expiry dates
-func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[string][]time.Time, error) {
+func (k *KiteConnect) readInstrumentExpiriesFromFile() (map[string][]time.Time, error) {
 	log := logger.L()
-	currentDate := utils.NowIST().Format("02-01-2006")
+	currentDate := utils.GetCurrentKiteDate()
 	fileStore := filestore.NewDiskFileStore()
 
 	// Read the gzipped data
@@ -339,22 +613,15 @@ func (k *KiteConnect) readInstrumentExpiriesFromFile(ctx context.Context) (map[s
 	// Map to store unique expiries for each instrument
 	expiryMap := make(map[string]map[time.Time]bool)
 
-	// Get allowed indices from core package
-	indices := core.GetIndices()
-	allowedIndices := make(map[string]bool)
-	for _, name := range indices.GetAllNames() {
-		allowedIndices[name] = true
-	}
-
 	// Process each instrument
 	for _, inst := range instrumentList.Instruments {
 		// Skip if not in allowed indices
-		if !allowedIndices[inst.Name] {
+		if !slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
 			continue
 		}
 
 		// Parse expiry date
-		expiry, err := time.Parse("02-01-2006", inst.Expiry)
+		expiry, err := utils.ParseKiteDate(inst.Expiry)
 		if err != nil {
 			log.Error("Failed to parse expiry date", map[string]interface{}{
 				"error":         err.Error(),
@@ -394,113 +661,415 @@ func formatExpiryMapForLog(m map[string][]time.Time) map[string][]string {
 	return formatted
 }
 
+// GetUpcomingExpiryTokensForIndices returns instrument tokens for options of upcoming expiries
+// with optional filtering based on open interest
 func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, indices []core.Index) ([]string, error) {
 	log := logger.L()
-	cache := cache.GetInMemoryCacheInstance()
 	tokens := make([]string, 0)
 
+	minOIThreshold := int64(50) // Lowered threshold to be more inclusive
+
+	// Get CacheMeta instance for Redis operations
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		log.Error("Failed to get cache meta instance", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, err
+	}
+
+	// Get expiry map from Redis cache
+	expiryMap, err := cacheMeta.GetExpiryMap(ctx)
+	if err != nil {
+		log.Error("Failed to get expiry map from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, err
+	}
+
 	for _, index := range indices {
-		// Get nearest expiry for this index from cache
-		nearestKey := fmt.Sprintf("instrument:nearest_expiry:%s", index.NameInOptions)
-		value, exists := cache.Get(nearestKey)
-		if !exists {
-			log.Error("No nearest expiry found in cache for index", map[string]interface{}{
+		// Get nearest expiry for this index from Redis cache
+		nearestExpiry, err := cacheMeta.GetNearestExpiry(ctx, index.NameInOptions)
+		if err != nil {
+			log.Error("No nearest expiry found in Redis cache for index", map[string]interface{}{
+				"index": index.NameInOptions,
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		// Get strikes for this index and expiry from Redis
+		// We'll use the expiry data from the expiry map
+		if expiryMap[index.NameInOptions] == nil || len(expiryMap[index.NameInOptions]) == 0 {
+			log.Error("No expiries found in Redis for index", map[string]interface{}{
 				"index": index.NameInOptions,
 			})
 			continue
 		}
 
-		nearestExpiry, ok := value.(string)
-		if !ok {
-			log.Error("Invalid data type in cache for nearest expiry", map[string]interface{}{
-				"index": index.NameInOptions,
-			})
-			continue
+		// Get all instruments for this index with this expiry
+		// We'll query Redis for all instruments with this index name and expiry
+		strikes := make([]string, 0)
+
+		// Get all CE and PE instruments for this index and expiry
+		optionTypes := []string{"CE", "PE"}
+
+		// First, get a list of available strikes from Redis
+		// We'll use the instrument:metadata keys to find all instruments with this index and expiry
+		// and extract the strike prices
+
+		// Use a set to avoid duplicate strikes
+		strikeSet := make(map[string]bool)
+
+		// For each option type (CE/PE), get instruments and extract strikes
+		for _, optType := range optionTypes {
+			// Use the lookup pattern: instrument:lookup:symbol:{index}:{strike}:{type}:{expiry}
+			// We'll use a pattern match to get all matching keys
+			pattern := fmt.Sprintf("instrument:lookup:symbol:%s:*:%s:%s",
+				index.NameInOptions, optType, nearestExpiry)
+
+			// Get Redis client from cache
+			redisCache, err := cache.GetRedisCache()
+			if err != nil {
+				log.Error("Failed to get Redis cache", map[string]interface{}{
+					"error": err.Error(),
+				})
+				continue
+			}
+
+			// Get all keys matching this pattern
+			keys, err := redisCache.GetCacheDB1().Keys(ctx, pattern).Result()
+			if err != nil {
+				log.Error("Failed to get keys for pattern", map[string]interface{}{
+					"pattern": pattern,
+					"error":   err.Error(),
+				})
+				continue
+			}
+
+			// Extract strike from each key
+			// Format: instrument:lookup:symbol:{index}:{strike}:{type}:{expiry}
+			for _, key := range keys {
+				parts := strings.Split(key, ":")
+				if len(parts) >= 5 {
+					strike := parts[4]
+					strikeSet[strike] = true
+				}
+			}
 		}
 
-		// Get strikes for this index and expiry
-		strikesKey := fmt.Sprintf("strikes:%s_%s", index.NameInOptions, nearestExpiry)
-		strikesValue, exists := cache.Get(strikesKey)
-		if !exists {
-			log.Error("No strikes found in cache for index and expiry", map[string]interface{}{
-				"index":  index.NameInOptions,
-				"expiry": nearestExpiry,
-			})
-			continue
+		// Convert strike set to slice
+		for strike := range strikeSet {
+			strikes = append(strikes, strike)
 		}
 
-		strikes, ok := strikesValue.([]string)
-		if !ok {
-			log.Error("Invalid data type in cache for strikes", map[string]interface{}{
-				"index":  index.NameInOptions,
-				"expiry": nearestExpiry,
-			})
-			continue
-		}
+		// Sort strikes for consistent ordering
+		sort.Strings(strikes)
 
-		log.Info("Found strikes for index", map[string]interface{}{
+		log.Info("Found strikes for index from Redis", map[string]interface{}{
 			"index":         index.NameInOptions,
 			"expiry":        nearestExpiry,
 			"strikes_count": len(strikes),
 		})
 
-		// For each strike, get CE/PE tokens
+		// Collect all tokens first to batch OI lookups
+		tokenMap := make(map[string]string)    // token -> strike+type (for logging)
+		strikeMap := make(map[string][]string) // strike -> [peToken, ceToken]
+
+		// For each strike, get CE/PE tokens from Redis
 		for _, strike := range strikes {
-			detailsKey := fmt.Sprintf("%s_%s_%s", index.NameInOptions, nearestExpiry, strike)
-			detailsValue, exists := cache.Get(detailsKey)
-			if !exists {
-				log.Debug("No details found for strike", map[string]interface{}{
-					"strike": strike,
-					"key":    detailsKey,
-				})
-				continue
-			}
+			// For each option type, get the token
+			for _, optType := range optionTypes {
+				// Get the trading symbol first
+				symbolKey := fmt.Sprintf("instrument:lookup:symbol:%s:%s:%s:%s",
+					index.NameInOptions, strike, optType, nearestExpiry)
 
-			details, ok := detailsValue.(string)
-			if !ok {
-				log.Error("Invalid data type for strike details", map[string]interface{}{
-					"strike": strike,
-					"key":    detailsKey,
-				})
-				continue
-			}
+				// Get Redis client from cache
+				redisCache, err := cache.GetRedisCache()
+				if err != nil {
+					log.Error("Failed to get Redis cache", map[string]interface{}{
+						"error": err.Error(),
+					})
+					continue
+				}
 
-			// Format: p_19126786|p_BANKNIFTY25APR48300PE||c_19126530|c_BANKNIFTY25APR48300CE
-			// Split by || to separate PE and CE
-			parts := strings.Split(details, "||")
-			if len(parts) != 2 {
-				log.Error("Invalid details format", map[string]interface{}{
-					"details": details,
-					"strike":  strike,
-				})
-				continue
-			}
+				tradingSymbol, err := redisCache.GetCacheDB1().Get(ctx, symbolKey).Result()
+				if err != nil {
+					if err != redis.Nil {
+						log.Debug("No trading symbol found for strike and type", map[string]interface{}{
+							"strike":      strike,
+							"option_type": optType,
+							"key":         symbolKey,
+							"error":       err.Error(),
+						})
+					}
+					continue
+				}
 
-			// Extract PE token
-			peTokenParts := strings.Split(parts[0], "|")
-			if len(peTokenParts) == 2 {
-				peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
-				tokens = append(tokens, peToken)
-			}
+				// Now get the token for this trading symbol
+				tokenKey := fmt.Sprintf("instrument:mapping:symbol:%s", tradingSymbol)
+				// Reuse the Redis client we already got above
+				token, err := redisCache.GetCacheDB1().Get(ctx, tokenKey).Result()
+				if err != nil {
+					if err != redis.Nil {
+						log.Debug("No token found for trading symbol", map[string]interface{}{
+							"trading_symbol": tradingSymbol,
+							"key":            tokenKey,
+							"error":          err.Error(),
+						})
+					}
+					continue
+				}
 
-			// Extract CE token
-			ceTokenParts := strings.Split(parts[1], "|")
-			if len(ceTokenParts) == 2 {
-				ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
-				tokens = append(tokens, ceToken)
+				// Add token to maps
+				tokenMap[token] = strike + optType
+
+				// Add to strike map
+				if strikeMap[strike] == nil {
+					strikeMap[strike] = make([]string, 0, 2)
+				}
+				strikeMap[strike] = append(strikeMap[strike], token)
 			}
 		}
+
+		// Note: We've already collected tokens in the loop above using Redis
+
+		tradingSymbols := []string{}
+		tokenToSymbolMap := make(map[string]string) // token -> trading symbol
+
+		// Log the total number of strikes found
+		log.Info("Strikes found for GetQuote", map[string]interface{}{
+			"strikes_count": len(strikeMap),
+			"index":         index.NameInOptions,
+			"expiry":        nearestExpiry,
+		})
+
+		// Get trading symbols directly from Redis cache
+		// Using strike variable to access tokens for each strike
+		for _, tokens := range strikeMap {
+			for _, token := range tokens {
+				// Get the trading symbol for this token
+				tokenKey := fmt.Sprintf("instrument:mapping:token:%s", token)
+
+				// Get Redis client from cache
+				redisCache, err := cache.GetRedisCache()
+				if err != nil {
+					log.Error("Failed to get Redis cache", map[string]interface{}{
+						"error": err.Error(),
+					})
+					continue
+				}
+
+				tradingSymbol, err := redisCache.GetCacheDB1().Get(ctx, tokenKey).Result()
+				if err != nil {
+					if err != redis.Nil {
+						log.Debug("No trading symbol found for token", map[string]interface{}{
+							"token": token,
+							"key":   tokenKey,
+							"error": err.Error(),
+						})
+					}
+					continue
+				}
+
+				// Get the exchange for this instrument
+				var exchangePrefix string
+
+				// Get instrument type (CE/PE) from Redis
+				instrumentTypeKey := fmt.Sprintf("instrument:metadata:%s:type", token)
+				// Reuse the Redis client we already got above
+				// We don't need to store the instrument type, just check if it exists
+				_, err = redisCache.GetCacheDB1().Get(ctx, instrumentTypeKey).Result()
+				if err != nil && err != redis.Nil {
+					log.Debug("No instrument type found for token", map[string]interface{}{
+						"token": token,
+						"key":   instrumentTypeKey,
+						"error": err.Error(),
+					})
+				}
+
+				// Get the exchange based on the index name
+				if strings.Contains(strings.ToUpper(index.NameInOptions), "NIFTY") {
+					exchangePrefix = "NFO:"
+				} else if strings.Contains(strings.ToUpper(index.NameInOptions), "SENSEX") {
+					exchangePrefix = "BFO:"
+				} else {
+					exchangePrefix = "NSE:"
+				}
+
+				// If the trading symbol already has an exchange prefix, use it as is
+				if !strings.Contains(tradingSymbol, ":") {
+					tradingSymbol = exchangePrefix + tradingSymbol
+				}
+
+				tradingSymbols = append(tradingSymbols, tradingSymbol)
+				tokenToSymbolMap[token] = tradingSymbol
+			}
+		}
+
+		// Log the total number of trading symbols collected
+		log.Info("Trading symbols collected for GetQuote", map[string]interface{}{
+			"total_symbols": len(tradingSymbols),
+			"index":         index.NameInOptions,
+			"expiry":        nearestExpiry,
+		})
+
+		// Check if we have any trading symbols to process
+		if len(tradingSymbols) == 0 {
+			log.Error("No trading symbols collected for GetQuote", map[string]interface{}{
+				"index":  index.NameInOptions,
+				"expiry": nearestExpiry,
+			})
+			// Skip OI filtering if no trading symbols
+			continue // This continue is inside the for loop iterating over indices
+		}
+
+		// Process in batches of 500 symbols (Kite API limit)
+		const batchSize = 500
+		strikeOIMap := make(map[string]bool) // strike -> has sufficient OI
+
+		for i := 0; i < len(tradingSymbols); i += batchSize {
+			end := i + batchSize
+			if end > len(tradingSymbols) {
+				end = len(tradingSymbols)
+			}
+
+			batchSymbols := tradingSymbols[i:end]
+
+			// Get the market data manager
+			marketDataManager := GetMarketDataManager()
+
+			// The GetQuoteForSymbols method will handle the symbol transformation internally
+			quotes, err := marketDataManager.GetQuoteForSymbols(ctx, batchSymbols)
+			if err != nil {
+				log.Error("Failed to get quotes using GetQuoteForSymbols", map[string]interface{}{
+					"error":         err.Error(),
+					"error_type":    fmt.Sprintf("%T", err),
+					"batch":         i/batchSize + 1,
+					"symbols_count": len(batchSymbols),
+				})
+				continue
+			}
+
+			// Print additional statistics about the quotes if needed
+			if i == 0 {
+				// Count quotes with valid OI
+				validOICount := 0
+				for _, quoteData := range quotes {
+					// Access the OI field - the field name is case-sensitive
+					if quoteData.OI > 0 {
+						validOICount++
+					}
+				}
+
+				// Log additional statistics beyond what GetQuoteForSymbols already logs
+				log.Info("Additional quote statistics", map[string]interface{}{
+					"quotes_with_oi": validOICount,
+					"oi_threshold":   minOIThreshold,
+					"index":          index.NameInOptions,
+					"expiry":         nearestExpiry,
+				})
+
+			}
+
+			// Process quotes and check OI
+			// Track OI values for debugging
+			for symbol, quoteData := range quotes {
+				// Find token for this symbol
+				var matchedToken string
+				for token, mappedSymbol := range tokenToSymbolMap {
+					if mappedSymbol == symbol {
+						matchedToken = token
+						break
+					}
+				}
+
+				if matchedToken == "" {
+					continue
+				}
+
+				// Check if OI meets threshold
+				strikeInfo := tokenMap[matchedToken]
+				strike := strings.TrimSuffix(strings.TrimSuffix(strikeInfo, "CE"), "PE")
+
+				oiValues := make(map[string]int64)
+				// Track OI values for debugging
+				oiValues[strike] = int64(quoteData.OI)
+
+				// Use a very low threshold temporarily if all OI values are low
+				// This ensures we get some data even when OI is generally low
+				if int64(quoteData.OI) >= minOIThreshold {
+					// Mark this strike as having sufficient OI
+					strikeOIMap[strike] = true
+				} else {
+					log.Error("OI does not meet threshold", map[string]interface{}{
+						"strike":       strike,
+						"oi":           quoteData.OI,
+						"oi_threshold": minOIThreshold,
+					})
+				}
+			}
+
+			// Add a small delay between batches to avoid rate limiting
+			if end < len(tradingSymbols) {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+
+		// Count how many strikes have sufficient OI
+		passingStrikes := 0
+		for strike := range strikeOIMap {
+			if strikeOIMap[strike] {
+				passingStrikes++
+			}
+		}
+
+		// Log the number of strikes with sufficient OI and OI statistics
+		log.Info("Strikes with sufficient OI", map[string]interface{}{
+			"index":           index.NameInOptions,
+			"expiry":          nearestExpiry,
+			"passing_strikes": passingStrikes,
+			"total_strikes":   len(strikeMap),
+			"oi_threshold":    minOIThreshold,
+		})
+
+		// Include only strikes with sufficient OI, no fallbacks
+		for strike, strikeTokens := range strikeMap {
+			if strikeOIMap[strike] {
+				tokens = append(tokens, strikeTokens...)
+			}
+		}
+
+		log.Info("Filtered strikes based on OI threshold from Kite API", map[string]interface{}{
+			"index":            index.NameInOptions,
+			"expiry":           nearestExpiry,
+			"total_strikes":    len(strikeMap),
+			"included_strikes": passingStrikes,
+			"oi_threshold":     minOIThreshold,
+		})
 	}
 
-	if len(tokens) == 0 {
-		return nil, fmt.Errorf("no tokens found for upcoming expiries")
-	}
+	// Log basic info about retrieved tokens
+	if len(tokens) > 0 {
+		// Determine sample size (up to 5 tokens)
+		sampleSize := 5
+		if len(tokens) < sampleSize {
+			sampleSize = len(tokens)
+		}
 
-	log.Info("Retrieved tokens for upcoming expiries", map[string]interface{}{
-		"indices_count": len(indices),
-		"tokens_count":  len(tokens),
-		"sample_tokens": tokens[:min(5, len(tokens))],
-	})
+		// Log with sample tokens
+		log.Info("Retrieved tokens for upcoming expiries", map[string]interface{}{
+			"indices_count": len(indices),
+			"tokens_count":  len(tokens),
+			"sample_tokens": tokens[:sampleSize],
+		})
+	} else {
+		// Log without sample tokens
+		log.Info("Retrieved tokens for upcoming expiries", map[string]interface{}{
+			"indices_count": len(indices),
+			"tokens_count":  0,
+		})
+	}
 
 	return tokens, nil
 }
@@ -509,7 +1078,7 @@ func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context
 	log := logger.L()
 	log.Info("Initializing lookup maps for File Store", nil)
 
-	currentDate := utils.NowIST().Format("02-01-2006")
+	currentDate := utils.GetCurrentKiteDate()
 	fileStore := filestore.NewDiskFileStore()
 	cache := cache.GetInMemoryCacheInstance()
 
@@ -533,16 +1102,9 @@ func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context
 			continue
 		}
 
-		// Convert cache date format (2025-04-24) to instrument format (24-04-2025)
-		t, err := time.Parse("2006-01-02", nearestExpiry)
-		if err != nil {
-			log.Error("Failed to parse nearest expiry date", map[string]interface{}{
-				"error":  err.Error(),
-				"expiry": nearestExpiry,
-			})
-			continue
-		}
-		indexExpiries[index.NameInOptions] = t.Format("02-01-2006")
+		// No need to convert the date format since we're now using utils.KiteDateFormat consistently
+		// The date is already in DD-MM-YYYY format (15-05-2025)
+		indexExpiries[index.NameInOptions] = nearestExpiry
 	}
 
 	if len(indexExpiries) == 0 {
@@ -607,7 +1169,7 @@ func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context
 		strikeStr := fmt.Sprintf("%d", int(strike))
 
 		// Create expiry_strike key using YYYY-MM-DD format for consistency
-		expiryDate, _ := time.Parse("02-01-2006", inst.Expiry)
+		expiryDate, _ := utils.ParseKiteDate(inst.Expiry)
 		expiryKey := fmt.Sprintf("%s_%s_%s", inst.Name, expiryDate.Format("2006-01-02"), strikeStr)
 
 		if strikeDetails[expiryKey] == nil {
@@ -684,6 +1246,7 @@ func (k *KiteConnect) CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx context
 	return processedStrikes, nil
 }
 
+// min returns the smaller of two integers
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -705,7 +1268,7 @@ func (k *KiteConnect) GetInstrumentDetailsByToken(ctx context.Context, instrumen
 	}
 
 	// If not in cache, try to load from instrument data file
-	currentDate := utils.NowIST().Format("02-01-2006")
+	currentDate := utils.GetCurrentKiteDate()
 	fileStore := filestore.NewDiskFileStore()
 
 	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
@@ -741,7 +1304,7 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 	log := logger.L()
 	log.Info("Initializing lookup maps for File Store", nil)
 
-	currentDate := utils.NowIST().Format("02-01-2006")
+	currentDate := utils.GetCurrentKiteDate()
 	fileStore := filestore.NewDiskFileStore()
 	cache := cache.GetInMemoryCacheInstance()
 
@@ -804,6 +1367,45 @@ func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx
 
 			// Cache expiry date
 			if inst.Expiry != "" {
+				// Cache trading symbol based on index, strike, and expiry
+				if inst.InstrumentType == "CE" || inst.InstrumentType == "PE" {
+					// Create a key for looking up trading symbol: index:strike:option_type:expiry
+					tradingSymbolKey := fmt.Sprintf("trading_symbol:%s:%s:%s:%s",
+						inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+
+					// Store the trading symbol with the correct exchange format
+					// For Zerodha Kite API, the format is typically "EXCHANGE:SYMBOL"
+					// Store both the raw trading symbol and the exchange separately
+					exchangeKey := fmt.Sprintf("exchange:%s:%s:%s:%s",
+						inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+
+					// Store the exchange (e.g., "NSE", "BSE")
+					cache.Set(exchangeKey, inst.Exchange, 7*24*time.Hour)
+
+					// Store the raw trading symbol without exchange prefix
+					formattedTradingSymbol := inst.Tradingsymbol
+
+					// Also store the complete exchange:symbol format for direct API use
+					fullSymbolKey := fmt.Sprintf("full_symbol:%s:%s:%s:%s",
+						inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+					fullSymbol := fmt.Sprintf("%s:%s", inst.Exchange, inst.Tradingsymbol)
+					cache.Set(fullSymbolKey, fullSymbol, 7*24*time.Hour)
+
+					// Cache the trading symbol
+					cache.Set(tradingSymbolKey, formattedTradingSymbol, 7*24*time.Hour)
+
+					log.Debug("Cached trading symbol", map[string]interface{}{
+						"key":            tradingSymbolKey,
+						"trading_symbol": formattedTradingSymbol,
+						"full_symbol":    fullSymbol,
+						"exchange":       inst.Exchange,
+						"index":          inst.Name,
+						"strike":         strikeStr,
+						"option_type":    inst.InstrumentType,
+						"expiry":         inst.Expiry,
+					})
+				}
+
 				cache.Set(expiry_key, inst.Expiry, 7*24*time.Hour)
 			}
 			cache.Set(next_move_lookup_key, inst.InstrumentToken, 7*24*time.Hour)
@@ -940,6 +1542,17 @@ func convertExpiryMapToSortedSlices(expiryMap map[string]map[time.Time]bool) map
 		})
 
 		result[name] = expiries
+
+		// Format expiries for logging
+		formattedExpiries := make([]string, 0, len(expiries))
+		for _, expiry := range expiries {
+			formattedExpiries = append(formattedExpiries, utils.FormatKiteDate(expiry))
+		}
+
+		logger.L().Info("Converted expiry map to sorted slices", map[string]interface{}{
+			"instrument": name,
+			"expiries":   formattedExpiries,
+		})
 	}
 
 	return result
@@ -960,7 +1573,7 @@ func filterInstruments(allInstruments []kiteconnect.Instrument, targetNames []co
 
 func (k *KiteConnect) saveInstrumentsToFile(instruments []kiteconnect.Instrument) error {
 	log := logger.L()
-	currentDate := utils.NowIST().Format("02-01-2006")
+	currentDate := utils.GetCurrentKiteDate()
 	fileStore := filestore.NewDiskFileStore()
 
 	// Convert to proto message
@@ -1012,7 +1625,7 @@ func convertToProtoInstruments(instruments []kiteconnect.Instrument) *Instrument
 // GetInstrumentExpirySymbolMap reads instrument data and organizes trading symbols
 func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*InstrumentExpiryMap, error) {
 	log := logger.L()
-	currentDate := utils.NowIST().Format("02-01-2006")
+	currentDate := utils.GetCurrentKiteDate()
 	fileStore := filestore.NewDiskFileStore()
 
 	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
@@ -1044,7 +1657,7 @@ func (k *KiteConnect) GetInstrumentExpirySymbolMap(ctx context.Context) (*Instru
 		}
 
 		// Parse expiry date
-		expiry, err := time.Parse("02-01-2006", inst.Expiry)
+		expiry, err := utils.ParseKiteDate(inst.Expiry)
 		if err != nil {
 			log.Error("Failed to parse expiry date", map[string]interface{}{
 				"error":         err.Error(),
@@ -1170,7 +1783,7 @@ func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, indices []str
 	// _, _, _ = k.CreateLookupMapWithExpiryVSTokenMap(ctx)
 
 	// Find upcoming expiry
-	now := utils.NowIST().Truncate(24 * time.Hour)
+	now := utils.GetTodayIST()
 	upcomingExpiry := make(map[string]time.Time)
 
 	for _, index := range indices {
@@ -1234,11 +1847,11 @@ func (k *KiteConnect) GetIndexTokens() map[string]string {
 	return tokens
 }
 
-func (k *KiteConnect) GetIndexVsExpiryMap(ctx context.Context) (map[string][]time.Time, error) {
+func (k *KiteConnect) GetIndexVsExpiryMap() (map[string][]time.Time, error) {
 	log := logger.L()
 
 	// Read expiries from file
-	expiries, err := k.readInstrumentExpiriesFromFile(ctx)
+	expiries, err := k.readInstrumentExpiriesFromFile()
 	if err != nil {
 		log.Error("Failed to read expiries from file", map[string]interface{}{
 			"error": err.Error(),
@@ -1255,7 +1868,7 @@ func (k *KiteConnect) GetIndexVsExpiryMap(ctx context.Context) (map[string][]tim
 		for _, targetIndex := range indices {
 			if index == targetIndex {
 				// Filter only future expiries
-				now := utils.NowIST().Truncate(24 * time.Hour)
+				now := utils.GetTodayIST()
 				futureExpiries := make([]time.Time, 0)
 
 				for _, date := range dates {

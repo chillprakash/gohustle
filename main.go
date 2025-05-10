@@ -52,13 +52,17 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to download instrument data: %w", err)
 	}
 
-	// Sync instrument expiries from file to cache
-	kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
+	// // Sync instrument expiries from file to cache
+	// kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
 
-	// Create lookup map with expiry vs token map
-	kiteConnect.CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx)
+	// // Create lookup map with expiry vs token map
+	// kiteConnect.CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx)
 
-	kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetAllIndices())
+	// kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetAllIndices())
+
+	if err := kiteConnect.SyncAllInstrumentDataToCache(ctx); err != nil {
+		return fmt.Errorf("failed to sync instrument data to cache: %w", err)
+	}
 
 	// Get upcoming expiry tokens for configured indices
 	tokens, err := kiteConnect.GetUpcomingExpiryTokensForIndices(ctx, indices.GetAllIndices())

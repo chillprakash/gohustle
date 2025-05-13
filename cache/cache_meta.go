@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"gohustle/logger"
 	"gohustle/utils"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,12 +52,16 @@ const (
 
 	// Maximum number of expiries to process per index
 	MaxExpiriesToProcess = 1
+	LTPSuffix            = "_ltp"
+	OISuffix             = "_oi"
+	VolumeSuffix         = "_volume"
 )
 
 // CacheMeta provides methods for caching instrument data in Redis
 type CacheMeta struct {
 	client *redis.Client
 	log    *logger.Logger
+	ltpDB  *redis.Client
 }
 
 // Singleton instance of CacheMeta
@@ -78,6 +83,7 @@ func GetCacheMetaInstance() (*CacheMeta, error) {
 		cacheMetaInstance = &CacheMeta{
 			client: redisCache.GetCacheDB1(),
 			log:    logger.L(),
+			ltpDB:  redisCache.GetLTPDB3(),
 		}
 	})
 
@@ -111,6 +117,98 @@ func (c *CacheMeta) GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx context.
 	return result, nil
 }
 
+func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []string) ([]LTPData, error) {
+	ltpDB := c.ltpDB
+	ltpdataList := make([]LTPData, 0, len(tokens))
+
+	// Create a map to store command results
+	cmdMap := make(map[string]*redis.StringCmd)
+
+	// Create pipeline
+	ltpPipe := ltpDB.Pipeline()
+
+	// Queue all the commands
+	for _, token := range tokens {
+		// Store commands in map for later retrieval
+		cmdMap[fmt.Sprintf("%s_ltp", token)] = ltpPipe.Get(ctx, fmt.Sprintf("%s_ltp", token))
+		cmdMap[fmt.Sprintf("%s_oi", token)] = ltpPipe.Get(ctx, fmt.Sprintf("%s_oi", token))
+		cmdMap[fmt.Sprintf("%s_volume", token)] = ltpPipe.Get(ctx, fmt.Sprintf("%s_volume", token))
+	}
+
+	// Execute pipeline
+	_, err := ltpPipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		c.log.Error("Failed to execute LTP pipeline", map[string]interface{}{
+			"error":  err.Error(),
+			"tokens": tokens,
+		})
+		// Continue execution even if there's an error, as some commands might have succeeded
+	}
+
+	// Process results
+	for _, token := range tokens {
+		data := &LTPData{
+			instrumentToken: token,
+		}
+
+		// Get LTP
+		ltpCmd := cmdMap[fmt.Sprintf("%s_ltp", token)]
+		if ltpCmd != nil {
+			ltp, err := ltpCmd.Float64()
+			if err == nil {
+				data.LTP = ltp
+			} else if err != redis.Nil {
+				c.log.Debug("Failed to get LTP", map[string]interface{}{
+					"token": token,
+					"error": err.Error(),
+				})
+			}
+		}
+
+		// Get OI
+		oiCmd := cmdMap[fmt.Sprintf("%s_oi", token)]
+		if oiCmd != nil {
+			oi, err := oiCmd.Float64()
+			if err == nil {
+				data.OI = oi
+			} else if err != redis.Nil {
+				c.log.Debug("Failed to get OI", map[string]interface{}{
+					"token": token,
+					"error": err.Error(),
+				})
+			}
+		}
+
+		// Get Volume
+		volumeCmd := cmdMap[fmt.Sprintf("%s_volume", token)]
+		if volumeCmd != nil {
+			volume, err := volumeCmd.Float64()
+			if err == nil {
+				data.Volume = volume
+			} else if err != redis.Nil {
+				c.log.Debug("Failed to get Volume", map[string]interface{}{
+					"token": token,
+					"error": err.Error(),
+				})
+			}
+		}
+
+		ltpdataList = append(ltpdataList, *data)
+	}
+	// Only log a sample of the data to avoid huge logs
+	sampleSize := 3
+	if len(ltpdataList) < sampleSize {
+		sampleSize = len(ltpdataList)
+	}
+
+	c.log.Info("Successfully retrieved LTP for instrument tokens", map[string]interface{}{
+		"token_count": len(tokens),
+		"data_count":  len(ltpdataList),
+		"data_sample": ltpdataList[:sampleSize],
+	})
+	return ltpdataList, nil
+}
+
 func (c *CacheMeta) StoreFilteredInstrumentTokens(ctx context.Context, indexName string, expiry string, tokens []string) {
 	key := fmt.Sprintf("%s:%s_%s", InstrumentExpiryStrikesWithExchangeAndInstrumentSymbolFiltered, indexName, expiry)
 
@@ -136,7 +234,40 @@ func (c *CacheMeta) StoreFilteredInstrumentTokens(ctx context.Context, indexName
 		"expiry":      expiry,
 		"token_count": len(tokens),
 	})
+}
 
+// StoreInstrumentOIData stores OI data for instruments in Redis
+func (c *CacheMeta) StoreInstrumentOIData(ctx context.Context, tokenOIMap map[string]float64) error {
+	if len(tokenOIMap) == 0 {
+		return nil
+	}
+
+	// Use pipeline for better performance
+	pipe := c.ltpDB.Pipeline()
+
+	// Store OI data for each token
+	for token, oi := range tokenOIMap {
+		// Create key with OI suffix
+		key := fmt.Sprintf("%s%s", token, OISuffix)
+
+		// Store OI value in Redis
+		pipe.Set(ctx, key, oi, DefaultCacheExpiry)
+	}
+
+	// Execute pipeline
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		c.log.Error("Failed to store instrument OI data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	c.log.Info("Successfully stored OI data in Redis", map[string]interface{}{
+		"count": len(tokenOIMap),
+	})
+
+	return nil
 }
 
 // StoreInstrumentExpiries stores a list of expiry dates for an instrument
@@ -446,13 +577,21 @@ func (c *CacheMeta) GetExpiryMap(ctx context.Context) (map[string][]time.Time, e
 
 // InstrumentData represents the essential data for an instrument
 type InstrumentData struct {
-	Name           string
-	TradingSymbol  string
-	InstrumentType string
-	StrikePrice    string
-	Expiry         string
-	Exchange       string
-	Token          string
+	Name            string
+	TradingSymbol   string
+	InstrumentType  string
+	StrikePrice     string
+	Expiry          string
+	Exchange        string
+	Token           string
+	InstrumentToken string
+}
+
+type LTPData struct {
+	instrumentToken string
+	LTP             float64
+	OI              float64
+	Volume          float64
 }
 
 // GetInstrumentExpiryStrikesWithExchangeAndInstrumentSymbol retrieves instrument data for a specific index and expiry
@@ -607,6 +746,134 @@ func (c *CacheMeta) GetExpiryStrikes(ctx context.Context, indexName, expiry stri
 	return strikes, nil
 }
 
+type OptionChainStrikeStruct struct {
+	Strike   int64
+	CEToken  string
+	PEToken  string
+	CELTP    float64
+	PELTP    float64
+	CEOI     uint32
+	PEOI     uint32
+	CEVolume uint32
+	PEVolume uint32
+}
+
+func (c *CacheMeta) GetOptionChainStrikeStructList(ctx context.Context, indexName, expiry string, strikes []string) (map[int64]OptionChainStrikeStruct, error) {
+	strikesWithExchangeSymbolAndJsonStringArray, err := c.GetInstrumentExpiryStrikesWithExchangeAndInstrumentSymbol(ctx, indexName, expiry)
+	if err != nil {
+		return nil, err
+	}
+	instrumentTokenToLtpMap := make(map[string]float64)
+	instumentTokenList := make([]string, 0)
+	mapToReturn := make(map[int64]OptionChainStrikeStruct)
+
+	var optionChainStrikeStructList []OptionChainStrikeStruct
+	for _, strikeWithExchangeSymbolAndJsonString := range strikesWithExchangeSymbolAndJsonStringArray {
+		c.log.Debug("Processing strike data string", map[string]interface{}{
+			"data_string": strikeWithExchangeSymbolAndJsonString,
+		})
+
+		// Parse the delimited string format: strike:65600||ce:SENSEX2551365600CE||pe:SENSEX2551365600PE||exchange:BFO||ce_token:283567621||pe_token:283215365
+		parts := strings.Split(strikeWithExchangeSymbolAndJsonString, "||")
+		if len(parts) < 6 {
+			c.log.Error("Invalid format for strike data string", map[string]interface{}{
+				"data_string": strikeWithExchangeSymbolAndJsonString,
+				"parts_count": len(parts),
+				"index":       indexName,
+				"expiry":      expiry,
+			})
+			return nil, fmt.Errorf("invalid format for strike data string: %s", strikeWithExchangeSymbolAndJsonString)
+		}
+		// Extract strike, CE token, and PE token
+		strikeStr := strings.TrimPrefix(parts[0], "strike:")
+		_ = strings.TrimPrefix(parts[1], "ce:")
+		_ = strings.TrimPrefix(parts[2], "pe:")
+		_ = strings.TrimPrefix(parts[3], "exchange:")
+		ceToken := strings.TrimPrefix(parts[4], "ce_token:")
+		peToken := strings.TrimPrefix(parts[5], "pe_token:")
+
+		// Convert strike to int64
+		strike, err := strconv.ParseInt(strikeStr, 10, 64)
+		if err != nil {
+			c.log.Error("Failed to parse strike to int64", map[string]interface{}{
+				"error":      err.Error(),
+				"strike_str": strikeStr,
+				"index":      indexName,
+				"expiry":     expiry,
+			})
+			return nil, fmt.Errorf("failed to parse strike to int64: %w", err)
+		}
+
+		// Create OptionChainStrikeStruct
+		optionChainStrikeStruct := OptionChainStrikeStruct{
+			Strike:  strike,
+			CEToken: ceToken,
+			PEToken: peToken,
+		}
+
+		if slices.Contains(strikes, strikeStr) {
+			optionChainStrikeStructList = append(optionChainStrikeStructList, optionChainStrikeStruct)
+		}
+		instumentTokenList = append(instumentTokenList, ceToken)
+		instumentTokenList = append(instumentTokenList, peToken)
+	}
+
+	ltpDataList, err := c.GetLTPforInstrumentTokensList(ctx, instumentTokenList)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ltpData := range ltpDataList {
+		instrumentTokenToLtpMap[ltpData.instrumentToken] = ltpData.LTP
+	}
+
+	// Create a map to store OI and volume data
+	instrumentTokenToOIMap := make(map[string]uint32)
+	instrumentTokenToVolumeMap := make(map[string]uint32)
+
+	// Extract OI and volume from the LTP data
+	for _, ltpData := range ltpDataList {
+		instrumentTokenToOIMap[ltpData.instrumentToken] = uint32(ltpData.OI)
+		instrumentTokenToVolumeMap[ltpData.instrumentToken] = uint32(ltpData.Volume)
+	}
+
+	// Populate the option chain strike struct with all data
+	for _, optionChainStrikeStruct := range optionChainStrikeStructList {
+		// Set LTP values
+		if ceLtp, exists := instrumentTokenToLtpMap[optionChainStrikeStruct.CEToken]; exists {
+			optionChainStrikeStruct.CELTP = ceLtp
+		}
+		if peLtp, exists := instrumentTokenToLtpMap[optionChainStrikeStruct.PEToken]; exists {
+			optionChainStrikeStruct.PELTP = peLtp
+		}
+
+		// Set OI values
+		if ceOI, exists := instrumentTokenToOIMap[optionChainStrikeStruct.CEToken]; exists {
+			optionChainStrikeStruct.CEOI = ceOI
+		}
+		if peOI, exists := instrumentTokenToOIMap[optionChainStrikeStruct.PEToken]; exists {
+			optionChainStrikeStruct.PEOI = peOI
+		}
+
+		// Set Volume values
+		if ceVolume, exists := instrumentTokenToVolumeMap[optionChainStrikeStruct.CEToken]; exists {
+			optionChainStrikeStruct.CEVolume = ceVolume
+		}
+		if peVolume, exists := instrumentTokenToVolumeMap[optionChainStrikeStruct.PEToken]; exists {
+			optionChainStrikeStruct.PEVolume = peVolume
+		}
+
+		mapToReturn[optionChainStrikeStruct.Strike] = optionChainStrikeStruct
+	}
+	c.log.Info("Successfully retrieved option chain strike struct list", map[string]interface{}{
+		"index":       indexName,
+		"expiry":      expiry,
+		"token_count": len(instumentTokenList),
+		"map_count":   len(mapToReturn),
+	})
+	return mapToReturn, nil
+}
+
 // SyncInstrumentMetadata syncs instrument metadata to Redis cache
 // SyncInstrumentExpiryStrikesWithSymbols syncs instrument expiry strikes with exchange and instrument symbols to Redis cache
 func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, instruments []InstrumentData) error {
@@ -670,10 +937,13 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 				ceSymbol := ""
 				peSymbol := ""
 				exchange := ""
+				ceToken := ""
+				peToken := ""
 
 				if ceInst, ok := typeMap["CE"]; ok {
 					ceSymbol = ceInst.TradingSymbol
 					exchange = ceInst.Exchange
+					ceToken = ceInst.InstrumentToken
 				}
 
 				if peInst, ok := typeMap["PE"]; ok {
@@ -681,6 +951,7 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 					if exchange == "" {
 						exchange = peInst.Exchange
 					}
+					peToken = peInst.InstrumentToken
 				}
 
 				// Log error if data is incomplete
@@ -696,8 +967,8 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 				}
 
 				// Format the value
-				formattedValue := fmt.Sprintf("strike:%s||ce:%s||pe:%s||exchange:%s",
-					strike, ceSymbol, peSymbol, exchange)
+				formattedValue := fmt.Sprintf("strike:%s||ce:%s||pe:%s||exchange:%s||ce_token:%s||pe_token:%s",
+					strike, ceSymbol, peSymbol, exchange, ceToken, peToken)
 
 				formattedValues = append(formattedValues, formattedValue)
 			}

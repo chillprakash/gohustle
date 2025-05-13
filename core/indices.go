@@ -6,6 +6,7 @@ type Index struct {
 	InstrumentToken string
 	NameInIndices   string
 	Enabled         bool
+	IndexNumber     int // For ordering/rendering in client and server
 }
 
 // Indices represents all available market indices
@@ -23,18 +24,21 @@ var GetIndices = func() Indices {
 			InstrumentToken: "256265",
 			NameInIndices:   "NIFTY 50",
 			Enabled:         true,
+			IndexNumber:     1, // Primary index
 		},
 		SENSEX: Index{
 			NameInOptions:   "SENSEX",
 			InstrumentToken: "265",
 			NameInIndices:   "SENSEX",
 			Enabled:         true,
+			IndexNumber:     0, // Secondary index
 		},
 		BANKNIFTY: Index{
 			NameInOptions:   "BANKNIFTY",
 			InstrumentToken: "260105",
 			NameInIndices:   "NIFTY BANK",
 			Enabled:         false,
+			IndexNumber:     2, // Tertiary index
 		},
 	}
 }
@@ -94,36 +98,68 @@ func (i Indices) GetAllNames() []string {
 func (i Indices) GetIndexByName(name string) *Index {
 	switch name {
 	case "NIFTY":
-		return &i.NIFTY
+		if i.NIFTY.Enabled {
+			return &i.NIFTY
+		}
 	case "SENSEX":
-		return &i.SENSEX
+		if i.SENSEX.Enabled {
+			return &i.SENSEX
+		}
 	case "BANKNIFTY":
-		return &i.BANKNIFTY
-	default:
-		return nil
+		if i.BANKNIFTY.Enabled {
+			return &i.BANKNIFTY
+		}
 	}
+	return nil
 }
 
 // GetIndexByExchangeName returns an Index by its exchange name
 func (i Indices) GetIndexByExchangeName(exchangeName string) *Index {
 	switch exchangeName {
 	case "NIFTY 50":
-		return &i.NIFTY
+		if i.NIFTY.Enabled {
+			return &i.NIFTY
+		}
 	case "SENSEX":
-		return &i.SENSEX
+		if i.SENSEX.Enabled {
+			return &i.SENSEX
+		}
 	case "NIFTY BANK":
-		return &i.BANKNIFTY
-	default:
-		return nil
+		if i.BANKNIFTY.Enabled {
+			return &i.BANKNIFTY
+		}
 	}
+	return nil
 }
 
 // GetIndicesToSubscribeForIntraday returns all indices for intraday subscription
 func (i Indices) GetIndicesToSubscribeForIntraday() []Index {
-	return []Index{i.NIFTY, i.SENSEX, i.BANKNIFTY}
+	indices := make([]Index, 0, 3)
+
+	if i.NIFTY.Enabled {
+		indices = append(indices, i.NIFTY)
+	}
+	if i.SENSEX.Enabled {
+		indices = append(indices, i.SENSEX)
+	}
+	if i.BANKNIFTY.Enabled {
+		indices = append(indices, i.BANKNIFTY)
+	}
+
+	return indices
 }
 
-// GetIndicesToCollectData returns indices for data collection (excluding BANKNIFTY)
+// GetIndicesToCollectData returns indices for data collection
 func (i Indices) GetIndicesToCollectData() []Index {
-	return []Index{i.NIFTY, i.SENSEX}
+	indices := make([]Index, 0, 2)
+
+	if i.NIFTY.Enabled {
+		indices = append(indices, i.NIFTY)
+	}
+	if i.SENSEX.Enabled {
+		indices = append(indices, i.SENSEX)
+	}
+	// Note: BANKNIFTY is intentionally excluded from data collection
+
+	return indices
 }

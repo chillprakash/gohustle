@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	sync "sync"
 	"time"
 
 	"gohustle/cache"
 	"gohustle/logger"
-	"gohustle/nats"
-	pb "gohustle/proto"
 
 	"github.com/zerodha/gokiteconnect/v4/models"
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
@@ -138,9 +137,12 @@ func (k *KiteConnect) CloseTicker() error {
 }
 
 // Internal handlers
+// tokenToIndexCache is an in-memory cache to avoid Redis lookups for every tick
+var tokenToIndexCache sync.Map
+
 func (k *KiteConnect) handleTick(tick models.Tick) {
 	log := logger.L()
-	cacheMeta, _ := cache.GetCacheMetaInstance()
+	// cacheMeta, _ := cache.GetCacheMetaInstance()
 
 	// Parallelize Redis storage
 	go func(t models.Tick) {
@@ -151,49 +153,68 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		}
 	}(tick)
 
-	// Parallelize NATS publishing
-	go func(t models.Tick) {
-		natsProducer := nats.GetTickProducer()
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
+	// // Parallelize NATS publishing
+	// go func(t models.Tick) {
+	// 	natsProducer := nats.GetTickProducer()
+	// 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond) // Increased timeout
+	// 	defer cancel()
 
-		instrumentSymbol, err := cacheMeta.GetSymbolByToken(ctx, fmt.Sprintf("%d", t.InstrumentToken))
-		if err != nil {
-			log.Error("Failed to get index name", map[string]interface{}{
-				"error": err.Error(),
-				"token": t.InstrumentToken,
-			})
-			return
-		}
+	// 	// Try to get index name from in-memory cache first
+	// 	tokenStr := fmt.Sprintf("%d", t.InstrumentToken)
+	// 	indexName, found := tokenToIndexCache.Load(tokenStr)
+	// 	if !found {
+	// 		// Not in cache, try to get from Redis
+	// 		instrumentSymbol, err := cacheMeta.GetSymbolByToken(ctx, tokenStr)
+	// 		if err != nil {
+	// 			log.Error("Failed to get symbol by token", map[string]interface{}{
+	// 				"error": err.Error(),
+	// 				"token": t.InstrumentToken,
+	// 			})
+	// 			return
+	// 		}
 
-		indexName, err := cacheMeta.GetIndexNameFromSymbol(ctx, instrumentSymbol)
-		if err != nil {
-			log.Error("Failed to get index name", map[string]interface{}{
-				"error": err.Error(),
-				"token": t.InstrumentToken,
-			})
-			return
-		}
+	// 		// Determine index name from symbol
+	// 		indexNameStr, err := cacheMeta.GetIndexNameFromSymbol(ctx, instrumentSymbol)
+	// 		if err != nil || indexNameStr == "" {
+	// 			log.Error("Failed to get index name from symbol", map[string]interface{}{
+	// 				"error":  err,
+	// 				"token":  t.InstrumentToken,
+	// 				"symbol": instrumentSymbol,
+	// 			})
+	// 			return
+	// 		}
 
-		protoTick := &pb.TickData{
-			InstrumentToken:       t.InstrumentToken,
-			ExchangeUnixTimestamp: t.Timestamp.Unix(),
-			LastPrice:             t.LastPrice,
-			VolumeTraded:          t.VolumeTraded,
-			AverageTradePrice:     t.AverageTradePrice,
-			OpenInterest:          t.OI,
-		}
-		subject := fmt.Sprintf("ticks.%s", indexName)
-		if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
-			log.Error("Failed to publish tick", map[string]interface{}{
-				"error":        err.Error(),
-				"token":        t.InstrumentToken,
-				"index":        indexName,
-				"last_price":   t.LastPrice,
-				"total_volume": t.VolumeTraded,
-			})
-		}
-	}(tick)
+	// 		// Store in cache for future lookups
+	// 		tokenToIndexCache.Store(tokenStr, indexNameStr)
+	// 		indexName = indexNameStr
+	// 	}
+
+	// 	protoTick := &pb.TickData{
+	// 		InstrumentToken:       t.InstrumentToken,
+	// 		ExchangeUnixTimestamp: t.Timestamp.Unix(),
+	// 		LastPrice:             t.LastPrice,
+	// 		VolumeTraded:          t.VolumeTraded,
+	// 		AverageTradePrice:     t.AverageTradePrice,
+	// 		OpenInterest:          t.OI,
+	// 	}
+
+	// 	// Use the index name from cache or Redis lookup
+	// 	indexNameStr := indexName.(string)
+	// 	subject := fmt.Sprintf("ticks.%s", indexNameStr)
+
+	// 	if err := natsProducer.PublishTick(ctx, subject, protoTick); err != nil {
+	// 		log.Error("Failed to publish tick", map[string]interface{}{
+	// 			"error":      err.Error(),
+	// 			"token":      t.InstrumentToken,
+	// 			"index":      indexNameStr,
+	// 			"last_price": t.LastPrice,
+	// 			"oi":         t.OI,
+	// 			"volume":     t.VolumeTraded,
+	// 			"avg_price":  t.AverageTradePrice,
+	// 			"timestamp":  t.Timestamp,
+	// 		})
+	// 	}
+	// }(tick)
 }
 
 func (k *KiteConnect) onError(err error) {

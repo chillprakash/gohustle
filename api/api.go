@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"gohustle/cache"
+	"gohustle/core"
 	"gohustle/db"
 	"gohustle/filestore"
 	"gohustle/logger"
@@ -448,7 +449,15 @@ type Response struct {
 
 // GeneralResponse represents the response structure for general market information
 type GeneralResponse struct {
-	LotSizes map[string]int `json:"lot_sizes"`
+	LotSizes  map[string]int             `json:"lot_sizes"`
+	IndexInfo map[string]IndexInfoStruct `json:"index_info,omitempty"`
+}
+
+// IndexInfoStruct contains metadata about an index
+type IndexInfoStruct struct {
+	IndexNumber int    `json:"index_number"`
+	DisplayName string `json:"display_name"`
+	Enabled     bool   `json:"enabled"`
 }
 
 // LotSizes contains the standard lot sizes for each index
@@ -918,59 +927,64 @@ func (s *Server) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, resp)
 }
 
-// handleGetExpiries returns the expiry dates for all indices from in-memory cache
+// handleGetExpiries returns the expiry dates for all indices from Redis cache
 func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
-	cache := cache.GetInMemoryCacheInstance()
-
-	// Get list of instruments from cache
-	instrumentsKey := "instrument:expiries:list"
-	instrumentsValue, exists := cache.Get(instrumentsKey)
-	if !exists {
-		sendErrorResponse(w, "No instruments found in cache", http.StatusNotFound)
+	// Get the Redis cache instance
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		s.log.Error("Failed to get cache instance", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to get cache instance", http.StatusInternalServerError)
 		return
 	}
 
-	instruments, ok := instrumentsValue.([]string)
-	if !ok {
-		sendErrorResponse(w, "Invalid data type for instruments in cache", http.StatusInternalServerError)
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
+	defer cancel()
+
+	// Get the expiry map from Redis
+	expiryMap, err := cacheMeta.GetExpiryMap(ctx)
+	if err != nil {
+		s.log.Error("Failed to get expiry map from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to get expiry data", http.StatusInternalServerError)
 		return
 	}
 
-	// Create response map
-	expiriesMap := make(map[string][]string)
+	// Convert the time.Time values to formatted strings for the response
+	responseMap := make(map[string][]string)
+	for index, dates := range expiryMap {
+		formattedDates := make([]string, 0, len(dates))
+		for _, date := range dates {
+			formattedDates = append(formattedDates, utils.FormatKiteDate(date))
+		}
+		responseMap[index] = formattedDates
+	}
 
-	// Get expiries for each instrument
-	for _, instrument := range instruments {
-		key := fmt.Sprintf("instrument:expiries:%s", instrument)
-		value, exists := cache.Get(key)
-		if !exists {
-			s.log.Debug("No expiries found for instrument", map[string]interface{}{
-				"instrument": instrument,
-			})
-			continue
+	// Check if we have any data
+	if len(responseMap) == 0 {
+		// Try to get data for all configured indices if the map is empty
+		allIndices := core.GetIndices().GetAllIndices()
+		for _, index := range allIndices {
+			expiry, err := cacheMeta.GetNearestExpiry(ctx, index.NameInOptions)
+			if err == nil && expiry != "" {
+				responseMap[index.NameInOptions] = []string{expiry}
+			}
 		}
 
-		dates, ok := value.([]string)
-		if !ok {
-			s.log.Error("Invalid data type for expiries in cache", map[string]interface{}{
-				"instrument": instrument,
-			})
-			continue
+		// If still empty, return error
+		if len(responseMap) == 0 {
+			sendErrorResponse(w, "No expiry dates found", http.StatusNotFound)
+			return
 		}
-
-		// Add to response map
-		expiriesMap[instrument] = dates
-	}
-
-	if len(expiriesMap) == 0 {
-		sendErrorResponse(w, "No expiry dates found", http.StatusNotFound)
-		return
 	}
 
 	resp := Response{
 		Success: true,
 		Message: "Expiry dates retrieved successfully",
-		Data:    expiriesMap,
+		Data:    responseMap,
 	}
 
 	sendJSONResponse(w, resp)
@@ -1007,9 +1021,9 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Validate expiry date format
-	if _, err := time.Parse("2006-01-02", expiry); err != nil {
-		sendErrorResponse(w, "Invalid expiry date format. Use YYYY-MM-DD", http.StatusBadRequest)
+	// Validate expiry date format (DD-MM-YYYY as defined in utils.KiteDateFormat)
+	if _, err := utils.ParseKiteDate(expiry); err != nil {
+		sendErrorResponse(w, fmt.Sprintf("Invalid expiry date format. Use DD-MM-YYYY (e.g., %s)", utils.GetCurrentKiteDate()), http.StatusBadRequest)
 		return
 	}
 
@@ -1353,10 +1367,38 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 
 // handleGeneral handles the /general endpoint that returns general market information
 func (s *Server) handleGeneral(w http.ResponseWriter, r *http.Request) {
+	// Get all indices to include their metadata
+	allIndices := core.GetIndices()
+
+	// Create index info map
+	indexInfo := make(map[string]IndexInfoStruct)
+
+	// Add NIFTY
+	indexInfo["NIFTY"] = IndexInfoStruct{
+		IndexNumber: allIndices.NIFTY.IndexNumber,
+		DisplayName: allIndices.NIFTY.NameInIndices,
+		Enabled:     allIndices.NIFTY.Enabled,
+	}
+
+	// Add SENSEX
+	indexInfo["SENSEX"] = IndexInfoStruct{
+		IndexNumber: allIndices.SENSEX.IndexNumber,
+		DisplayName: allIndices.SENSEX.NameInIndices,
+		Enabled:     allIndices.SENSEX.Enabled,
+	}
+
+	// Add BANKNIFTY
+	indexInfo["BANKNIFTY"] = IndexInfoStruct{
+		IndexNumber: allIndices.BANKNIFTY.IndexNumber,
+		DisplayName: allIndices.BANKNIFTY.NameInIndices,
+		Enabled:     allIndices.BANKNIFTY.Enabled,
+	}
+
 	response := Response{
 		Success: true,
 		Data: GeneralResponse{
-			LotSizes: LotSizes,
+			LotSizes:  LotSizes,
+			IndexInfo: indexInfo,
 		},
 	}
 

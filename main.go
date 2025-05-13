@@ -4,14 +4,12 @@ import (
 	"context"
 	"fmt"
 	"gohustle/api"
-	"gohustle/archive"
 	"gohustle/auth"
 	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/core"
 	"gohustle/logger"
 	"gohustle/nats"
-	"gohustle/scheduler"
 	"gohustle/zerodha"
 	"os"
 	"os/signal"
@@ -21,22 +19,22 @@ import (
 )
 
 func startDataProcessing(ctx context.Context, cfg *config.Config) error {
-	// Initialize NATS
-	natsConsumer, err := nats.GetTickConsumer(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to initialize NATS: %w", err)
-	}
+	// // Initialize NATS
+	// natsConsumer, err := nats.GetTickConsumer(ctx)
+	// if err != nil {
+	// 	return fmt.Errorf("failed to initialize NATS: %w", err)
+	// }
 
-	// Log connection status using the NATS helper
-	natsHelper := nats.GetNATSHelper()
-	logger.L().Info("NATS connection status", map[string]interface{}{
-		"connected": natsHelper.IsConnected(),
-	})
+	// // Log connection status using the NATS helper
+	// natsHelper := nats.GetNATSHelper()
+	// logger.L().Info("NATS connection status", map[string]interface{}{
+	// 	"connected": natsHelper.IsConnected(),
+	// })
 
-	// Start consumer with wildcard subject pattern
-	if err := natsConsumer.Start(ctx, "ticks.>", "tick_consumer"); err != nil {
-		return fmt.Errorf("failed to start consumer: %w", err)
-	}
+	// // Start consumer with wildcard subject pattern
+	// if err := natsConsumer.Start(ctx, "ticks.>", "tick_consumer"); err != nil {
+	// 	return fmt.Errorf("failed to start consumer: %w", err)
+	// }
 
 	// Initialize KiteConnect with writer pool
 	kiteConnect := zerodha.GetKiteConnect()
@@ -103,20 +101,20 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	// temp_tokens := []uint32{256265}
 	kiteConnect.InitializeTickersWithTokens(allTokens)
 
-	scheduler.InitializePositionPolling(ctx)
+	// scheduler.InitializePositionPolling(ctx)
 
-	// Initialize order polling to track order statuses
-	scheduler.InitializeOrderPolling(ctx)
+	// // Initialize order polling to track order statuses
+	// scheduler.InitializeOrderPolling(ctx)
 
-	// Initialize strategy P&L tracking
-	scheduler.InitializeStrategyPnLTracking(ctx)
+	// // Initialize strategy P&L tracking
+	// scheduler.InitializeStrategyPnLTracking(ctx)
 
-	scheduler.InitializeIndexOptionChainPolling(ctx)
+	// scheduler.InitializeIndexOptionChainPolling(ctx)
 
-	// Initialize tick data archiving (hourly) and consolidation (outside market hours)
-	archive.InitializeTickDataArchiving(ctx)
-	archive.InitializeTickDataConsolidation(ctx)
-	logger.L().Info("Initialized tick data archiving and consolidation", nil)
+	// // Initialize tick data archiving (hourly) and consolidation (outside market hours)
+	// archive.InitializeTickDataArchiving(ctx)
+	// archive.InitializeTickDataConsolidation(ctx)
+	// logger.L().Info("Initialized tick data archiving and consolidation", nil)
 
 	// Block until context is cancelled
 	<-ctx.Done()

@@ -309,13 +309,14 @@ func (k *KiteConnect) SyncAllInstrumentDataToCache(ctx context.Context) error {
 
 		// Add filtered instrument data for caching
 		filteredInstrumentData = append(filteredInstrumentData, cache.InstrumentData{
-			Name:           inst.Name,
-			TradingSymbol:  inst.Tradingsymbol,
-			InstrumentType: inst.InstrumentType,
-			StrikePrice:    inst.StrikePrice,
-			Expiry:         inst.Expiry,
-			Exchange:       inst.Exchange,
-			Token:          inst.InstrumentToken,
+			Name:            inst.Name,
+			TradingSymbol:   inst.Tradingsymbol,
+			InstrumentType:  inst.InstrumentType,
+			StrikePrice:     inst.StrikePrice,
+			Expiry:          inst.Expiry,
+			Exchange:        inst.Exchange,
+			Token:           inst.InstrumentToken,
+			InstrumentToken: inst.InstrumentToken,
 		})
 		processedCount++
 
@@ -495,8 +496,9 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 				"lengthOfInstrumentSymbolList": len(instrumentSymbolList),
 			})
 
-			// Create a map to store instrument symbols with their OI values
+			// Create maps to store instrument symbols with their OI values
 			instrumentOIMap := make(map[string]float64)
+			tokenOIMap := make(map[string]float64) // Map for storing token -> OI for Redis
 
 			// Process each quote and extract OI information
 			for symbol, quote := range quotes {
@@ -510,9 +512,14 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 
 				// Get the OI value from the quote
 				oi := quote.OI
+				
+				// Store token and OI in the map for Redis
+				tokenStr := strconv.Itoa(quote.InstrumentToken)
+				tokenOIMap[tokenStr] = oi
 
 				log.Info("Quote OI information", map[string]interface{}{
 					"symbol": instrumentSymbol,
+					"token": tokenStr,
 					"oi":     oi,
 				})
 
@@ -520,8 +527,16 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 				if oi >= MinimumOIForInstrument {
 					// Store the instrument symbol with its OI value
 					instrumentOIMap[instrumentSymbol] = oi
-					instrumentTokens = append(instrumentTokens, strconv.Itoa(quote.InstrumentToken))
+					instrumentTokens = append(instrumentTokens, tokenStr)
 				}
+			}
+			
+			// Store OI data in Redis
+			if err := cacheMeta.StoreInstrumentOIData(ctx, tokenOIMap); err != nil {
+				log.Error("Failed to store OI data in Redis", map[string]interface{}{
+					"error": err.Error(),
+				})
+				// Continue execution even if storing OI data fails
 			}
 
 			// Sort instruments by OI in descending order

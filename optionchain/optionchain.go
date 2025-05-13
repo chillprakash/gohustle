@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // Singleton instance
@@ -55,8 +53,8 @@ type OptionChainManager struct {
 type OptionData struct {
 	InstrumentToken string  `json:"instrument_token"`
 	LTP             float64 `json:"ltp"`
-	OI              int64   `json:"oi"`
-	Volume          int64   `json:"volume"`
+	OI              uint32  `json:"oi"`
+	Volume          uint32  `json:"volume"`
 	VWAP            float64 `json:"vwap"`
 	Change          float64 `json:"change"`
 	PositionQty     int64   `json:"position_qty"`
@@ -287,29 +285,28 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	positionsDB.Options().WriteTimeout = 10 * time.Second
 	positionsDB.Options().ReadTimeout = 10 * time.Second
 
-	// Get in-memory cache instance
-	inMemCache := cache.GetInMemoryCacheInstance()
-	if inMemCache == nil {
-		return nil, fmt.Errorf("in-memory cache not initialized")
-	}
-
-	// Get strikes for this index and expiry
-	strikesKey := fmt.Sprintf("strikes:%s_%s", index, expiry)
-	strikesValue, exists := inMemCache.Get(strikesKey)
-	if !exists {
-		m.log.Error("No strikes found", map[string]interface{}{
-			"index":  index,
-			"expiry": expiry,
+	// Get the Redis cache instance
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		m.log.Error("Failed to get cache instance", map[string]interface{}{
+			"error": err.Error(),
 		})
-		return nil, fmt.Errorf("no strikes found for index %s and expiry %s", index, expiry)
+		return nil, fmt.Errorf("redis cache not initialized: %w", err)
+	}
+	strikes, err := cacheMeta.GetExpiryStrikes(ctx, index, expiry)
+	if err != nil {
+		m.log.Error("Failed to get strikes", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to get strikes: %w", err)
 	}
 
-	allStrikes, ok := strikesValue.([]string)
-	if !ok {
+	allStrikes := strikes
+	if len(allStrikes) == 0 {
 		m.log.Error("Invalid strikes data type", map[string]interface{}{
 			"index":  index,
 			"expiry": expiry,
-			"type":   fmt.Sprintf("%T", strikesValue),
+			"type":   fmt.Sprintf("%T", strikes),
 		})
 		return nil, fmt.Errorf("invalid strikes data type")
 	}
@@ -321,7 +318,11 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	// Get tentative ATM strike
 	kc := zerodha.GetKiteConnect()
 	indices := core.GetIndices()
-	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indices.GetIndexByName(index), allStrikes)
+	indexObj := indices.GetIndexByName(index)
+	if indexObj == nil {
+		return nil, fmt.Errorf("index %s is not enabled or does not exist", index)
+	}
+	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indexObj, allStrikes)
 
 	// Find the middle strike and calculate range
 	middleIndex := -1
@@ -341,7 +342,7 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	selectedStrikes := allStrikes[startIndex:endIndex]
 
 	// Log the number of strikes selected for debugging
-	m.log.Debug("Selected strikes for option chain", map[string]interface{}{
+	m.log.Info("Selected strikes for option chain", map[string]interface{}{
 		"requested_count": strikesCount,
 		"selected_count":  len(selectedStrikes),
 		"atm_strike":      atmStrike_tentative,
@@ -354,101 +355,19 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	// Log the actual selected strikes for verification
 	strikeValues := make([]string, 0, len(selectedStrikes))
 	strikeValues = append(strikeValues, selectedStrikes...)
-	m.log.Debug("Selected strike values", map[string]interface{}{
+	m.log.Info("Selected strike values", map[string]interface{}{
 		"strikes": strings.Join(strikeValues, ","),
 	})
 
-	// Get instrument tokens for selected strikes
-	ceTokens := make([]string, 0)
-	peTokens := make([]string, 0)
-	instrumentDetails := make(map[string]string)
-
-	for _, strike := range selectedStrikes {
-		expiryKey := fmt.Sprintf("%s_%s_%s", index, expiry, strike)
-		strikeValue, exists := inMemCache.Get(expiryKey)
-		if !exists {
-			continue
-		}
-		details := strikeValue.(string)
-		instrumentDetails[strike] = details
-
-		parts := strings.Split(details, "||")
-		if len(parts) == 2 {
-			// PE token
-			if peTokenParts := strings.Split(parts[0], "|"); len(peTokenParts) == 2 {
-				peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
-				peTokens = append(peTokens, peToken)
-			}
-			// CE token
-			if ceTokenParts := strings.Split(parts[1], "|"); len(ceTokenParts) == 2 {
-				ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
-				ceTokens = append(ceTokens, ceToken)
-			}
-		}
-	}
-
-	// Get underlying index price
-	var indexToken string
-	for _, idx := range indices.GetAllIndices() {
-		if idx.NameInOptions == index {
-			indexToken = idx.InstrumentToken
-			break
-		}
-	}
-	if indexToken == "" {
-		return nil, fmt.Errorf("invalid index")
-	}
-
-	underlyingPrice, err := ltpDB.Get(ctx, fmt.Sprintf("%s_ltp", indexToken)).Float64()
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to get underlying price: %w", err)
-	}
-
-	// Fetch all option data using pipelines
-	ltpPipe := ltpDB.Pipeline()
-	posPipe := positionsDB.Pipeline()
-	ltpCmds := make(map[string]*redis.StringCmd)
-	oiCmds := make(map[string]*redis.StringCmd)
-	volumeCmds := make(map[string]*redis.StringCmd)
-	positionCmds := make(map[string]*redis.StringCmd)
-
-	allTokens := append(ceTokens, peTokens...)
-	for _, token := range allTokens {
-		ltpCmds[token] = ltpPipe.Get(ctx, fmt.Sprintf("%s_ltp", token))
-		oiCmds[token] = ltpPipe.Get(ctx, fmt.Sprintf("%s_oi", token))
-		volumeCmds[token] = ltpPipe.Get(ctx, fmt.Sprintf("%s_volume", token))
-		positionCmds[token] = posPipe.Get(ctx, fmt.Sprintf("position:token:%s", token))
-	}
-
-	// Execute pipelines
-	if _, err := ltpPipe.Exec(ctx); err != nil && err != redis.Nil {
-		m.log.Error("Failed to execute LTP pipeline", map[string]interface{}{"error": err.Error()})
-	}
-	if _, err := posPipe.Exec(ctx); err != nil && err != redis.Nil {
-		m.log.Error("Failed to execute positions pipeline", map[string]interface{}{"error": err.Error()})
-	}
-
-	// Process results
-	instrumentData := make(map[string]*OptionData)
-	for _, token := range allTokens {
-		data := &OptionData{
-			InstrumentToken: token,
-		}
-
-		if ltp, err := ltpCmds[token].Float64(); err == nil {
-			data.LTP = ltp
-		}
-		if oi, err := oiCmds[token].Float64(); err == nil {
-			data.OI = int64(oi)
-		}
-		if volume, err := volumeCmds[token].Float64(); err == nil {
-			data.Volume = int64(volume)
-		}
-		if qty, err := positionCmds[token].Int64(); err == nil {
-			data.PositionQty = qty
-		}
-
-		instrumentData[token] = data
+	strikeVsOptionChainStrikeStructList, err := cacheMeta.GetOptionChainStrikeStructList(ctx, index, expiry, selectedStrikes)
+	if err != nil {
+		m.log.Error("Failed to get option chain strike struct list", map[string]interface{}{
+			"index":       index,
+			"expiry":      expiry,
+			"token_count": len(selectedStrikes),
+			"error":       err.Error(),
+		})
+		return nil, err
 	}
 
 	// Build option chain
@@ -458,31 +377,24 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 
 	// First pass: Calculate CE+PE totals
 	for _, strike := range selectedStrikes {
-		details := instrumentDetails[strike]
-		parts := strings.Split(details, "||")
-		if len(parts) != 2 {
-			continue
-		}
+		strikeInt, _ := strconv.ParseInt(strike, 10, 64)
+		details := strikeVsOptionChainStrikeStructList[strikeInt]
 
 		strikeFloat, _ := strconv.ParseFloat(strike, 64)
 		strikeData := &StrikeData{
 			Strike: strikeFloat,
-		}
-
-		// Add PE data
-		if peTokenParts := strings.Split(parts[0], "|"); len(peTokenParts) == 2 {
-			peToken := strings.TrimPrefix(strings.Split(peTokenParts[0], "_")[1], "")
-			if peData, exists := instrumentData[peToken]; exists {
-				strikeData.PE = peData
-			}
-		}
-
-		// Add CE data
-		if ceTokenParts := strings.Split(parts[1], "|"); len(ceTokenParts) == 2 {
-			ceToken := strings.TrimPrefix(strings.Split(ceTokenParts[0], "_")[1], "")
-			if ceData, exists := instrumentData[ceToken]; exists {
-				strikeData.CE = ceData
-			}
+			PE: &OptionData{
+				InstrumentToken: details.PEToken,
+				LTP:             details.PELTP,
+				OI:              details.PEOI,
+				Volume:          details.PEVolume,
+			},
+			CE: &OptionData{
+				InstrumentToken: details.CEToken,
+				LTP:             details.CELTP,
+				OI:              details.CEOI,
+				Volume:          details.CEVolume,
+			},
 		}
 
 		// Calculate CE+PE total
@@ -508,7 +420,7 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	response := &OptionChainResponse{
 		Index:            index,
 		Expiry:           expiry,
-		UnderlyingPrice:  underlyingPrice,
+		UnderlyingPrice:  0.0,
 		Chain:            chain,
 		ATMStrike:        atmStrike,
 		Timestamp:        time.Now().UnixNano(),
@@ -516,20 +428,20 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	}
 
 	// Log the final chain size for debugging
-	m.log.Debug("Final option chain size", map[string]interface{}{
+	m.log.Info("Final option chain size", map[string]interface{}{
 		"requested_strikes": strikesCount,
 		"selected_strikes":  len(selectedStrikes),
 		"final_chain_size":  len(chain),
 	})
 
-	// Store time series metrics
-	if err := m.storeTimeSeriesMetrics(ctx, index, chain, underlyingPrice); err != nil {
-		m.log.Error("Failed to store time series metrics", map[string]interface{}{
-			"error": err.Error(),
-			"index": index,
-		})
-		// Don't return error as option chain calculation is still successful
-	}
+	// // Store time series metrics
+	// if err := m.storeTimeSeriesMetrics(ctx, index, chain, underlyingPrice); err != nil {
+	// 	m.log.Error("Failed to store time series metrics", map[string]interface{}{
+	// 		"error": err.Error(),
+	// 		"index": index,
+	// 	})
+	// 	// Don't return error as option chain calculation is still successful
+	// }
 
 	// Broadcast the update
 	select {

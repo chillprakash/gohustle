@@ -58,32 +58,32 @@ func GetNearestFutureDate(dateStrs []string) (string, error) {
 	if len(dateStrs) == 0 {
 		return "", fmt.Errorf("empty date slice")
 	}
-	
+
 	today := GetTodayIST()
 	var nearestExpiry string
 	var nearestDate time.Time
-	
+
 	for _, dateStr := range dateStrs {
 		date, err := ParseKiteDate(dateStr)
 		if err != nil {
 			return "", fmt.Errorf("failed to parse date %s: %w", dateStr, err)
 		}
-		
+
 		// Skip dates in the past
 		if date.Before(today) {
 			continue
 		}
-		
+
 		// If this is the first valid date or it's earlier than our current nearest
 		if nearestExpiry == "" || date.Before(nearestDate) {
 			nearestExpiry = dateStr
 			nearestDate = date
 		}
 	}
-	
+
 	if nearestExpiry == "" {
 		return "", fmt.Errorf("no future dates found")
 	}
-	
+
 	return nearestExpiry, nil
 }

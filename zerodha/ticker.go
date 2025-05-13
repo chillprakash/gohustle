@@ -140,6 +140,7 @@ func (k *KiteConnect) CloseTicker() error {
 // Internal handlers
 func (k *KiteConnect) handleTick(tick models.Tick) {
 	log := logger.L()
+	cacheMeta, _ := cache.GetCacheMetaInstance()
 
 	// Parallelize Redis storage
 	go func(t models.Tick) {
@@ -156,7 +157,16 @@ func (k *KiteConnect) handleTick(tick models.Tick) {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
 
-		indexName, err := k.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", t.InstrumentToken))
+		instrumentSymbol, err := cacheMeta.GetSymbolByToken(ctx, fmt.Sprintf("%d", t.InstrumentToken))
+		if err != nil {
+			log.Error("Failed to get index name", map[string]interface{}{
+				"error": err.Error(),
+				"token": t.InstrumentToken,
+			})
+			return
+		}
+
+		indexName, err := cacheMeta.GetIndexNameFromSymbol(ctx, instrumentSymbol)
 		if err != nil {
 			log.Error("Failed to get index name", map[string]interface{}{
 				"error": err.Error(),

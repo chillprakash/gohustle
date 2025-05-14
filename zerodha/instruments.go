@@ -50,15 +50,13 @@ type TokenInfo struct {
 }
 
 var (
-	tokensCache                  map[uint32]string
 	reverseLookupCacheWithStrike map[string]string
 	reverseLookupCache           map[string]TokenInfo
 	instrumentMutex              sync.RWMutex
-	once                         sync.Once
 	expiryCache                  *cache.InMemoryCache
 
 	// Minimum OI threshold for filtering instruments
-	MinimumOIForInstrument = 10000.00 // Set an appropriate threshold value
+	MinimumOIForInstrument = 25000.00 // Set an appropriate threshold value
 )
 
 func init() {

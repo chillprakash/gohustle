@@ -13,7 +13,7 @@ import (
 
 // PnLManager handles P&L calculations for positions
 type PnLManager struct {
-	log *logger.Logger
+	log  *logger.Logger
 	kite *KiteConnect
 }
 
@@ -98,13 +98,17 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		UpdatedAt:        time.Now(),
 	}
 
+	cacheMetaInstance, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cache meta instance: %w", err)
+	}
+
 	// Get Redis cache for LTP data
 	redisCache, err := cache.GetRedisCache()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
 	}
 	ltpDB := redisCache.GetLTPDB3()
-	inmemoryCache := cache.GetInMemoryCacheInstance()
 
 	// Get positions from database (includes both real and paper trading positions)
 	timescaleDB := db.GetTimescaleDB()
@@ -130,17 +134,15 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		// Calculate P&L using the formula: pnl = (sellValue - buyValue) + (netQuantity * lastPrice * multiplier)
 		lastPrice := pos.LastPrice
 
-		// Try to get updated LTP from Redis if available
-		if instrumentToken, exists := inmemoryCache.Get(pos.TradingSymbol); exists {
-			ltpKey := fmt.Sprintf("%v_ltp", instrumentToken)
-			ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
-			if err == nil && ltpVal > 0 {
-				lastPrice = ltpVal
-				pm.log.Debug("Using updated LTP from Redis for PnL calculation", map[string]interface{}{
-					"trading_symbol": pos.TradingSymbol,
-					"ltp":            ltpVal,
-				})
-			}
+		instrumentToken, err := cacheMetaInstance.GetTokenBySymbol(ctx, pos.TradingSymbol)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get token metadata for trading symbol: %w", err)
+		}
+
+		ltpKey := fmt.Sprintf("%v_ltp", instrumentToken)
+		ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
+		if err == nil && ltpVal > 0 {
+			lastPrice = ltpVal
 		}
 
 		// Calculate P&L components
@@ -248,76 +250,6 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 				"position_id":    pos.PositionID,
 				"trading_symbol": pos.TradingSymbol,
 			})
-		}
-	}
-
-	// Also get positions from Zerodha API for real-time data
-	positions, err := GetPositionManager().GetOpenPositions(ctx)
-	if err != nil {
-		pm.log.Error("Failed to get positions from Zerodha for PnL calculation", map[string]interface{}{
-			"error": err.Error(),
-		})
-		// If we have DB positions, we can continue without Zerodha positions
-	} else {
-		// Process positions from Zerodha API (these should be real-time and most accurate)
-		for _, pos := range positions.Net {
-			// Skip positions that are already processed from DB to avoid duplicates
-			if _, exists := summary.PositionPnL[pos.Tradingsymbol]; exists {
-				continue
-			}
-
-			// Calculate P&L using the formula: pnl = (sellValue - buyValue) + (netQuantity * lastPrice * multiplier)
-			realizedPnL := pos.Realised
-			unrealizedPnL := pos.Unrealised
-			totalPnL := pos.PnL
-
-			// Update summary
-			summary.PositionPnL[pos.Tradingsymbol] = totalPnL
-			summary.TotalRealizedPnL += realizedPnL
-			summary.TotalUnrealizedPnL += unrealizedPnL
-
-			// For Zerodha positions, we need to look up the position ID in the database
-			// by trading symbol, exchange, and product
-			dbPositions, err := timescaleDB.ListPositions(ctx)
-			if err != nil {
-				pm.log.Error("Failed to list positions for P&L update", map[string]interface{}{
-					"error": err.Error(),
-				})
-				continue
-			}
-
-			// Find the matching position in the database
-			var positionID int64
-			positionFound := false
-			for _, dbPos := range dbPositions {
-				if dbPos.TradingSymbol == pos.Tradingsymbol &&
-					dbPos.Exchange == pos.Exchange &&
-					dbPos.Product == pos.Product &&
-					!dbPos.PaperTrading {
-					positionID = dbPos.ID
-					positionFound = true
-					break
-				}
-			}
-
-			// Skip if position not found in database
-			if !positionFound {
-				pm.log.Debug("Position not found in database for P&L update", map[string]interface{}{
-					"trading_symbol": pos.Tradingsymbol,
-					"exchange":       pos.Exchange,
-					"product":        pos.Product,
-				})
-				continue
-			}
-
-			// Store updated P&L in database
-			if err := pm.updatePositionPnL(ctx, positionID, realizedPnL, unrealizedPnL, totalPnL, pos.LastPrice); err != nil {
-				pm.log.Error("Failed to update position P&L in database", map[string]interface{}{
-					"error":          err.Error(),
-					"id":             positionID,
-					"trading_symbol": pos.Tradingsymbol,
-				})
-			}
 		}
 	}
 

@@ -67,10 +67,19 @@ func init() {
 
 func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []string) string {
 	log := logger.L()
+
+	// Enhanced logging for debugging
+	log.Info("Getting ATM strike based on LTP", map[string]interface{}{
+		"index_name":        index.NameInOptions,
+		"instrument_token":  index.InstrumentToken,
+		"available_strikes": len(strikes),
+	})
+
 	redisCache, err := cache.GetRedisCache()
 	if err != nil {
 		log.Error("Failed to get Redis cache", map[string]interface{}{
 			"error": err.Error(),
+			"index": index.NameInOptions,
 		})
 		return ""
 	}
@@ -79,21 +88,48 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 	if ltpDB == nil {
 		log.Error("Failed to get LTP DB", map[string]interface{}{
 			"error": "LTP DB is nil",
-		})
-		return ""
-	}
-	ltp, err := ltpDB.Get(context.Background(), fmt.Sprintf("%s_ltp", index.InstrumentToken)).Float64()
-	if err != nil {
-		log.Error("Failed to get LTP for index", map[string]interface{}{
-			"error": err.Error(),
-			"index": index.InstrumentToken,
+			"index": index.NameInOptions,
 		})
 		return ""
 	}
 
+	ltpKey := fmt.Sprintf("%s_ltp", index.InstrumentToken)
+	log.Info("Fetching LTP from Redis", map[string]interface{}{
+		"ltp_key": ltpKey,
+		"index":   index.NameInOptions,
+	})
+
+	ltp, err := ltpDB.Get(context.Background(), ltpKey).Float64()
+	if err != nil {
+		log.Error("Failed to get LTP for index", map[string]interface{}{
+			"error":   err.Error(),
+			"index":   index.NameInOptions,
+			"ltp_key": ltpKey,
+			"token":   index.InstrumentToken,
+		})
+		return ""
+	}
+
+	log.Info("Successfully retrieved LTP", map[string]interface{}{
+		"index": index.NameInOptions,
+		"ltp":   ltp,
+	})
+
 	// Find nearest strike to LTP
 	var nearestStrike string
 	minDiff := math.MaxFloat64
+
+	// Log the first few strikes for debugging
+	samples := strikes
+	if len(strikes) > 5 {
+		samples = strikes[:5]
+	}
+	log.Info("Finding nearest strike to LTP", map[string]interface{}{
+		"index":          index.NameInOptions,
+		"ltp":            ltp,
+		"strikes_count":  len(strikes),
+		"sample_strikes": samples,
+	})
 
 	for _, strike := range strikes {
 		strikePrice, err := strconv.ParseFloat(strike, 64)
@@ -101,6 +137,7 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 			log.Error("Failed to parse strike price", map[string]interface{}{
 				"error":  err.Error(),
 				"strike": strike,
+				"index":  index.NameInOptions,
 			})
 			continue
 		}
@@ -111,6 +148,13 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 			nearestStrike = strike
 		}
 	}
+
+	log.Info("Selected ATM strike", map[string]interface{}{
+		"index":        index.NameInOptions,
+		"ltp":          ltp,
+		"nearest_diff": minDiff,
+		"atm_strike":   nearestStrike,
+	})
 
 	return nearestStrike
 }
@@ -512,14 +556,14 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 
 				// Get the OI value from the quote
 				oi := quote.OI
-				
+
 				// Store token and OI in the map for Redis
 				tokenStr := strconv.Itoa(quote.InstrumentToken)
 				tokenOIMap[tokenStr] = oi
 
 				log.Info("Quote OI information", map[string]interface{}{
 					"symbol": instrumentSymbol,
-					"token": tokenStr,
+					"token":  tokenStr,
 					"oi":     oi,
 				})
 
@@ -530,7 +574,7 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 					instrumentTokens = append(instrumentTokens, tokenStr)
 				}
 			}
-			
+
 			// Store OI data in Redis
 			if err := cacheMeta.StoreInstrumentOIData(ctx, tokenOIMap); err != nil {
 				log.Error("Failed to store OI data in Redis", map[string]interface{}{

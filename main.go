@@ -10,6 +10,7 @@ import (
 	"gohustle/core"
 	"gohustle/logger"
 	"gohustle/nats"
+	"gohustle/scheduler"
 	"gohustle/zerodha"
 	"os"
 	"os/signal"
@@ -19,23 +20,6 @@ import (
 )
 
 func startDataProcessing(ctx context.Context, cfg *config.Config) error {
-	// // Initialize NATS
-	// natsConsumer, err := nats.GetTickConsumer(ctx)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to initialize NATS: %w", err)
-	// }
-
-	// // Log connection status using the NATS helper
-	// natsHelper := nats.GetNATSHelper()
-	// logger.L().Info("NATS connection status", map[string]interface{}{
-	// 	"connected": natsHelper.IsConnected(),
-	// })
-
-	// // Start consumer with wildcard subject pattern
-	// if err := natsConsumer.Start(ctx, "ticks.>", "tick_consumer"); err != nil {
-	// 	return fmt.Errorf("failed to start consumer: %w", err)
-	// }
-
 	// Initialize KiteConnect with writer pool
 	kiteConnect := zerodha.GetKiteConnect()
 	if kiteConnect == nil {
@@ -49,14 +33,6 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	if err := kiteConnect.DownloadInstrumentData(ctx, intradayIndices); err != nil {
 		return fmt.Errorf("failed to download instrument data: %w", err)
 	}
-
-	// // Sync instrument expiries from file to cache
-	// kiteConnect.SyncInstrumentExpiriesFromFileToCache(ctx)
-
-	// // Create lookup map with expiry vs token map
-	// kiteConnect.CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx)
-
-	// kiteConnect.CreateLookUpOfExpiryVsAllDetailsInSingleString(ctx, indices.GetAllIndices())
 
 	if err := kiteConnect.SyncAllInstrumentDataToCache(ctx); err != nil {
 		return fmt.Errorf("failed to sync instrument data to cache: %w", err)
@@ -101,13 +77,13 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 	// temp_tokens := []uint32{256265}
 	kiteConnect.InitializeTickersWithTokens(allTokens)
 
-	// scheduler.InitializePositionPolling(ctx)
+	scheduler.InitializePositionPolling(ctx)
 
 	// // Initialize order polling to track order statuses
-	// scheduler.InitializeOrderPolling(ctx)
+	scheduler.InitializeOrderPolling(ctx)
 
 	// // Initialize strategy P&L tracking
-	// scheduler.InitializeStrategyPnLTracking(ctx)
+	scheduler.InitializeStrategyPnLTracking(ctx)
 
 	// scheduler.InitializeIndexOptionChainPolling(ctx)
 

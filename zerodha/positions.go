@@ -432,18 +432,15 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		Positions: make([]DetailedPosition, 0),
 	}
 
-	// Get Redis cache for LTP data
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
-	}
-	ltpDB := redisCache.GetLTPDB3()
-	inmemoryCache := cache.GetInMemoryCacheInstance()
-
 	// Get positions from database (includes both real and paper trading positions)
 	timescaleDB := db.GetTimescaleDB()
 	if timescaleDB == nil {
 		return nil, fmt.Errorf("timescale DB is nil")
+	}
+
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get cache meta instance: %w", err)
 	}
 
 	// Fetch all positions from database
@@ -477,183 +474,113 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		var tokenStr string
 
 		// Try to get instrument token from cache - we store this as trading symbol -> token mapping
-		tokenValue, exists := inmemoryCache.Get(dbPos.TradingSymbol)
-		if exists {
+		tokenValue, _ := cacheMeta.GetTokenBySymbol(ctx, dbPos.TradingSymbol)
+		metaOfToken, _ := cacheMeta.GetMetadataOfToken(ctx, tokenValue)
+		tokenStr = fmt.Sprintf("%v", tokenValue)
+		tokenInt, _ := strconv.Atoi(tokenStr)
+
+		if tokenValue != "" {
+			tokenList := []string{tokenValue}
+			ltpData, _ := cacheMeta.GetLTPforInstrumentTokensList(ctx, tokenList)
+			if len(ltpData) > 0 {
+				ltp = ltpData[0].LTP
+			}
 			// Convert token to string format for cache keys
-			tokenStr = fmt.Sprintf("%v", tokenValue)
 
-			// Try to get LTP from Redis using instrument token
-			ltpKey := fmt.Sprintf("%s_ltp", tokenStr)
-			ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
-			if err == nil && ltpVal > 0 {
-				ltp = ltpVal
+			expiryDate = metaOfToken.Expiry
+			strikePrice, _ = strconv.ParseFloat(metaOfToken.StrikePrice, 64)
+
+			// Create a kiteconnect.Position from the db.PositionRecord for move calculation
+			pseudoPos := kiteconnect.Position{
+				Tradingsymbol:   dbPos.TradingSymbol,
+				Exchange:        dbPos.Exchange,
+				InstrumentToken: uint32(tokenInt),
+				Product:         dbPos.Product,
+				Quantity:        dbPos.Quantity,
+				AveragePrice:    dbPos.AveragePrice,
+				LastPrice:       ltp,
+				ClosePrice:      0,
+				PnL:             dbPos.PnL,
+				M2M:             0,
+				Multiplier:      dbPos.Multiplier,
+				BuyQuantity:     dbPos.BuyQuantity,
+				SellQuantity:    dbPos.SellQuantity,
+				BuyPrice:        dbPos.BuyPrice,
+				SellPrice:       dbPos.SellPrice,
+				BuyValue:        dbPos.BuyValue,
+				SellValue:       dbPos.SellValue,
 			}
 
-			// Get expiry date from cache
-			expiryKey := fmt.Sprintf("expiry:%s", tokenStr)
-			expiryVal, expiryExists := inmemoryCache.Get(expiryKey)
-			if expiryExists {
-				switch v := expiryVal.(type) {
-				case string:
-					// Keep the ISO format (YYYY-MM-DD) as is
-					if len(v) >= 10 && strings.Contains(v, "-") { // Format like "2025-05-25"
-						expiryDate = v
-					} else {
-						// Check if it's in MMYYYY format (like "052025")
-						if len(v) == 6 && !strings.Contains(v, "-") {
-							// Convert from MMYYYY to YYYY-MM-DD
-							month := v[:2]
-							year := v[2:]
-							// Default to day 1 if we don't have day information
-							expiryDate = year + "-" + month + "-01"
-						} else {
-							// For any other format, just use as-is and log
-							expiryDate = v
-							pm.log.Debug("Unexpected expiry date format", map[string]interface{}{
-								"expiry": v,
-							})
-						}
-					}
-				case time.Time:
-					// Format time.Time as YYYY-MM-DD
-					expiryDate = v.Format("2006-01-02")
-				default:
-					// Just log and continue
-					pm.log.Debug("Unexpected expiry date format in cache", map[string]interface{}{
-						"type":  fmt.Sprintf("%T", expiryVal),
-						"value": expiryVal,
-					})
-				}
+			detailedPos := DetailedPosition{
+				TradingSymbol:   dbPos.TradingSymbol,
+				Strike:          strikePrice,
+				Expiry:          expiryDate,
+				OptionType:      optionType,
+				Quantity:        int64(dbPos.Quantity),
+				AveragePrice:    dbPos.AveragePrice,
+				BuyPrice:        dbPos.BuyPrice,
+				SellPrice:       dbPos.SellPrice,
+				LTP:             ltp,
+				Diff:            ltp - dbPos.AveragePrice,
+				Value:           math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
+				PaperTrading:    dbPos.PaperTrading,
+				InstrumentToken: tokenStr,
+				Moves:           pm.calculateMoves(ctx, pseudoPos, strikePrice, expiryDate),
 			}
 
-			// Get strike price from cache
-			strikeKey := fmt.Sprintf("strike:%s", tokenStr)
-			strikeVal, strikeExists := inmemoryCache.Get(strikeKey)
-			if strikeExists {
-				switch v := strikeVal.(type) {
-				case float64:
-					strikePrice = v
-				case string:
-					if val, err := strconv.ParseFloat(v, 64); err == nil {
-						strikePrice = val
-					}
-				default:
-					// Just log and continue
-					pm.log.Debug("Unexpected strike price format in cache", map[string]interface{}{
-						"type":  fmt.Sprintf("%T", strikeVal),
-						"value": strikeVal,
-					})
-				}
+			// Calculate position value (original capital deployed)
+			quantity := float64(dbPos.Quantity)
+			positionValue := math.Abs(quantity * dbPos.AveragePrice)
+
+			// Calculate position values based on option premium perspective
+			var pendingValue float64
+			var pnl float64
+
+			if quantity < 0 {
+				// Sell/Short position - premium we collect (positive value)
+				// For options we've sold, we've already collected the premium
+				// The pending value is what we'd need to pay to close the position
+				pendingValue = math.Abs(quantity * detailedPos.LTP)
+
+				// For sold options, profit = premium collected - current value
+				premiumCollected := math.Abs(quantity * dbPos.AveragePrice)
+				currentCost := math.Abs(quantity * detailedPos.LTP)
+				pnl = premiumCollected - currentCost
+			} else {
+				// Buy/Long position - premium we pay (negative value)
+				// For options we've bought, we've paid the premium
+				// The pending value is what we'd get if we close the position
+				pendingValue = -math.Abs(quantity * detailedPos.LTP)
+
+				// For bought options, profit = current value - premium paid
+				premiumPaid := math.Abs(quantity * dbPos.AveragePrice)
+				currentValue := math.Abs(quantity * detailedPos.LTP)
+				pnl = currentValue - premiumPaid
 			}
 
-		}
+			// Log position values for debugging
+			pm.log.Debug("Position value calculation", map[string]interface{}{
+				"symbol":         dbPos.TradingSymbol,
+				"quantity":       quantity,
+				"avg_price":      dbPos.AveragePrice,
+				"ltp":            detailedPos.LTP,
+				"position_value": positionValue,
+				"pending_value":  pendingValue,
+				"pnl":            pnl,
+				"position_type":  optionType,
+			})
 
-		// Create a kiteconnect.Position from the db.PositionRecord for move calculation
-		pseudoPos := kiteconnect.Position{
-			Tradingsymbol:   dbPos.TradingSymbol,
-			Exchange:        dbPos.Exchange,
-			InstrumentToken: 0, // We'll set this from the token value if available
-			Product:         dbPos.Product,
-			Quantity:        dbPos.Quantity,
-			AveragePrice:    dbPos.AveragePrice,
-			LastPrice:       ltp,
-			ClosePrice:      0,
-			PnL:             dbPos.PnL,
-			M2M:             0,
-			Multiplier:      dbPos.Multiplier,
-			BuyQuantity:     dbPos.BuyQuantity,
-			SellQuantity:    dbPos.SellQuantity,
-			BuyPrice:        dbPos.BuyPrice,
-			SellPrice:       dbPos.SellPrice,
-			BuyValue:        dbPos.BuyValue,
-			SellValue:       dbPos.SellValue,
-		}
-
-		// Set the instrument token from the token value we already retrieved
-		if exists {
-			switch v := tokenValue.(type) {
-			case int:
-				pseudoPos.InstrumentToken = uint32(v)
-			case int64:
-				pseudoPos.InstrumentToken = uint32(v)
-			case uint32:
-				pseudoPos.InstrumentToken = v
-			case string:
-				if tokenInt, err := strconv.Atoi(v); err == nil {
-					pseudoPos.InstrumentToken = uint32(tokenInt)
-				}
+			// Update summary based on option type
+			if optionType == "CE" {
+				analysis.Summary.TotalCallValue += positionValue
+				analysis.Summary.TotalCallPending += pendingValue
+			} else {
+				analysis.Summary.TotalPutValue += positionValue
+				analysis.Summary.TotalPutPending += pendingValue
 			}
+
+			analysis.Positions = append(analysis.Positions, detailedPos)
 		}
-
-		detailedPos := DetailedPosition{
-			TradingSymbol:   dbPos.TradingSymbol,
-			Strike:          strikePrice,
-			Expiry:          expiryDate,
-			OptionType:      optionType,
-			Quantity:        int64(dbPos.Quantity),
-			AveragePrice:    dbPos.AveragePrice,
-			BuyPrice:        dbPos.BuyPrice,
-			SellPrice:       dbPos.SellPrice,
-			LTP:             ltp,
-			Diff:            ltp - dbPos.AveragePrice,
-			Value:           math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
-			PaperTrading:    dbPos.PaperTrading,
-			InstrumentToken: tokenStr,
-			Moves:           pm.calculateMoves(ctx, pseudoPos, strikePrice, expiryDate),
-		}
-
-		// Calculate position value (original capital deployed)
-		quantity := float64(dbPos.Quantity)
-		positionValue := math.Abs(quantity * dbPos.AveragePrice)
-
-		// Calculate position values based on option premium perspective
-		var pendingValue float64
-		var pnl float64
-
-		if quantity < 0 {
-			// Sell/Short position - premium we collect (positive value)
-			// For options we've sold, we've already collected the premium
-			// The pending value is what we'd need to pay to close the position
-			pendingValue = math.Abs(quantity * detailedPos.LTP)
-
-			// For sold options, profit = premium collected - current value
-			premiumCollected := math.Abs(quantity * dbPos.AveragePrice)
-			currentCost := math.Abs(quantity * detailedPos.LTP)
-			pnl = premiumCollected - currentCost
-		} else {
-			// Buy/Long position - premium we pay (negative value)
-			// For options we've bought, we've paid the premium
-			// The pending value is what we'd get if we close the position
-			pendingValue = -math.Abs(quantity * detailedPos.LTP)
-
-			// For bought options, profit = current value - premium paid
-			premiumPaid := math.Abs(quantity * dbPos.AveragePrice)
-			currentValue := math.Abs(quantity * detailedPos.LTP)
-			pnl = currentValue - premiumPaid
-		}
-
-		// Log position values for debugging
-		pm.log.Debug("Position value calculation", map[string]interface{}{
-			"symbol":         dbPos.TradingSymbol,
-			"quantity":       quantity,
-			"avg_price":      dbPos.AveragePrice,
-			"ltp":            detailedPos.LTP,
-			"position_value": positionValue,
-			"pending_value":  pendingValue,
-			"pnl":            pnl,
-			"position_type":  optionType,
-		})
-
-		// Update summary based on option type
-		if optionType == "CE" {
-			analysis.Summary.TotalCallValue += positionValue
-			analysis.Summary.TotalCallPending += pendingValue
-		} else {
-			analysis.Summary.TotalPutValue += positionValue
-			analysis.Summary.TotalPutPending += pendingValue
-		}
-
-		analysis.Positions = append(analysis.Positions, detailedPos)
 	}
 
 	// Calculate totals

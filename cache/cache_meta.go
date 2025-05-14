@@ -33,11 +33,7 @@ const (
 	InstrumentSymbolPrefix = "instrument:mapping:symbol:"
 
 	// Metadata keys
-	InstrumentMetadataPrefix       = "instrument:metadata:"
-	InstrumentMetadataNameSuffix   = ":name"
-	InstrumentMetadataStrikeSuffix = ":strike"
-	InstrumentMetadataTypeSuffix   = ":type"
-	InstrumentMetadataExpirySuffix = ":expiry"
+	InstrumentMetadataPrefix = "instrument:metadata:"
 
 	// Lookup keys
 	InstrumentLookupPrefix           = "instrument:lookup:"
@@ -1284,6 +1280,57 @@ func min(a, b int) int {
 	return b
 }
 
+func (c *CacheMeta) GetMetadataOfToken(ctx context.Context, token string) (InstrumentData, error) {
+	instrumentMetadataKey := fmt.Sprintf("%s%s", InstrumentMetadataPrefix, token)
+	result, err := c.client.Get(ctx, instrumentMetadataKey).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return InstrumentData{Token: token, InstrumentToken: token}, nil
+		}
+		c.log.Error("Failed to get instrument metadata", map[string]interface{}{
+			"token": token,
+			"error": err.Error(),
+		})
+		return InstrumentData{}, err
+	}
+
+	// Parse the metadata string and map it to InstrumentData
+	return convertMetadataToInstrumentData(result, token)
+}
+
+func convertMetadataToInstrumentData(metadata string, token string) (InstrumentData, error) {
+	// The metadata string format is "{name}:{strikePrice}:{instrumentType}:{expiry}"
+	parts := strings.Split(metadata, ":")
+
+	// Create a new InstrumentData instance
+	inst := InstrumentData{
+		Token:           token,
+		InstrumentToken: token,
+	}
+
+	// Map the parts to the InstrumentData struct fields
+	if len(parts) >= 1 {
+		inst.Name = parts[0]
+	}
+
+	if len(parts) >= 2 {
+		inst.StrikePrice = parts[1]
+	}
+
+	if len(parts) >= 3 {
+		inst.InstrumentType = parts[2]
+	}
+
+	if len(parts) >= 4 {
+		inst.Expiry = parts[3]
+	}
+
+	// Exchange and TradingSymbol are not included in the metadata string
+	// They would need to be fetched separately if needed
+
+	return inst, nil
+}
+
 func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []InstrumentData) error {
 	c.log.Info("Syncing instrument metadata to Redis cache", nil)
 
@@ -1296,13 +1343,13 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 		// Format: instrument:{category}:{subcategory}:{identifier}
 
 		// Cache token -> symbol and symbol -> token mapping
-		tokenKey := fmt.Sprintf("%s%s", InstrumentTokenPrefix, inst.Token)
-		symbolKey := fmt.Sprintf("%s%s", InstrumentSymbolPrefix, inst.TradingSymbol)
-		pipe.Set(ctx, tokenKey, inst.TradingSymbol, LongCacheExpiry)
-		pipe.Set(ctx, symbolKey, inst.Token, LongCacheExpiry)
+		// tokenKey := fmt.Sprintf("%s%s", InstrumentTokenPrefix, inst.Token)
+		// symbolKey := fmt.Sprintf("%s%s", InstrumentSymbolPrefix, inst.TradingSymbol)
+		// pipe.Set(ctx, tokenKey, inst.TradingSymbol, LongCacheExpiry)
+		// pipe.Set(ctx, symbolKey, inst.Token, LongCacheExpiry)
 
 		// Cache instrument name
-		instrumentNameKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataNameSuffix)
+		instrumentNameKey := fmt.Sprintf("%s%s", InstrumentMetadataPrefix, inst.Token)
 		pipe.Set(ctx, instrumentNameKey, inst.Name, LongCacheExpiry)
 
 		// If this is an option (CE or PE), cache additional metadata
@@ -1315,37 +1362,44 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 				// Note: Expiry strikes with symbols are now handled in SyncInstrumentExpiryStrikesWithSymbols
 
 				// Cache strike price
-				strikeKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataStrikeSuffix)
-				pipe.Set(ctx, strikeKey, strikeStr, LongCacheExpiry)
+				strikeKey := fmt.Sprintf("%s%s", InstrumentMetadataPrefix, inst.Token)
+				value := fmt.Sprintf("%s:%s:%s:%s", inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+				pipe.Set(ctx, strikeKey, value, LongCacheExpiry)
 
-				// Cache instrument type (CE/PE)
-				instrumentTypeKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataTypeSuffix)
-				pipe.Set(ctx, instrumentTypeKey, inst.InstrumentType, LongCacheExpiry)
+				tokenKey := fmt.Sprintf("%s%s", InstrumentTokenPrefix, inst.Token)
+				pipe.Set(ctx, tokenKey, inst.TradingSymbol, LongCacheExpiry)
 
-				// Cache expiry date
-				expiryKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataExpirySuffix)
-				pipe.Set(ctx, expiryKey, inst.Expiry, LongCacheExpiry)
+				symbolKey := fmt.Sprintf("%s%s", InstrumentSymbolPrefix, inst.TradingSymbol)
+				pipe.Set(ctx, symbolKey, inst.Token, LongCacheExpiry)
 
-				// Cache lookup for next move - organized by strike, type and expiry
-				nextMoveLookupKey := fmt.Sprintf("%s%s:%s:%s",
-					InstrumentLookupNextMovePrefix, strikeStr, inst.InstrumentType, inst.Expiry)
-				pipe.Set(ctx, nextMoveLookupKey, inst.Token, LongCacheExpiry)
+				// // Cache instrument type (CE/PE)
+				// instrumentTypeKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataTypeSuffix)
+				// pipe.Set(ctx, instrumentTypeKey, inst.InstrumentType, LongCacheExpiry)
 
-				// Cache trading symbol lookup - organized by instrument components
-				tradingSymbolKey := fmt.Sprintf("%s%s:%s:%s:%s",
-					InstrumentLookupSymbolPrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-				pipe.Set(ctx, tradingSymbolKey, inst.TradingSymbol, LongCacheExpiry)
+				// // Cache expiry date
+				// expiryKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataExpirySuffix)
+				// pipe.Set(ctx, expiryKey, inst.Expiry, LongCacheExpiry)
 
-				// Cache exchange
-				exchangeKey := fmt.Sprintf("%s%s:%s:%s:%s",
-					InstrumentLookupExchangePrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-				pipe.Set(ctx, exchangeKey, inst.Exchange, LongCacheExpiry)
+				// // Cache lookup for next move - organized by strike, type and expiry
+				// nextMoveLookupKey := fmt.Sprintf("%s%s:%s:%s",
+				// 	InstrumentLookupNextMovePrefix, strikeStr, inst.InstrumentType, inst.Expiry)
+				// pipe.Set(ctx, nextMoveLookupKey, inst.Token, LongCacheExpiry)
 
-				// Cache full symbol (exchange:symbol)
-				fullSymbolKey := fmt.Sprintf("%s%s:%s:%s:%s",
-					InstrumentLookupFullSymbolPrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-				fullSymbol := fmt.Sprintf("%s:%s", inst.Exchange, inst.TradingSymbol)
-				pipe.Set(ctx, fullSymbolKey, fullSymbol, LongCacheExpiry)
+				// // Cache trading symbol lookup - organized by instrument components
+				// tradingSymbolKey := fmt.Sprintf("%s%s:%s:%s:%s",
+				// 	InstrumentLookupSymbolPrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+				// pipe.Set(ctx, tradingSymbolKey, inst.TradingSymbol, LongCacheExpiry)
+
+				// // Cache exchange
+				// exchangeKey := fmt.Sprintf("%s%s:%s:%s:%s",
+				// 	InstrumentLookupExchangePrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+				// pipe.Set(ctx, exchangeKey, inst.Exchange, LongCacheExpiry)
+
+				// // Cache full symbol (exchange:symbol)
+				// fullSymbolKey := fmt.Sprintf("%s%s:%s:%s:%s",
+				// 	InstrumentLookupFullSymbolPrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+				// fullSymbol := fmt.Sprintf("%s:%s", inst.Exchange, inst.TradingSymbol)
+				// pipe.Set(ctx, fullSymbolKey, fullSymbol, LongCacheExpiry)
 			}
 		}
 	}

@@ -293,36 +293,72 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 		})
 		return nil, fmt.Errorf("redis cache not initialized: %w", err)
 	}
+	// Enhanced logging for debugging Nifty option chain issues
+	m.log.Info("Retrieving strikes for option chain", map[string]interface{}{
+		"index":  index,
+		"expiry": expiry,
+	})
+
 	strikes, err := cacheMeta.GetExpiryStrikes(ctx, index, expiry)
 	if err != nil {
 		m.log.Error("Failed to get strikes", map[string]interface{}{
 			"error": err.Error(),
+			"index": index,
+			"expiry": expiry,
 		})
 		return nil, fmt.Errorf("failed to get strikes: %w", err)
 	}
 
 	allStrikes := strikes
+	m.log.Info("Retrieved strikes for option chain", map[string]interface{}{
+		"index":         index,
+		"expiry":        expiry,
+		"strikes_count": len(allStrikes),
+		"first_strikes": func() []string {
+			if len(allStrikes) > 5 {
+				return allStrikes[:5]
+			}
+			return allStrikes
+		}(),
+	})
+
 	if len(allStrikes) == 0 {
-		m.log.Error("Invalid strikes data type", map[string]interface{}{
+		m.log.Error("Empty strikes list", map[string]interface{}{
 			"index":  index,
 			"expiry": expiry,
 			"type":   fmt.Sprintf("%T", strikes),
 		})
-		return nil, fmt.Errorf("invalid strikes data type")
+		return nil, fmt.Errorf("empty strikes list for %s expiry %s", index, expiry)
 	}
 
 	if len(allStrikes) == 0 {
 		return nil, fmt.Errorf("empty strikes list")
 	}
 
-	// Get tentative ATM strike
+	// Get tentative ATM strike with enhanced logging
 	kc := zerodha.GetKiteConnect()
 	indices := core.GetIndices()
 	indexObj := indices.GetIndexByName(index)
 	if indexObj == nil {
+		m.log.Error("Index not enabled or does not exist", map[string]interface{}{
+			"index": index,
+		})
 		return nil, fmt.Errorf("index %s is not enabled or does not exist", index)
 	}
+
+	m.log.Info("Getting ATM strike", map[string]interface{}{
+		"index":                index,
+		"instrument_token":     indexObj.InstrumentToken,
+		"name_in_options":      indexObj.NameInOptions,
+		"available_strikes":    len(allStrikes),
+	})
+
 	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indexObj, allStrikes)
+
+	m.log.Info("Calculated ATM strike", map[string]interface{}{
+		"index":      index,
+		"atm_strike": atmStrike_tentative,
+	})
 
 	// Find the middle strike and calculate range
 	middleIndex := -1

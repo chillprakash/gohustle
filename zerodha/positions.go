@@ -625,7 +625,13 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 		Away:   make([]MoveStep, 0),
 		Closer: make([]MoveStep, 0),
 	}
-
+	cacheMetaInstance, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		pm.log.Error("Failed to get cache meta instance for move", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return moves
+	}
 	// Calculate steps for position adjustment
 	steps := []string{"1/4", "1/2", "1"}
 
@@ -654,7 +660,16 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 		}
 
 		// Get the instrument token for this strike using our new helper function
-		tokenStr := getInstrumentTokenWithStrikeAndExpiry(newStrike, optionType, expiryDate)
+		tokenStr, err := cacheMetaInstance.GetInstrumentTokenForStrike(ctx, newStrike, optionType, expiryDate)
+		if err != nil {
+			pm.log.Error("Failed to get instrument token for strike", map[string]interface{}{
+				"strike":      newStrike,
+				"option_type": optionType,
+				"expiry":      expiryDate,
+				"error":       err.Error(),
+			})
+			return moves
+		}
 		premium := getPremium(tokenStr)
 
 		moves.Away = append(moves.Away, MoveStep{
@@ -675,7 +690,16 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 		}
 
 		// Get the instrument token for this strike using our new helper function
-		tokenStr := getInstrumentTokenWithStrikeAndExpiry(newStrike, optionType, expiryDate)
+		tokenStr, err := cacheMetaInstance.GetInstrumentTokenForStrike(ctx, newStrike, optionType, expiryDate)
+		if err != nil {
+			pm.log.Error("Failed to get instrument token for strike", map[string]interface{}{
+				"strike":      newStrike,
+				"option_type": optionType,
+				"expiry":      expiryDate,
+				"error":       err.Error(),
+			})
+			return moves
+		}
 		premium := getPremium(tokenStr)
 
 		moves.Closer = append(moves.Closer, MoveStep{
@@ -700,45 +724,4 @@ func getPremium(tokenStr string) float64 {
 		return 0.0
 	}
 	return ltpVal
-}
-
-func getInstrumentTokenWithStrikeAndExpiry(strike float64, optionType string, expiryDate string) string {
-	// Get in-memory cache instance
-	inmemoryCache := cache.GetInMemoryCacheInstance()
-	logger := logger.L()
-
-	// Format the strike price as a string (whole number without decimals)
-	strikeStr := fmt.Sprintf("%.0f", math.Round(strike))
-
-	// Create the lookup key in the same format as used in CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes
-	// next_move:{strike}:{option_type}:{expiry}
-	nextMoveKey := fmt.Sprintf("next_move:%s:%s:%s", strikeStr, optionType, expiryDate)
-
-	logger.Debug("Looking up instrument token", map[string]interface{}{
-		"key":         nextMoveKey,
-		"strike":      strike,
-		"option_type": optionType,
-		"expiry":      expiryDate,
-	})
-
-	// Try to get the token from cache
-	tokenInterface, exists := inmemoryCache.Get(nextMoveKey)
-	if exists {
-		tokenStr := fmt.Sprintf("%v", tokenInterface)
-		logger.Debug("Found instrument token using next_move lookup", map[string]interface{}{
-			"key":   nextMoveKey,
-			"token": tokenStr,
-		})
-		return tokenStr
-	}
-
-	logger.Debug("No instrument token found for strike and expiry", map[string]interface{}{
-		"key":         nextMoveKey,
-		"strike":      strike,
-		"option_type": optionType,
-		"expiry":      expiryDate,
-	})
-
-	// If not found, return empty string
-	return ""
 }

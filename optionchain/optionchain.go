@@ -7,6 +7,7 @@ import (
 	"gohustle/core"
 	"gohustle/db"
 	"gohustle/logger"
+	"gohustle/utils"
 	"gohustle/zerodha"
 	"strconv"
 	"strings"
@@ -255,9 +256,6 @@ func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index s
 
 // CalculateOptionChain calculates the option chain for given parameters
 func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, expiry string, strikesCount int) (*OptionChainResponse, error) {
-	// Create a context with longer timeout for the entire operation
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second) // Increased timeout for entire calculation
-	defer cancel()
 
 	// Get Redis cache instance with initialization check
 	redisCache, err := cache.GetRedisCache()
@@ -279,12 +277,6 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 		return nil, fmt.Errorf("redis databases not properly initialized")
 	}
 
-	// Configure Redis client timeouts
-	ltpDB.Options().WriteTimeout = 10 * time.Second
-	ltpDB.Options().ReadTimeout = 10 * time.Second
-	positionsDB.Options().WriteTimeout = 10 * time.Second
-	positionsDB.Options().ReadTimeout = 10 * time.Second
-
 	// Get the Redis cache instance
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
@@ -293,11 +285,6 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 		})
 		return nil, fmt.Errorf("redis cache not initialized: %w", err)
 	}
-	// Enhanced logging for debugging Nifty option chain issues
-	m.log.Info("Retrieving strikes for option chain", map[string]interface{}{
-		"index":  index,
-		"expiry": expiry,
-	})
 
 	strikes, err := cacheMeta.GetExpiryStrikes(ctx, index, expiry)
 	if err != nil {
@@ -310,52 +297,14 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	}
 
 	allStrikes := strikes
-	m.log.Info("Retrieved strikes for option chain", map[string]interface{}{
-		"index":         index,
-		"expiry":        expiry,
-		"strikes_count": len(allStrikes),
-		"first_strikes": func() []string {
-			if len(allStrikes) > 5 {
-				return allStrikes[:5]
-			}
-			return allStrikes
-		}(),
-	})
-
-	if len(allStrikes) == 0 {
-		m.log.Error("Empty strikes list", map[string]interface{}{
-			"index":  index,
-			"expiry": expiry,
-			"type":   fmt.Sprintf("%T", strikes),
-		})
-		return nil, fmt.Errorf("empty strikes list for %s expiry %s", index, expiry)
-	}
-
-	if len(allStrikes) == 0 {
-		return nil, fmt.Errorf("empty strikes list")
-	}
-
 	// Get tentative ATM strike with enhanced logging
 	kc := zerodha.GetKiteConnect()
 	indices := core.GetIndices()
 	indexObj := indices.GetIndexByName(index)
-	if indexObj == nil {
-		m.log.Error("Index not enabled or does not exist", map[string]interface{}{
-			"index": index,
-		})
-		return nil, fmt.Errorf("index %s is not enabled or does not exist", index)
-	}
-
-	m.log.Info("Getting ATM strike", map[string]interface{}{
-		"index":             index,
-		"instrument_token":  indexObj.InstrumentToken,
-		"name_in_options":   indexObj.NameInOptions,
-		"available_strikes": len(allStrikes),
-	})
 
 	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indexObj, allStrikes)
 
-	m.log.Info("Calculated ATM strike", map[string]interface{}{
+	m.log.Debug("Calculated ATM strike", map[string]interface{}{
 		"index":      index,
 		"atm_strike": atmStrike_tentative,
 	})
@@ -378,7 +327,7 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	selectedStrikes := allStrikes[startIndex:endIndex]
 
 	// Log the number of strikes selected for debugging
-	m.log.Info("Selected strikes for option chain", map[string]interface{}{
+	m.log.Debug("Selected strikes for option chain", map[string]interface{}{
 		"requested_count": strikesCount,
 		"selected_count":  len(selectedStrikes),
 		"atm_strike":      atmStrike_tentative,
@@ -391,7 +340,7 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	// Log the actual selected strikes for verification
 	strikeValues := make([]string, 0, len(selectedStrikes))
 	strikeValues = append(strikeValues, selectedStrikes...)
-	m.log.Info("Selected strike values", map[string]interface{}{
+	m.log.Debug("Selected strike values", map[string]interface{}{
 		"strikes": strings.Join(strikeValues, ","),
 	})
 
@@ -420,13 +369,13 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 		strikeData := &StrikeData{
 			Strike: strikeFloat,
 			PE: &OptionData{
-				InstrumentToken: details.PEToken,
+				InstrumentToken: utils.Uint32ToString(details.PEToken),
 				LTP:             details.PELTP,
 				OI:              details.PEOI,
 				Volume:          details.PEVolume,
 			},
 			CE: &OptionData{
-				InstrumentToken: details.CEToken,
+				InstrumentToken: utils.Uint32ToString(details.CEToken),
 				LTP:             details.CELTP,
 				OI:              details.CEOI,
 				Volume:          details.CEVolume,
@@ -464,7 +413,7 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	}
 
 	// Log the final chain size for debugging
-	m.log.Info("Final option chain size", map[string]interface{}{
+	m.log.Debug("Final option chain size", map[string]interface{}{
 		"requested_strikes": strikesCount,
 		"selected_strikes":  len(selectedStrikes),
 		"final_chain_size":  len(chain),

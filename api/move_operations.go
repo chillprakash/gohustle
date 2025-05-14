@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -34,34 +33,40 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
+	cacheMetaInstance, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		s.log.Error("Failed to get cache meta instance for move", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, fmt.Sprintf("Failed to get cache meta instance: %v", err), http.StatusInternalServerError)
+		return
+	}
+
 	// 1. Extract strike, expiry, and instrument type from the trading symbol or token
-	strikeInfo, err := extractStrikeInfo(r.Context(), req)
+	tokenMetaData, err := cacheMetaInstance.GetMetadataOfToken(r.Context(), req.InstrumentToken)
 	if err != nil {
 		s.log.Error("Failed to extract strike info", map[string]interface{}{
 			"error":            err.Error(),
 			"instrument_token": req.InstrumentToken,
 			"trading_symbol":   req.TradingSymbol,
-		})
-		s.log.Error("Failed to extract strike info", map[string]interface{}{
-			"strike_info": strikeInfo,
 		})
 		sendErrorResponse(w, fmt.Sprintf("Failed to extract strike info: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	s.log.Info("Extracted strike info", map[string]interface{}{
-		"strike":          strikeInfo.Strike,
-		"instrument_type": strikeInfo.InstrumentType,
-		"expiry":          strikeInfo.Expiry,
+		"strike":          tokenMetaData.StrikePrice,
+		"instrument_type": tokenMetaData.InstrumentType,
+		"expiry":          tokenMetaData.Expiry,
+		"trading_symbol":  tokenMetaData.TradingSymbol,
 	})
 
 	// 2. Find the current position for this instrument
-	currentPosition, err := findCurrentPosition(r.Context(), req.InstrumentToken, req.TradingSymbol)
+	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol)
 	if err != nil {
 		s.log.Error("Failed to find current position", map[string]interface{}{
-			"error":            err.Error(),
-			"instrument_token": req.InstrumentToken,
-			"trading_symbol":   req.TradingSymbol,
+			"error":          err.Error(),
+			"trading_symbol": tokenMetaData.TradingSymbol,
 		})
 		sendErrorResponse(w, fmt.Sprintf("Failed to find current position: %v", err), http.StatusBadRequest)
 		return
@@ -81,7 +86,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 
 	// Fetch indexName earlier and pass to calculateQuantityToProcess
 	// 1. Get Instrument Token from Trading Symbol
-	instrumentTokenValue, tokenFound := zerodha.GetInstrumentToken(r.Context(), currentPosition.TradingSymbol)
+	instrumentTokenValue, tokenFound := cacheMetaInstance.GetInstrumentTokenForSymbol(r.Context(), currentPosition.TradingSymbol)
 	if !tokenFound {
 		s.log.Error("Could not find instrument token for position in cache", map[string]interface{}{ // Log token not found
 			"trading_symbol": currentPosition.TradingSymbol,
@@ -124,7 +129,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	}
 
 	// 3. Calculate the quantity to process based on the fraction
-	toProcessQuantity, err := calculateQuantityToProcess(currentPosition.Quantity, req.QuantityFrac, strikeInfo.InstrumentType, indexName)
+	toProcessQuantity, err := calculateQuantityToProcess(currentPosition.Quantity, req.QuantityFrac, tokenMetaData.InstrumentType, indexName)
 	if err != nil {
 		s.log.Error("Failed to calculate quantity to process", map[string]interface{}{ // Log quantity calculation failure
 			"error":            err.Error(),
@@ -153,7 +158,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 		s.handleExitOperation(w, r, req)
 		return // Exit early as handleExitOperation handles its own response
 	case "move_away", "move_closer":
-		err = s.processMoveOperation(w, r, req, currentPosition, toProcessQuantity, strikeInfo)
+		err = s.processMoveOperation(w, r, req, currentPosition, toProcessQuantity, tokenMetaData)
 	default:
 		sendErrorResponse(w, "Invalid move type", http.StatusBadRequest)
 		return
@@ -217,6 +222,14 @@ func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeI
 		"trading_symbol":   req.TradingSymbol,
 	})
 
+	cacheMetaInstance, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		log.Error("Failed to get cache meta instance", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to get cache meta instance: %w", err)
+	}
+
 	// We need an instrument token to fetch the information
 	if req.InstrumentToken == "" {
 		// If we only have a trading symbol, try to get the instrument token
@@ -224,158 +237,48 @@ func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeI
 			log.Info("Getting instrument token from trading symbol", map[string]interface{}{
 				"trading_symbol": req.TradingSymbol,
 			})
-			token, found := zerodha.GetInstrumentToken(ctx, req.TradingSymbol)
+			token, found := cacheMetaInstance.GetInstrumentTokenForSymbol(ctx, req.TradingSymbol)
 			if !found {
 				log.Error("Failed to get instrument token for trading symbol", map[string]interface{}{
 					"trading_symbol": req.TradingSymbol,
 				})
 				return nil, fmt.Errorf("failed to get instrument token for trading symbol: %s", req.TradingSymbol)
 			}
-			req.InstrumentToken = fmt.Sprintf("%v", token)
-			log.Info("Got instrument token from trading symbol", map[string]interface{}{
-				"trading_symbol":   req.TradingSymbol,
-				"instrument_token": req.InstrumentToken,
-			})
+			req.InstrumentToken = token.(string)
 		} else {
 			log.Error("Neither instrument token nor trading symbol provided", nil)
 			return nil, fmt.Errorf("neither instrument token nor trading symbol provided")
 		}
 	}
 
-	// Make sure we have the trading symbol
-	if req.TradingSymbol == "" {
-		log.Info("Getting trading symbol from instrument token", map[string]interface{}{
+	instrumentMetadata, err := cacheMetaInstance.GetMetadataOfToken(ctx, req.InstrumentToken)
+	if err != nil {
+		log.Error("Failed to get instrument metadata for token", map[string]interface{}{
 			"instrument_token": req.InstrumentToken,
 		})
-		// Get the trading symbol from the instrument token
-		tradingSymbol, _, err := zerodha.GetKiteConnect().GetInstrumentDetailsByToken(ctx, req.InstrumentToken)
-		if err != nil {
-			log.Error("Failed to get trading symbol from instrument token", map[string]interface{}{
-				"instrument_token": req.InstrumentToken,
-				"error":            err.Error(),
-			})
-			return nil, fmt.Errorf("failed to get trading symbol for token: %s, error: %w", req.InstrumentToken, err)
-		}
-		req.TradingSymbol = tradingSymbol
-		log.Info("Got trading symbol from instrument token", map[string]interface{}{
-			"instrument_token": req.InstrumentToken,
-			"trading_symbol":   req.TradingSymbol,
-		})
+		return nil, fmt.Errorf("failed to get instrument metadata for token: %s", req.InstrumentToken)
 	}
 
-	// Get the instrument type (CE/PE) using the new market_data.go method
-	log.Info("Getting instrument type from cache", map[string]interface{}{
+	log.Info("Got instrument metadata for token", map[string]interface{}{
 		"instrument_token": req.InstrumentToken,
+		"instrument_type":  instrumentMetadata.InstrumentType,
 	})
-	instrumentType, found := zerodha.GetInstrumentType(ctx, req.InstrumentToken)
-	if !found {
-		// Try to extract from trading symbol as fallback
-		log.Error("Failed to get instrument type from cache, attempting to extract from trading symbol", map[string]interface{}{
-			"instrument_token": req.InstrumentToken,
-			"trading_symbol":   req.TradingSymbol,
-		})
-	} else {
-		log.Info("Got instrument type from cache", map[string]interface{}{
-			"instrument_token": req.InstrumentToken,
-			"instrument_type":  instrumentType,
-		})
-	}
 
-	// Get the expiry date using the new market_data.go method
-	log.Info("Getting expiry from cache", map[string]interface{}{
-		"instrument_token": req.InstrumentToken,
-	})
-	expiry, found := zerodha.GetExpiry(ctx, req.InstrumentToken)
-	if !found {
-		// Try to extract from trading symbol as fallback
-		log.Error("Failed to get expiry from cache, attempting to extract from trading symbol", map[string]interface{}{
-			"instrument_token": req.InstrumentToken,
-			"trading_symbol":   req.TradingSymbol,
+	// Parse the strike price
+	strikePrice, err := strconv.ParseFloat(instrumentMetadata.StrikePrice, 64)
+	if err != nil {
+		log.Error("Failed to parse strike price", map[string]interface{}{
+			"strike_str": instrumentMetadata.StrikePrice,
+			"error":      err.Error(),
 		})
-
-		// For now, use a placeholder expiry
-		expiry = "CURRENT"
-		log.Info("Using placeholder expiry", map[string]interface{}{
-			"expiry": expiry,
-		})
-	} else {
-		log.Info("Got expiry from cache", map[string]interface{}{
-			"instrument_token": req.InstrumentToken,
-			"expiry":           expiry,
-		})
-	}
-
-	// Get the strike price from cache
-	log.Info("Getting strike price from cache", map[string]interface{}{
-		"instrument_token": req.InstrumentToken,
-	})
-	strike := 0.0
-	inMemoryCache := cache.GetInMemoryCacheInstance()
-	if inMemoryCache != nil {
-		strikeKey := fmt.Sprintf("strike:%s", req.InstrumentToken)
-		log.Info("Looking up strike price with key", map[string]interface{}{
-			"strike_key": strikeKey,
-		})
-		strikeVal, found := inMemoryCache.Get(strikeKey)
-		if found {
-			strikeStr := fmt.Sprintf("%v", strikeVal)
-			log.Info("Found strike value in cache", map[string]interface{}{
-				"strike_val": strikeStr,
-			})
-			strikeFloat, err := strconv.ParseFloat(strikeStr, 64)
-			if err == nil {
-				strike = strikeFloat
-				log.Info("Parsed strike price", map[string]interface{}{
-					"strike": strike,
-				})
-			} else {
-				log.Error("Failed to parse strike price", map[string]interface{}{
-					"strike_str": strikeStr,
-					"error":      err.Error(),
-				})
-			}
-		} else {
-			log.Error("Strike price not found in cache", map[string]interface{}{
-				"strike_key": strikeKey,
-			})
-
-			// Try to extract from trading symbol as fallback
-			log.Info("Attempting to extract strike from trading symbol", map[string]interface{}{
-				"trading_symbol": req.TradingSymbol,
-			})
-
-			// Extract numeric part from trading symbol (e.g., NIFTY2550824450PE -> 24450)
-			re := regexp.MustCompile(`(\d+)(CE|PE)$`)
-			matches := re.FindStringSubmatch(req.TradingSymbol)
-			if len(matches) == 3 {
-				strikeStr := matches[1]
-				strikeFloat, err := strconv.ParseFloat(strikeStr, 64)
-				if err == nil {
-					strike = strikeFloat
-					log.Info("Extracted strike from trading symbol", map[string]interface{}{
-						"trading_symbol": req.TradingSymbol,
-						"strike":         strike,
-					})
-				}
-			}
-		}
-	} else {
-		log.Error("In-memory cache instance is nil", nil)
-	}
-
-	if strike == 0.0 {
-		log.Error("Failed to get strike price", map[string]interface{}{
-			"instrument_token": req.InstrumentToken,
-			"trading_symbol":   req.TradingSymbol,
-		})
-		return nil, fmt.Errorf("failed to get strike price for token: %s", req.InstrumentToken)
+		return nil, fmt.Errorf("failed to parse strike price: %w", err)
 	}
 
 	strikeInfo := &StrikeInfo{
-		Strike:         strike,
-		InstrumentType: instrumentType,
-		Expiry:         expiry,
-		TradingSymbol:  req.TradingSymbol,
+		Strike:         strikePrice,
+		InstrumentType: instrumentMetadata.InstrumentType,
+		Expiry:         instrumentMetadata.Expiry,
+		TradingSymbol:  instrumentMetadata.TradingSymbol,
 	}
 
 	log.Info("Successfully created StrikeInfo", map[string]interface{}{
@@ -392,43 +295,25 @@ func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeI
 // to get the instrument type, expiry, and strike price directly from the cache
 
 // findCurrentPosition finds the current position for the given instrument
-func findCurrentPosition(ctx context.Context, instrumentToken, tradingSymbol string) (*db.PositionRecord, error) {
+func findCurrentPosition(ctx context.Context, tradingSymbol string) (*db.PositionRecord, error) {
 	timescaleDB := db.GetTimescaleDB()
 	if timescaleDB == nil {
 		return nil, fmt.Errorf("database connection not available")
 	}
 
-	// Get all positions
-	positions, err := timescaleDB.ListPositions(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list positions: %w", err)
-	}
-
-	// Find the position with the matching trading symbol
-	for _, pos := range positions {
-		if pos.TradingSymbol == tradingSymbol {
-			return pos, nil
+	// First try to find by trading symbol (most efficient)
+	if tradingSymbol != "" {
+		position, err := timescaleDB.GetPositionByTradingSymbol(ctx, tradingSymbol)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get position by trading symbol: %w", err)
+		}
+		if position != nil {
+			return position, nil
 		}
 	}
 
-	// If we couldn't find by trading symbol but have an instrument token, try that
-	if instrumentToken != "" {
-		for _, pos := range positions {
-			// Check if the position has a KiteResponse with matching instrument token
-			if pos.KiteResponse != nil {
-				if kitePos, ok := pos.KiteResponse.(map[string]interface{}); ok {
-					if token, hasToken := kitePos["instrument_token"]; hasToken {
-						tokenStr := fmt.Sprintf("%v", token)
-						if tokenStr == instrumentToken {
-							return pos, nil
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return nil, nil // No position found
+	// If still not found, return an error
+	return nil, fmt.Errorf("no position found for trading symbol '%s'", tradingSymbol)
 }
 
 // calculateQuantityToProcess calculates the quantity to move/exit based on fraction and ensures it's a multiple of lot size.
@@ -642,25 +527,23 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	// 1. Extract strike, expiry, and instrument type from the trading symbol or token
-	_, err := extractStrikeInfo(r.Context(), req)
+	cacheMetaInstance, err := cache.GetCacheMetaInstance()
 	if err != nil {
-		s.log.Error("Failed to extract strike info for exit", map[string]interface{}{
-			"error":            err.Error(),
-			"instrument_token": req.InstrumentToken,
-			"trading_symbol":   req.TradingSymbol,
+		s.log.Error("Failed to get cache meta instance for exit", map[string]interface{}{
+			"error": err.Error(),
 		})
-		sendErrorResponse(w, fmt.Sprintf("Failed to extract strike info: %v", err), http.StatusBadRequest)
+		sendErrorResponse(w, fmt.Sprintf("Failed to get cache meta instance: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	tokenMetaData, _ := cacheMetaInstance.GetMetadataOfToken(r.Context(), req.InstrumentToken)
+
 	// 2. Find the current position for the instrument
-	currentPosition, err := findCurrentPosition(r.Context(), req.InstrumentToken, req.TradingSymbol)
+	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol)
 	if err != nil {
 		s.log.Error("Failed to find current position for exit", map[string]interface{}{
-			"error":            err.Error(),
-			"instrument_token": req.InstrumentToken,
-			"trading_symbol":   req.TradingSymbol,
+			"error":          err.Error(),
+			"trading_symbol": tokenMetaData.TradingSymbol,
 		})
 		sendErrorResponse(w, fmt.Sprintf("Failed to find current position: %v", err), http.StatusBadRequest)
 		return
@@ -679,7 +562,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 	})
 
 	// 3. Get Instrument Token from Trading Symbol
-	instrumentTokenValue, tokenFound := zerodha.GetInstrumentToken(r.Context(), currentPosition.TradingSymbol)
+	instrumentTokenValue, tokenFound := cacheMetaInstance.GetInstrumentTokenForSymbol(r.Context(), currentPosition.TradingSymbol)
 	if !tokenFound {
 		s.log.Error("Could not find instrument token for position in cache for exit", map[string]interface{}{
 			"trading_symbol": currentPosition.TradingSymbol,
@@ -697,24 +580,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	// 4. Get Index Name from Instrument Token
-	indexName, indexFound := zerodha.GetIndexFromInstrumentToken(r.Context(), instrumentTokenStr)
-	if !indexFound {
-		// Attempt to guess from trading symbol as a fallback
-		if strings.Contains(currentPosition.TradingSymbol, "NIFTY") {
-			indexName = "NIFTY"
-		} else if strings.Contains(currentPosition.TradingSymbol, "BANKNIFTY") {
-			indexName = "BANKNIFTY"
-		} else if strings.Contains(currentPosition.TradingSymbol, "SENSEX") {
-			indexName = "SENSEX"
-		} else {
-			s.log.Error("Could not determine index name for exit lot size calculation", map[string]interface{}{
-				"instrument_token": instrumentTokenStr,
-				"trading_symbol":   currentPosition.TradingSymbol,
-			})
-			indexName = "NIFTY" // Default as last resort
-		}
-	}
+	indexName := tokenMetaData.InstrumentType
 
 	// 5. Calculate exit quantity based on fraction
 	var exitQuantity int
@@ -847,13 +713,18 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 
 // processMoveOperation handles the move_away and move_closer operations
 func (s *Server) processMoveOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest,
-	currentPosition *db.PositionRecord, toProcessQuantity int, strikeInfo *StrikeInfo) error {
+	currentPosition *db.PositionRecord, toProcessQuantity int, tokenMetaData cache.InstrumentData) error {
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		return fmt.Errorf("failed to get cache meta instance: %w", err)
+	}
 
 	// Calculate the new strike price based on the move type and steps
-	newStrike := calculateNewStrike(strikeInfo.Strike, strikeInfo.InstrumentType, req.MoveType, req.Steps)
+	newStrike, _ := strconv.ParseFloat(tokenMetaData.StrikePrice, 64)
+	newStrike = calculateNewStrike(newStrike, tokenMetaData.InstrumentType, req.MoveType, req.Steps)
 
 	// Get the instrument token for the new strike
-	newInstrumentToken, err := getInstrumentTokenForStrike(r.Context(), newStrike, strikeInfo.InstrumentType, strikeInfo.Expiry)
+	newInstrumentToken, err := cacheMeta.GetInstrumentTokenForStrike(r.Context(), newStrike, tokenMetaData.InstrumentType, tokenMetaData.Expiry)
 	if err != nil {
 		return fmt.Errorf("failed to get instrument token for new strike: %w", err)
 	}
@@ -938,25 +809,6 @@ func calculateNewStrike(currentStrike float64, instrumentType string, moveType M
 			return currentStrike + strikeChange
 		}
 	}
-}
-
-// getInstrumentTokenForStrike gets the instrument token for a given strike price, instrument type, and expiry
-func getInstrumentTokenForStrike(ctx context.Context, strike float64, instrumentType, expiry string) (string, error) {
-	// Format the lookup key
-	lookupKey := fmt.Sprintf("next_move:%v:%s:%s", strike, instrumentType, expiry)
-
-	// Try to get the instrument token from the cache
-	inMemoryCache := cache.GetInMemoryCacheInstance()
-	if inMemoryCache == nil {
-		return "", fmt.Errorf("in-memory cache not available")
-	}
-
-	token, exists := inMemoryCache.Get(lookupKey)
-	if !exists {
-		return "", fmt.Errorf("instrument token not found for strike %v %s %s", strike, instrumentType, expiry)
-	}
-
-	return fmt.Sprintf("%v", token), nil
 }
 
 // placeOrderInternal places an order using the internal order placement logic

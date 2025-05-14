@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/jackc/pgx/v4"
 )
 
 // UpsertPosition inserts or updates a position record in the positions table
@@ -121,6 +123,63 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 		position.PaperTrading,
 		kiteRespJSON,
 	).Scan(&position.ID)
+}
+
+// GetPositionByTradingSymbol fetches a position record by trading symbol
+func (t *TimescaleDB) GetPositionByTradingSymbol(ctx context.Context, tradingSymbol string) (*PositionRecord, error) {
+	query := `SELECT id, position_id, trading_symbol, exchange, product, quantity, average_price, last_price, pnl, realized_pnl, unrealized_pnl, multiplier, buy_quantity, sell_quantity, buy_price, sell_price, buy_value, sell_value, position_type, strategy_id, user_id, updated_at, paper_trading, kite_response FROM positions WHERE trading_symbol = $1 ORDER BY updated_at DESC LIMIT 1`
+
+	position := &PositionRecord{}
+	var kiteRespBytes []byte
+	err := t.pool.QueryRow(ctx, query, tradingSymbol).Scan(
+		&position.ID,
+		&position.PositionID,
+		&position.TradingSymbol,
+		&position.Exchange,
+		&position.Product,
+		&position.Quantity,
+		&position.AveragePrice,
+		&position.LastPrice,
+		&position.PnL,
+		&position.RealizedPnL,
+		&position.UnrealizedPnL,
+		&position.Multiplier,
+		&position.BuyQuantity,
+		&position.SellQuantity,
+		&position.BuyPrice,
+		&position.SellPrice,
+		&position.BuyValue,
+		&position.SellValue,
+		&position.PositionType,
+		&position.StrategyID,
+		&position.UserID,
+		&position.UpdatedAt,
+		&position.PaperTrading,
+		&kiteRespBytes,
+	)
+
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil // No position found
+		}
+		t.log.Error("Failed to get position by trading symbol", map[string]interface{}{
+			"error":          err.Error(),
+			"trading_symbol": tradingSymbol,
+		})
+		return nil, err
+	}
+
+	// Parse KiteResponse JSON if it's not nil
+	if kiteRespBytes != nil {
+		var kiteResp interface{}
+		if err := json.Unmarshal(kiteRespBytes, &kiteResp); err != nil {
+			t.log.Error("Failed to unmarshal position KiteResponse", map[string]interface{}{"error": err.Error()})
+		} else {
+			position.KiteResponse = kiteResp
+		}
+	}
+
+	return position, nil
 }
 
 // ListPositions fetches all position records from the positions table

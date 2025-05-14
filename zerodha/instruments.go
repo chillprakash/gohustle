@@ -50,7 +50,7 @@ type TokenInfo struct {
 }
 
 var (
-	tokensCache                  map[string]string
+	tokensCache                  map[uint32]string
 	reverseLookupCacheWithStrike map[string]string
 	reverseLookupCache           map[string]TokenInfo
 	instrumentMutex              sync.RWMutex
@@ -69,7 +69,7 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 	log := logger.L()
 
 	// Enhanced logging for debugging
-	log.Info("Getting ATM strike based on LTP", map[string]interface{}{
+	log.Debug("Getting ATM strike based on LTP", map[string]interface{}{
 		"index_name":        index.NameInOptions,
 		"instrument_token":  index.InstrumentToken,
 		"available_strikes": len(strikes),
@@ -93,12 +93,7 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 		return ""
 	}
 
-	ltpKey := fmt.Sprintf("%s_ltp", index.InstrumentToken)
-	log.Info("Fetching LTP from Redis", map[string]interface{}{
-		"ltp_key": ltpKey,
-		"index":   index.NameInOptions,
-	})
-
+	ltpKey := fmt.Sprintf("%d_ltp", index.InstrumentToken)
 	ltp, err := ltpDB.Get(context.Background(), ltpKey).Float64()
 	if err != nil {
 		log.Error("Failed to get LTP for index", map[string]interface{}{
@@ -110,11 +105,6 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 		return ""
 	}
 
-	log.Info("Successfully retrieved LTP", map[string]interface{}{
-		"index": index.NameInOptions,
-		"ltp":   ltp,
-	})
-
 	// Find nearest strike to LTP
 	var nearestStrike string
 	minDiff := math.MaxFloat64
@@ -124,7 +114,7 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 	if len(strikes) > 5 {
 		samples = strikes[:5]
 	}
-	log.Info("Finding nearest strike to LTP", map[string]interface{}{
+	log.Debug("Finding nearest strike to LTP", map[string]interface{}{
 		"index":          index.NameInOptions,
 		"ltp":            ltp,
 		"strikes_count":  len(strikes),
@@ -149,7 +139,7 @@ func (k *KiteConnect) GetTentativeATMBasedonLTP(index core.Index, strikes []stri
 		}
 	}
 
-	log.Info("Selected ATM strike", map[string]interface{}{
+	log.Debug("Selected ATM strike", map[string]interface{}{
 		"index":        index.NameInOptions,
 		"ltp":          ltp,
 		"nearest_diff": minDiff,
@@ -360,7 +350,7 @@ func (k *KiteConnect) SyncAllInstrumentDataToCache(ctx context.Context) error {
 			Expiry:          inst.Expiry,
 			Exchange:        inst.Exchange,
 			Token:           inst.InstrumentToken,
-			InstrumentToken: inst.InstrumentToken,
+			InstrumentToken: utils.StringToUint32(inst.InstrumentToken),
 		})
 		processedCount++
 
@@ -522,7 +512,7 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 				instumentSymbolListForGetQuotes = append(instumentSymbolListForGetQuotes, extractQuotesQuerySymbol(instrumentSymbol)...)
 			}
 
-			log.Info("List to be passed to GetQuotes", map[string]interface{}{
+			log.Debug("List to be passed to GetQuotes", map[string]interface{}{
 				"list": instumentSymbolListForGetQuotes,
 			})
 
@@ -533,7 +523,7 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 				})
 				return nil, err
 			}
-			log.Info("Quotes fetched successfully", map[string]interface{}{
+			log.Debug("Quotes fetched successfully", map[string]interface{}{
 				"expiry":                       expiry,
 				"quotes":                       quotes,
 				"length":                       len(quotes),
@@ -561,7 +551,7 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 				tokenStr := strconv.Itoa(quote.InstrumentToken)
 				tokenOIMap[tokenStr] = oi
 
-				log.Info("Quote OI information", map[string]interface{}{
+				log.Debug("Quote OI information", map[string]interface{}{
 					"symbol": instrumentSymbol,
 					"token":  tokenStr,
 					"oi":     oi,
@@ -604,13 +594,13 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 			for _, inst := range sortedInstruments {
 				filteredInstruments = append(filteredInstruments, inst.Symbol)
 				// Log the filtered instrument and its OI
-				log.Info("Filtered instrument based on OI", map[string]interface{}{
+				log.Debug("Filtered instrument based on OI", map[string]interface{}{
 					"symbol": inst.Symbol,
 					"oi":     inst.OI,
 				})
 			}
 
-			log.Info("Filtered instruments based on OI", map[string]interface{}{
+			log.Debug("Filtered instruments based on OI", map[string]interface{}{
 				"count":       len(filteredInstruments),
 				"threshold":   MinimumOIForInstrument,
 				"instruments": filteredInstruments,
@@ -625,12 +615,12 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 					})
 					return nil, err
 				}
-				log.Info("Fetched instruments from filtered list", map[string]interface{}{
+				log.Debug("Fetched instruments from filtered list", map[string]interface{}{
 					"count": len(instruments),
 				})
 
 				for _, instrument := range instruments {
-					log.Info("Fetched instrument", map[string]interface{}{
+					log.Debug("Fetched instrument", map[string]interface{}{
 						"symbol": instrument.Tradingsymbol,
 					})
 					instrumentList = append(instrumentList, cache.InstrumentData{
@@ -818,9 +808,9 @@ func formatExpiryMapForLog(m map[string][]time.Time) map[string][]string {
 
 // GetUpcomingExpiryTokensForIndices returns instrument tokens for options of upcoming expiries
 // with optional filtering based on open interest
-func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, indices []core.Index) ([]string, error) {
+func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, indices []core.Index) ([]uint32, error) {
 	log := logger.L()
-	tokens := make([]string, 0)
+	tokens := make([]uint32, 0)
 
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
@@ -1088,221 +1078,6 @@ func (k *KiteConnect) GetInstrumentDetailsByToken(ctx context.Context, instrumen
 	}
 
 	return "", "", fmt.Errorf("instrument token not found: %s", instrumentToken)
-}
-
-// CreateLookUpforFileStore creates a lookup map for index tokens vs Index name for lookup during websocke
-func (k *KiteConnect) CreateLookUpforStoringFileFromWebsocketsAndAlsoStrikes(ctx context.Context) {
-	log := logger.L()
-	log.Info("Initializing lookup maps for File Store", nil)
-
-	currentDate := utils.GetCurrentKiteDate()
-	fileStore := filestore.NewDiskFileStore()
-	cache := cache.GetInMemoryCacheInstance()
-
-	data, err := fileStore.ReadGzippedProto("instruments", currentDate)
-	if err != nil {
-		log.Error("Failed to read instrument data", map[string]interface{}{
-			"error": err.Error(),
-			"date":  currentDate,
-		})
-		return
-	}
-
-	instrumentList := &InstrumentList{}
-	if err := proto.Unmarshal(data, instrumentList); err != nil {
-		log.Error("Failed to unmarshal instrument data", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return
-	}
-	// Process each instrument
-	for _, inst := range instrumentList.Instruments {
-		// Skip if not an option
-		if inst.InstrumentType != "CE" && inst.InstrumentType != "PE" {
-			continue
-		}
-		// Cache keys for instrument metadata
-		strike_key := fmt.Sprintf("strike:%s", inst.InstrumentToken)
-		expiry_key := fmt.Sprintf("expiry:%s", inst.InstrumentToken)
-		instrument_type_key := fmt.Sprintf("instrument_type:%s", inst.InstrumentToken) // Corrected key
-		strike, err := strconv.ParseFloat(inst.StrikePrice, 64)
-		if err != nil {
-			log.Error("Failed to parse strike price", map[string]interface{}{
-				"error":        err.Error(),
-				"strike_price": inst.StrikePrice,
-				"symbol":       inst.Tradingsymbol,
-			})
-			continue
-		}
-		strikeStr := fmt.Sprintf("%d", int(strike))
-		next_move_lookup_key := fmt.Sprintf("next_move:%s:%s:%s", strikeStr, inst.InstrumentType, inst.Expiry)
-		log.Debug("Looking up instrument token", map[string]interface{}{
-			"key":         next_move_lookup_key,
-			"strike":      strikeStr,
-			"option_type": inst.InstrumentType,
-			"expiry":      inst.Expiry,
-		})
-		if slices.Contains(core.GetIndices().GetAllNames(), inst.Name) {
-			// Cache the index name for this instrument token with prefix
-			instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", inst.InstrumentToken)
-			cache.Set(instrumentNameKey, inst.Name, 7*24*time.Hour)
-
-			// Also store with direct key format for backward compatibility
-			cache.Set(inst.InstrumentToken, inst.Name, 7*24*time.Hour)
-
-			// Cache strike price
-			cache.Set(strike_key, inst.StrikePrice, 7*24*time.Hour)
-
-			// Cache instrument type
-			cache.Set(instrument_type_key, inst.InstrumentType, 7*24*time.Hour)
-
-			// Cache expiry date
-			if inst.Expiry != "" {
-				// Cache trading symbol based on index, strike, and expiry
-				if inst.InstrumentType == "CE" || inst.InstrumentType == "PE" {
-					// Create a key for looking up trading symbol: index:strike:option_type:expiry
-					tradingSymbolKey := fmt.Sprintf("trading_symbol:%s:%s:%s:%s",
-						inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-
-					// Store the trading symbol with the correct exchange format
-					// For Zerodha Kite API, the format is typically "EXCHANGE:SYMBOL"
-					// Store both the raw trading symbol and the exchange separately
-					exchangeKey := fmt.Sprintf("exchange:%s:%s:%s:%s",
-						inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-
-					// Store the exchange (e.g., "NSE", "BSE")
-					cache.Set(exchangeKey, inst.Exchange, 7*24*time.Hour)
-
-					// Store the raw trading symbol without exchange prefix
-					formattedTradingSymbol := inst.Tradingsymbol
-
-					// Also store the complete exchange:symbol format for direct API use
-					fullSymbolKey := fmt.Sprintf("full_symbol:%s:%s:%s:%s",
-						inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-					fullSymbol := fmt.Sprintf("%s:%s", inst.Exchange, inst.Tradingsymbol)
-					cache.Set(fullSymbolKey, fullSymbol, 7*24*time.Hour)
-
-					// Cache the trading symbol
-					cache.Set(tradingSymbolKey, formattedTradingSymbol, 7*24*time.Hour)
-
-					log.Debug("Cached trading symbol", map[string]interface{}{
-						"key":            tradingSymbolKey,
-						"trading_symbol": formattedTradingSymbol,
-						"full_symbol":    fullSymbol,
-						"exchange":       inst.Exchange,
-						"index":          inst.Name,
-						"strike":         strikeStr,
-						"option_type":    inst.InstrumentType,
-						"expiry":         inst.Expiry,
-					})
-				}
-
-				cache.Set(expiry_key, inst.Expiry, 7*24*time.Hour)
-			}
-			cache.Set(next_move_lookup_key, inst.InstrumentToken, 7*24*time.Hour)
-
-			// Cache reverse lookup (trading symbol to instrument token)
-			cache.Set(inst.Tradingsymbol, inst.InstrumentToken, 7*24*time.Hour)
-			cache.Set(instrumentNameKey, inst.Name, 7*24*time.Hour)
-			continue
-		}
-	}
-
-	for _, index := range core.GetIndices().GetIndicesToSubscribeForIntraday() {
-		// Store with prefix format
-		instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", index.InstrumentToken)
-		cache.Set(instrumentNameKey, index.NameInOptions, 7*24*time.Hour)
-
-		// Also store with direct key format for backward compatibility
-		cache.Set(index.InstrumentToken, index.NameInOptions, 7*24*time.Hour)
-
-		log.Debug("Cached index lookup", map[string]interface{}{
-			"token": index.InstrumentToken,
-			"name":  index.NameInOptions,
-		})
-	}
-}
-
-// CreateLookupMapWithExpiryVSTokenMap extracts instrument tokens and creates a reverse lookup map
-func (k *KiteConnect) CreateLookupMapWithExpiryVSTokenMap(ctx context.Context) (map[string]string, map[string]TokenInfo, map[string]string) {
-	once.Do(func() {
-		log := logger.L()
-		log.Info("Initializing lookup maps", nil)
-		// Get the full instrument map
-		instrumentMap, err := k.GetInstrumentExpirySymbolMap(ctx)
-		if err != nil {
-			log.Error("Failed to get instrument map", map[string]interface{}{
-				"error": err.Error(),
-			})
-
-		}
-		// Initialize maps
-		tokensCache = make(map[string]string)
-		reverseLookupCache = make(map[string]TokenInfo)
-		reverseLookupCacheWithStrike = make(map[string]string)
-
-		// Add options (IsIndex = false)
-		for _, expiryMap := range instrumentMap.Data {
-			for expiry, options := range expiryMap {
-				for _, call := range options.Calls {
-					index := extractIndex(call.Symbol)
-					targetFile := generateTargetFileName(expiry, index)
-					tokensCache[call.InstrumentToken] = call.Symbol
-					strikeWithAbbreviation := extractStrikeAndType(call.Symbol, call.Strike)
-					reverseLookupCache[call.InstrumentToken] = TokenInfo{
-						Expiry:                 expiry,
-						Symbol:                 call.Symbol,
-						Index:                  index,
-						IsIndex:                false,
-						TargetFile:             targetFile,
-						StrikeWithAbbreviation: strikeWithAbbreviation,
-					}
-					reverseLookupCacheWithStrike[strikeWithAbbreviation] = call.InstrumentToken
-				}
-				for _, put := range options.Puts {
-					index := extractIndex(put.Symbol)
-					targetFile := generateTargetFileName(expiry, index)
-					tokensCache[put.InstrumentToken] = put.Symbol
-					strikeWithAbbreviation := extractStrikeAndType(put.Symbol, put.Strike)
-					reverseLookupCache[put.InstrumentToken] = TokenInfo{
-						Expiry:                 expiry,
-						Symbol:                 put.Symbol,
-						Index:                  index,
-						IsIndex:                false,
-						TargetFile:             targetFile,
-						StrikeWithAbbreviation: strikeWithAbbreviation,
-					}
-					reverseLookupCacheWithStrike[strikeWithAbbreviation] = put.InstrumentToken
-				}
-			}
-		}
-
-		// Add indices
-		indexTokens := k.GetIndexTokens()
-		for name, token := range indexTokens {
-			targetFile := generateTargetFileName(time.Time{}, name)
-			tokensCache[token] = name
-			reverseLookupCache[token] = TokenInfo{
-				Expiry:     time.Time{},
-				Symbol:     name,
-				Index:      name,
-				IsIndex:    true,
-				TargetFile: targetFile,
-			}
-		}
-
-		log.Info("Lookup maps initialized", map[string]interface{}{
-			"tokens_cache_size":   len(tokensCache),
-			"reverse_lookup_size": len(reverseLookupCache),
-			"strike_lookup_size":  len(reverseLookupCacheWithStrike),
-		})
-
-		for strike, token := range reverseLookupCacheWithStrike {
-			fmt.Println(strike, token)
-		}
-	})
-	k.PrintStrikeCache()
-	return tokensCache, reverseLookupCache, reverseLookupCacheWithStrike
 }
 
 func generateTargetFileName(expiry time.Time, index string) string {
@@ -1642,9 +1417,9 @@ func extractIndex(symbol string) string {
 }
 
 // GetIndexTokens returns a map of index names to their instrument tokens
-func (k *KiteConnect) GetIndexTokens() map[string]string {
+func (k *KiteConnect) GetIndexTokens() map[string]uint32 {
 	indices := core.GetIndices()
-	tokens := make(map[string]string)
+	tokens := make(map[string]uint32)
 
 	// Use NameInIndices as key since that's what Zerodha API uses
 	for _, index := range indices.GetAllIndices() {

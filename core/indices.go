@@ -3,7 +3,7 @@ package core
 // Index represents a market index with its details
 type Index struct {
 	NameInOptions   string
-	InstrumentToken string
+	InstrumentToken uint32
 	NameInIndices   string
 	Enabled         bool
 	IndexNumber     int // For ordering/rendering in client and server
@@ -21,21 +21,21 @@ var GetIndices = func() Indices {
 	return Indices{
 		NIFTY: Index{
 			NameInOptions:   "NIFTY",
-			InstrumentToken: "256265",
+			InstrumentToken: 256265,
 			NameInIndices:   "NIFTY 50",
 			Enabled:         true,
 			IndexNumber:     1, // Primary index
 		},
 		SENSEX: Index{
 			NameInOptions:   "SENSEX",
-			InstrumentToken: "265",
+			InstrumentToken: 265,
 			NameInIndices:   "SENSEX",
 			Enabled:         true,
 			IndexNumber:     0, // Secondary index
 		},
 		BANKNIFTY: Index{
 			NameInOptions:   "BANKNIFTY",
-			InstrumentToken: "260105",
+			InstrumentToken: 260105,
 			NameInIndices:   "NIFTY BANK",
 			Enabled:         false,
 			IndexNumber:     2, // Tertiary index
@@ -61,8 +61,8 @@ func (i Indices) GetAllIndices() []Index {
 }
 
 // GetAllInstrumentTokens returns a slice of all instrument tokens
-func (i Indices) GetAllInstrumentTokens() []string {
-	tokens := make([]string, 0, 3)
+func (i Indices) GetAllInstrumentTokens() []uint32 {
+	tokens := make([]uint32, 0, 3)
 
 	if i.NIFTY.Enabled {
 		tokens = append(tokens, i.NIFTY.InstrumentToken)

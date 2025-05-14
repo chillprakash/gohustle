@@ -30,8 +30,9 @@ const (
 	InstrumentNearestExpiryKey                                     = "instrument:mapping:nearest_expiry"
 
 	// Mapping keys
-	InstrumentTokenPrefix  = "instrument:mapping:token:"
-	InstrumentSymbolPrefix = "instrument:mapping:symbol:"
+	InstrumentTokenPrefix                = "instrument:mapping:token:"
+	InstrumentSymbolPrefix               = "instrument:mapping:symbol:"
+	InstruemntStrikeWithOptionTypePrefix = "instrument:mapping:strike_with_option_type:"
 
 	// Metadata keys
 	InstrumentMetadataPrefix = "instrument:metadata:"
@@ -91,6 +92,24 @@ func GetCacheMetaInstance() (*CacheMeta, error) {
 	return cacheMetaInstance, nil
 }
 
+func (c *CacheMeta) GetInstrumentTokenForSymbol(ctx context.Context, tradingSymbol string) (interface{}, bool) {
+	key := fmt.Sprintf("%s%s", InstrumentSymbolPrefix, tradingSymbol)
+	result, err := c.client.Get(ctx, key).Result()
+	if err == nil {
+		return result, true
+	}
+	return nil, false
+}
+
+func (c *CacheMeta) GetInstrumentSymbolForToken(ctx context.Context, token string) (interface{}, bool) {
+	key := fmt.Sprintf("%s%s", InstrumentTokenPrefix, token)
+	result, err := c.client.Get(ctx, key).Result()
+	if err == nil {
+		return result, true
+	}
+	return nil, false
+}
+
 // NewCacheMeta creates a new CacheMeta instance (deprecated, use GetCacheMetaInstance instead)
 func NewCacheMeta() (*CacheMeta, error) {
 	return GetCacheMetaInstance()
@@ -101,12 +120,12 @@ func (c *CacheMeta) StoreSubscribedKeys(ctx context.Context, tokens []interface{
 	return c.client.SAdd(ctx, key, tokens...).Err()
 }
 
-func (c *CacheMeta) GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx context.Context, index string, expiry string) ([]string, error) {
+func (c *CacheMeta) GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx context.Context, index string, expiry string) ([]uint32, error) {
 	key := fmt.Sprintf("%s:%s_%s", InstrumentExpiryStrikesWithExchangeAndInstrumentSymbolFiltered, index, expiry)
 	result, err := c.client.SMembers(ctx, key).Result()
 	if err != nil {
 		if err == redis.Nil {
-			return []string{}, nil
+			return []uint32{}, nil
 		}
 		c.log.Error("Failed to get expiry strikes with exchange and instrument symbol", map[string]interface{}{
 			"index":  index,
@@ -116,7 +135,7 @@ func (c *CacheMeta) GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx context.
 		return nil, err
 	}
 
-	return result, nil
+	return utils.StringSliceToUint32Slice(result), nil
 }
 
 func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []string) ([]LTPData, error) {
@@ -150,7 +169,7 @@ func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []
 	// Process results
 	for _, token := range tokens {
 		data := &LTPData{
-			instrumentToken: token,
+			instrumentToken: utils.StringToUint32(token),
 		}
 
 		// Get LTP
@@ -203,7 +222,7 @@ func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []
 		sampleSize = len(ltpdataList)
 	}
 
-	c.log.Info("Successfully retrieved LTP for instrument tokens", map[string]interface{}{
+	c.log.Debug("Successfully retrieved LTP for instrument tokens", map[string]interface{}{
 		"token_count": len(tokens),
 		"data_count":  len(ltpdataList),
 		"data_sample": ltpdataList[:sampleSize],
@@ -586,11 +605,11 @@ type InstrumentData struct {
 	Expiry          string
 	Exchange        string
 	Token           string
-	InstrumentToken string
+	InstrumentToken uint32
 }
 
 type LTPData struct {
-	instrumentToken string
+	instrumentToken uint32
 	LTP             float64
 	OI              float64
 	Volume          float64
@@ -598,7 +617,7 @@ type LTPData struct {
 
 // GetInstrumentExpiryStrikesWithExchangeAndInstrumentSymbol retrieves instrument data for a specific index and expiry
 func (c *CacheMeta) GetInstrumentExpiryStrikesWithExchangeAndInstrumentSymbol(ctx context.Context, indexName string, expiry string) ([]string, error) {
-	c.log.Info("Getting instrument expiry strikes with exchange and instrument symbol", map[string]interface{}{
+	c.log.Debug("Getting instrument expiry strikes with exchange and instrument symbol", map[string]interface{}{
 		"index":  indexName,
 		"expiry": expiry,
 	})
@@ -632,7 +651,7 @@ func (c *CacheMeta) GetInstrumentExpiryStrikesWithExchangeAndInstrumentSymbol(ct
 		return nil, err
 	}
 
-	c.log.Info("Successfully retrieved instrument expiry strikes", map[string]interface{}{
+	c.log.Debug("Successfully retrieved instrument expiry strikes", map[string]interface{}{
 		"index":        indexName,
 		"expiry":       expiry,
 		"values_count": len(formattedValues),
@@ -750,8 +769,8 @@ func (c *CacheMeta) GetExpiryStrikes(ctx context.Context, indexName, expiry stri
 
 type OptionChainStrikeStruct struct {
 	Strike   int64
-	CEToken  string
-	PEToken  string
+	CEToken  uint32
+	PEToken  uint32
 	CELTP    float64
 	PELTP    float64
 	CEOI     uint32
@@ -765,8 +784,8 @@ func (c *CacheMeta) GetOptionChainStrikeStructList(ctx context.Context, indexNam
 	if err != nil {
 		return nil, err
 	}
-	instrumentTokenToLtpMap := make(map[string]float64)
-	instumentTokenList := make([]string, 0)
+	instrumentTokenToLtpMap := make(map[uint32]float64)
+	instumentTokenList := make([]uint32, 0)
 	mapToReturn := make(map[int64]OptionChainStrikeStruct)
 
 	var optionChainStrikeStructList []OptionChainStrikeStruct
@@ -809,18 +828,18 @@ func (c *CacheMeta) GetOptionChainStrikeStructList(ctx context.Context, indexNam
 		// Create OptionChainStrikeStruct
 		optionChainStrikeStruct := OptionChainStrikeStruct{
 			Strike:  strike,
-			CEToken: ceToken,
-			PEToken: peToken,
+			CEToken: utils.StringToUint32(ceToken),
+			PEToken: utils.StringToUint32(peToken),
 		}
 
 		if slices.Contains(strikes, strikeStr) {
 			optionChainStrikeStructList = append(optionChainStrikeStructList, optionChainStrikeStruct)
 		}
-		instumentTokenList = append(instumentTokenList, ceToken)
-		instumentTokenList = append(instumentTokenList, peToken)
+		instumentTokenList = append(instumentTokenList, utils.StringToUint32(ceToken))
+		instumentTokenList = append(instumentTokenList, utils.StringToUint32(peToken))
 	}
 
-	ltpDataList, err := c.GetLTPforInstrumentTokensList(ctx, instumentTokenList)
+	ltpDataList, err := c.GetLTPforInstrumentTokensList(ctx, utils.Uint32SliceToStringSlice(instumentTokenList))
 	if err != nil {
 		return nil, err
 	}
@@ -835,8 +854,8 @@ func (c *CacheMeta) GetOptionChainStrikeStructList(ctx context.Context, indexNam
 
 	// Extract OI and volume from the LTP data
 	for _, ltpData := range ltpDataList {
-		instrumentTokenToOIMap[ltpData.instrumentToken] = uint32(ltpData.OI)
-		instrumentTokenToVolumeMap[ltpData.instrumentToken] = uint32(ltpData.Volume)
+		instrumentTokenToOIMap[strconv.FormatUint(uint64(ltpData.instrumentToken), 10)] = uint32(ltpData.OI)
+		instrumentTokenToVolumeMap[strconv.FormatUint(uint64(ltpData.instrumentToken), 10)] = uint32(ltpData.Volume)
 	}
 
 	// Populate the option chain strike struct with all data
@@ -850,24 +869,24 @@ func (c *CacheMeta) GetOptionChainStrikeStructList(ctx context.Context, indexNam
 		}
 
 		// Set OI values
-		if ceOI, exists := instrumentTokenToOIMap[optionChainStrikeStruct.CEToken]; exists {
+		if ceOI, exists := instrumentTokenToOIMap[utils.Uint32ToString(optionChainStrikeStruct.CEToken)]; exists {
 			optionChainStrikeStruct.CEOI = ceOI
 		}
-		if peOI, exists := instrumentTokenToOIMap[optionChainStrikeStruct.PEToken]; exists {
+		if peOI, exists := instrumentTokenToOIMap[utils.Uint32ToString(optionChainStrikeStruct.PEToken)]; exists {
 			optionChainStrikeStruct.PEOI = peOI
 		}
 
 		// Set Volume values
-		if ceVolume, exists := instrumentTokenToVolumeMap[optionChainStrikeStruct.CEToken]; exists {
+		if ceVolume, exists := instrumentTokenToVolumeMap[utils.Uint32ToString(optionChainStrikeStruct.CEToken)]; exists {
 			optionChainStrikeStruct.CEVolume = ceVolume
 		}
-		if peVolume, exists := instrumentTokenToVolumeMap[optionChainStrikeStruct.PEToken]; exists {
+		if peVolume, exists := instrumentTokenToVolumeMap[utils.Uint32ToString(optionChainStrikeStruct.PEToken)]; exists {
 			optionChainStrikeStruct.PEVolume = peVolume
 		}
 
 		mapToReturn[optionChainStrikeStruct.Strike] = optionChainStrikeStruct
 	}
-	c.log.Info("Successfully retrieved option chain strike struct list", map[string]interface{}{
+	c.log.Debug("Successfully retrieved option chain strike struct list", map[string]interface{}{
 		"index":       indexName,
 		"expiry":      expiry,
 		"token_count": len(instumentTokenList),
@@ -939,8 +958,8 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 				ceSymbol := ""
 				peSymbol := ""
 				exchange := ""
-				ceToken := ""
-				peToken := ""
+				ceToken := uint32(0)
+				peToken := uint32(0)
 
 				if ceInst, ok := typeMap["CE"]; ok {
 					ceSymbol = ceInst.TradingSymbol
@@ -969,7 +988,7 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 				}
 
 				// Format the value
-				formattedValue := fmt.Sprintf("strike:%s||ce:%s||pe:%s||exchange:%s||ce_token:%s||pe_token:%s",
+				formattedValue := fmt.Sprintf("strike:%s||ce:%s||pe:%s||exchange:%s||ce_token:%d||pe_token:%d",
 					strike, ceSymbol, peSymbol, exchange, ceToken, peToken)
 
 				formattedValues = append(formattedValues, formattedValue)
@@ -1291,7 +1310,7 @@ func (c *CacheMeta) GetMetadataOfToken(ctx context.Context, token string) (Instr
 	result, err := c.client.Get(ctx, instrumentMetadataKey).Result()
 	if err != nil {
 		if err == redis.Nil {
-			return InstrumentData{Token: token, InstrumentToken: token}, nil
+			return InstrumentData{Token: token, InstrumentToken: utils.StringToUint32(token)}, nil
 		}
 		c.log.Error("Failed to get instrument metadata", map[string]interface{}{
 			"token": token,
@@ -1311,7 +1330,7 @@ func convertMetadataToInstrumentData(metadata string, token string) (InstrumentD
 	// Create a new InstrumentData instance
 	inst := InstrumentData{
 		Token:           token,
-		InstrumentToken: token,
+		InstrumentToken: utils.StringToUint32(token),
 	}
 
 	// Map the parts to the InstrumentData struct fields
@@ -1331,10 +1350,30 @@ func convertMetadataToInstrumentData(metadata string, token string) (InstrumentD
 		inst.Expiry = parts[3]
 	}
 
-	// Exchange and TradingSymbol are not included in the metadata string
-	// They would need to be fetched separately if needed
+	if len(parts) >= 5 {
+		inst.TradingSymbol = parts[4]
+	}
 
 	return inst, nil
+}
+
+func (c *CacheMeta) GetInstrumentTokenForStrike(ctx context.Context, strike float64, instrumentType, expiry string) (string, error) {
+	// Format the strike as an integer string without decimal
+	strikeStr := utils.RemoveDecimal(fmt.Sprintf("%v", strike))
+
+	// Create the lookup key using the new pattern
+	lookupKey := fmt.Sprintf("%s%s_%s_%s", InstruemntStrikeWithOptionTypePrefix, strikeStr, instrumentType, expiry)
+
+	// Get the token from Redis
+	token, err := c.client.Get(ctx, lookupKey).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return "", fmt.Errorf("instrument token not found for strike %v %s %s", strike, instrumentType, expiry)
+		}
+		return "", fmt.Errorf("error getting instrument token: %w", err)
+	}
+
+	return token, nil
 }
 
 func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []InstrumentData) error {
@@ -1369,7 +1408,7 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 
 				// Cache strike price
 				strikeKey := fmt.Sprintf("%s%s", InstrumentMetadataPrefix, inst.Token)
-				value := fmt.Sprintf("%s:%s:%s:%s", inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
+				value := fmt.Sprintf("%s:%s:%s:%s:%s", inst.Name, strikeStr, inst.InstrumentType, inst.Expiry, inst.TradingSymbol)
 				pipe.Set(ctx, strikeKey, value, LongCacheExpiry)
 
 				tokenKey := fmt.Sprintf("%s%s", InstrumentTokenPrefix, inst.Token)
@@ -1378,34 +1417,22 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 				symbolKey := fmt.Sprintf("%s%s", InstrumentSymbolPrefix, inst.TradingSymbol)
 				pipe.Set(ctx, symbolKey, inst.Token, LongCacheExpiry)
 
-				// // Cache instrument type (CE/PE)
-				// instrumentTypeKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataTypeSuffix)
-				// pipe.Set(ctx, instrumentTypeKey, inst.InstrumentType, LongCacheExpiry)
+				strikeInt := utils.RemoveDecimal(inst.StrikePrice)
+				strikeWithTypeKey := fmt.Sprintf("%s%s_%s_%s",
+					InstruemntStrikeWithOptionTypePrefix,
+					strikeInt,
+					inst.InstrumentType,
+					inst.Expiry)
 
-				// // Cache expiry date
-				// expiryKey := fmt.Sprintf("%s%s%s", InstrumentMetadataPrefix, inst.Token, InstrumentMetadataExpirySuffix)
-				// pipe.Set(ctx, expiryKey, inst.Expiry, LongCacheExpiry)
+				pipe.Set(ctx, strikeWithTypeKey, inst.Token, LongCacheExpiry)
 
-				// // Cache lookup for next move - organized by strike, type and expiry
-				// nextMoveLookupKey := fmt.Sprintf("%s%s:%s:%s",
-				// 	InstrumentLookupNextMovePrefix, strikeStr, inst.InstrumentType, inst.Expiry)
-				// pipe.Set(ctx, nextMoveLookupKey, inst.Token, LongCacheExpiry)
-
-				// // Cache trading symbol lookup - organized by instrument components
-				// tradingSymbolKey := fmt.Sprintf("%s%s:%s:%s:%s",
-				// 	InstrumentLookupSymbolPrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-				// pipe.Set(ctx, tradingSymbolKey, inst.TradingSymbol, LongCacheExpiry)
-
-				// // Cache exchange
-				// exchangeKey := fmt.Sprintf("%s%s:%s:%s:%s",
-				// 	InstrumentLookupExchangePrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-				// pipe.Set(ctx, exchangeKey, inst.Exchange, LongCacheExpiry)
-
-				// // Cache full symbol (exchange:symbol)
-				// fullSymbolKey := fmt.Sprintf("%s%s:%s:%s:%s",
-				// 	InstrumentLookupFullSymbolPrefix, inst.Name, strikeStr, inst.InstrumentType, inst.Expiry)
-				// fullSymbol := fmt.Sprintf("%s:%s", inst.Exchange, inst.TradingSymbol)
-				// pipe.Set(ctx, fullSymbolKey, fullSymbol, LongCacheExpiry)
+				c.log.Debug("Cached strike with option type", map[string]interface{}{
+					"key":    strikeWithTypeKey,
+					"token":  inst.Token,
+					"strike": strikeInt,
+					"type":   inst.InstrumentType,
+					"expiry": inst.Expiry,
+				})
 			}
 		}
 	}
@@ -1424,5 +1451,4 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 	})
 
 	return nil
-
 }

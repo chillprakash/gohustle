@@ -141,77 +141,6 @@ func (m *MarketDataManager) StoreLTP(ctx context.Context, instrumentToken interf
 	return nil
 }
 
-// GetInstrumentToken retrieves the instrument token for a given trading symbol
-// Returns the token and a boolean indicating if the token was found
-func (m *MarketDataManager) GetInstrumentToken(ctx context.Context, tradingSymbol string) (interface{}, bool) {
-	if tradingSymbol == "" {
-		m.log.Error("Empty trading symbol provided", nil)
-		return nil, false
-	}
-
-	// Get the in-memory cache instance
-	inMemoryCache := cache.GetInMemoryCacheInstance()
-	if inMemoryCache == nil {
-		m.log.Error("Failed to get in-memory cache instance", nil)
-		return nil, false
-	}
-
-	// Try to get the instrument token from the cache
-	instrumentToken, exists := inMemoryCache.Get(tradingSymbol)
-	if exists {
-		m.log.Debug("Found instrument token in cache", map[string]interface{}{
-			"trading_symbol":   tradingSymbol,
-			"instrument_token": instrumentToken,
-		})
-		return instrumentToken, true
-	}
-
-	// If not found in cache, try to find it in Redis
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		m.log.Error("Failed to get Redis cache", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, false
-	}
-
-	// Try to get from Redis using the trading symbol as key
-	redisDB := redisCache.GetLTPDB3() // Using LTP DB as it's commonly used for market data
-	if redisDB == nil {
-		m.log.Error("Redis DB is nil", nil)
-		return nil, false
-	}
-
-	// Try to get the token from Redis
-	tokenStr, err := redisDB.Get(ctx, tradingSymbol).Result()
-	if err == nil && tokenStr != "" {
-		// Try to parse as integer first
-		tokenInt, err := strconv.ParseInt(tokenStr, 10, 64)
-		if err == nil {
-			// Store in cache for future use
-			inMemoryCache.Set(tradingSymbol, tokenInt, 7*24*time.Hour)
-			m.log.Debug("Found instrument token in Redis and cached it", map[string]interface{}{
-				"trading_symbol":   tradingSymbol,
-				"instrument_token": tokenInt,
-			})
-			return tokenInt, true
-		}
-
-		// If not an integer, return as string
-		inMemoryCache.Set(tradingSymbol, tokenStr, 7*24*time.Hour)
-		m.log.Debug("Found instrument token (string) in Redis and cached it", map[string]interface{}{
-			"trading_symbol":   tradingSymbol,
-			"instrument_token": tokenStr,
-		})
-		return tokenStr, true
-	}
-
-	m.log.Debug("Instrument token not found for trading symbol", map[string]interface{}{
-		"trading_symbol": tradingSymbol,
-	})
-	return nil, false
-}
-
 // For backward compatibility with existing code
 
 // GetLTP is a convenience function that uses the singleton MarketDataManager
@@ -305,11 +234,6 @@ func (m *MarketDataManager) GetExpiry(ctx context.Context, instrumentToken inter
 // GetExpiry is a convenience function that uses the singleton MarketDataManager
 func GetExpiry(ctx context.Context, instrumentToken interface{}) (string, bool) {
 	return GetMarketDataManager().GetExpiry(ctx, instrumentToken)
-}
-
-// GetInstrumentToken is a convenience function that uses the singleton MarketDataManager
-func GetInstrumentToken(ctx context.Context, tradingSymbol string) (interface{}, bool) {
-	return GetMarketDataManager().GetInstrumentToken(ctx, tradingSymbol)
 }
 
 // GetQuoteForSymbols retrieves market data quotes for a list of trading symbols

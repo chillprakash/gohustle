@@ -149,7 +149,7 @@ func (om *OrderManager) storeOrdersInRedis(ctx context.Context, orders []kitecon
 		for _, order := range batch {
 			// Store order status with retry logic
 			statusKey := fmt.Sprintf("order_%s_status", order.OrderID)
-			
+
 			// Try up to 3 times with exponential backoff
 			var redisErr error
 			for attempt := 0; attempt < 3; attempt++ {
@@ -157,17 +157,17 @@ func (om *OrderManager) storeOrdersInRedis(ctx context.Context, orders []kitecon
 				if redisErr == nil {
 					break // Success
 				}
-				
+
 				// If context deadline exceeded, don't retry
 				if strings.Contains(redisErr.Error(), "context deadline exceeded") {
 					break
 				}
-				
+
 				// Exponential backoff before retry
 				backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
 				time.Sleep(backoff)
 			}
-			
+
 			if redisErr != nil {
 				om.log.Error("Failed to store order status in Redis after retries", map[string]interface{}{
 					"order_id": order.OrderID,
@@ -194,17 +194,17 @@ func (om *OrderManager) storeOrdersInRedis(ctx context.Context, orders []kitecon
 				if redisErr == nil {
 					break // Success
 				}
-				
+
 				// If context deadline exceeded, don't retry
 				if strings.Contains(redisErr.Error(), "context deadline exceeded") {
 					break
 				}
-				
+
 				// Exponential backoff before retry
 				backoff := time.Duration(50*(1<<attempt)) * time.Millisecond
 				time.Sleep(backoff)
 			}
-			
+
 			if redisErr != nil {
 				om.log.Error("Failed to store order JSON in Redis after retries", map[string]interface{}{
 					"order_id": order.OrderID,
@@ -212,7 +212,7 @@ func (om *OrderManager) storeOrdersInRedis(ctx context.Context, orders []kitecon
 				})
 			}
 		}
-		
+
 		// Add a small delay between batches to avoid overwhelming Redis
 		if i+batchSize < len(orders) {
 			time.Sleep(50 * time.Millisecond)
@@ -516,6 +516,13 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			break
 		}
 	}
+	cacheMetaInstance, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		log.Error("Failed to get cache meta instance", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
 
 	// Calculate position quantity based on order side
 	quantity := order.Quantity
@@ -530,7 +537,7 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		marketDataMgr := GetMarketDataManager()
 
 		// First try to get the instrument token using our helper method
-		instrumentToken, exists := GetInstrumentToken(ctx, order.TradingSymbol)
+		instrumentToken, exists := cacheMetaInstance.GetInstrumentTokenForSymbol(ctx, order.TradingSymbol)
 		if exists {
 			log.Info("Found instrument token for trading symbol", map[string]interface{}{
 				"trading_symbol":   order.TradingSymbol,
@@ -579,8 +586,8 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 					existingPosition.BuyPrice = order.Price
 				} else {
 					// Calculate weighted average buy price
-					existingPosition.BuyPrice = ((existingPosition.BuyPrice * float64(existingPosition.BuyQuantity)) + 
-						(order.Price * float64(quantity))) / float64(existingPosition.BuyQuantity + quantity)
+					existingPosition.BuyPrice = ((existingPosition.BuyPrice * float64(existingPosition.BuyQuantity)) +
+						(order.Price * float64(quantity))) / float64(existingPosition.BuyQuantity+quantity)
 				}
 				existingPosition.BuyQuantity += quantity
 				existingPosition.BuyValue = existingPosition.BuyPrice * float64(existingPosition.BuyQuantity)
@@ -590,8 +597,8 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 					existingPosition.SellPrice = order.Price
 				} else {
 					// Calculate weighted average sell price
-					existingPosition.SellPrice = ((existingPosition.SellPrice * float64(existingPosition.SellQuantity)) + 
-						(order.Price * float64(-quantity))) / float64(existingPosition.SellQuantity - quantity)
+					existingPosition.SellPrice = ((existingPosition.SellPrice * float64(existingPosition.SellQuantity)) +
+						(order.Price * float64(-quantity))) / float64(existingPosition.SellQuantity-quantity)
 				}
 				existingPosition.SellQuantity -= quantity // Subtract because quantity is negative for sells
 				existingPosition.SellValue = existingPosition.SellPrice * float64(existingPosition.SellQuantity)
@@ -674,9 +681,15 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			// For now, we'll leave it as nil
 			newPosition.StrategyID = strategyID
 		}
-
+		cacheMetaInstance, err := cache.GetCacheMetaInstance()
+		if err != nil {
+			log.Error("Failed to get cache meta instance", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return
+		}
 		// Try to get the instrument token
-		instrumentToken, exists := GetInstrumentToken(ctx, order.TradingSymbol)
+		instrumentToken, exists := cacheMetaInstance.GetInstrumentTokenForSymbol(ctx, order.TradingSymbol)
 
 		// If token not found through the helper, try to extract from KiteResponse
 		if !exists && order.KiteResponse != nil {
@@ -698,7 +711,7 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			}
 		}
 
-			// If we have an instrument token, update the last price if needed
+		// If we have an instrument token, update the last price if needed
 		if exists && lastPrice == 0 {
 			// Use the MarketDataManager to get the LTP
 			marketDataMgr := GetMarketDataManager()

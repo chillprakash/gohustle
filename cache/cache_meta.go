@@ -18,6 +18,7 @@ import (
 
 // Constants for cache keys and expiration
 const (
+	ReferenceSubscribedKeys = "reference:subscribed_keys"
 	// Expiry related keys
 	InstrumentExpiryMapKey                                         = "instrument:expiry:json_map"
 	InstumentExpiryStrikesKey                                      = "instrument:expiry:strikes"
@@ -95,6 +96,11 @@ func NewCacheMeta() (*CacheMeta, error) {
 	return GetCacheMetaInstance()
 }
 
+func (c *CacheMeta) StoreSubscribedKeys(ctx context.Context, tokens []interface{}) error {
+	key := ReferenceSubscribedKeys
+	return c.client.SAdd(ctx, key, tokens...).Err()
+}
+
 func (c *CacheMeta) GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx context.Context, index string, expiry string) ([]string, error) {
 	key := fmt.Sprintf("%s:%s_%s", InstrumentExpiryStrikesWithExchangeAndInstrumentSymbolFiltered, index, expiry)
 	result, err := c.client.SMembers(ctx, key).Result()
@@ -154,7 +160,7 @@ func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []
 			if err == nil {
 				data.LTP = ltp
 			} else if err != redis.Nil {
-				c.log.Debug("Failed to get LTP", map[string]interface{}{
+				c.log.Error("Failed to get LTP", map[string]interface{}{
 					"token": token,
 					"error": err.Error(),
 				})
@@ -168,7 +174,7 @@ func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []
 			if err == nil {
 				data.OI = oi
 			} else if err != redis.Nil {
-				c.log.Debug("Failed to get OI", map[string]interface{}{
+				c.log.Error("Failed to get OI", map[string]interface{}{
 					"token": token,
 					"error": err.Error(),
 				})
@@ -182,7 +188,7 @@ func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []
 			if err == nil {
 				data.Volume = volume
 			} else if err != redis.Nil {
-				c.log.Debug("Failed to get Volume", map[string]interface{}{
+				c.log.Error("Failed to get Volume", map[string]interface{}{
 					"token": token,
 					"error": err.Error(),
 				})

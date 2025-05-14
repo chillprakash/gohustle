@@ -302,8 +302,8 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	strikes, err := cacheMeta.GetExpiryStrikes(ctx, index, expiry)
 	if err != nil {
 		m.log.Error("Failed to get strikes", map[string]interface{}{
-			"error": err.Error(),
-			"index": index,
+			"error":  err.Error(),
+			"index":  index,
 			"expiry": expiry,
 		})
 		return nil, fmt.Errorf("failed to get strikes: %w", err)
@@ -347,10 +347,10 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	}
 
 	m.log.Info("Getting ATM strike", map[string]interface{}{
-		"index":                index,
-		"instrument_token":     indexObj.InstrumentToken,
-		"name_in_options":      indexObj.NameInOptions,
-		"available_strikes":    len(allStrikes),
+		"index":             index,
+		"instrument_token":  indexObj.InstrumentToken,
+		"name_in_options":   indexObj.NameInOptions,
+		"available_strikes": len(allStrikes),
 	})
 
 	atmStrike_tentative := kc.GetTentativeATMBasedonLTP(*indexObj, allStrikes)

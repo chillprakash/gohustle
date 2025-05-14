@@ -842,7 +842,7 @@ func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, ind
 		}
 
 		// Get all CE and PE tokens for this index and expiry
-		tokens, err = cacheMeta.GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx, index.NameInOptions, nearestExpiry)
+		expiryTokens, err := cacheMeta.GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx, index.NameInOptions, nearestExpiry)
 		if err != nil {
 			log.Error("Failed to get tokens for index and expiry", map[string]interface{}{
 				"index":  index.NameInOptions,
@@ -853,7 +853,13 @@ func (k *KiteConnect) GetUpcomingExpiryTokensForIndices(ctx context.Context, ind
 		}
 
 		// Add tokens to result
-		tokens = append(tokens, tokens...)
+		log.Info("Adding tokens to result", map[string]interface{}{
+			"index":           index.NameInOptions,
+			"expiry":          nearestExpiry,
+			"existing_tokens": len(tokens),
+			"to_be_added":     len(expiryTokens),
+		})
+		tokens = append(expiryTokens, tokens...)
 	}
 
 	return tokens, nil

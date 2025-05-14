@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/db"
 	"gohustle/logger"
@@ -313,6 +314,17 @@ func (k *KiteConnect) InitializeTickersWithTokens(tokens []uint32) error {
 	log.Info("Initializing token subscriptions", map[string]interface{}{
 		"tokens_count": len(tokens),
 	})
+
+	cacheMetaInstance, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		return fmt.Errorf("failed to get cache meta instance: %w", err)
+	}
+	// Convert []uint32 to []interface{}
+	interfaces := make([]interface{}, len(tokens))
+	for i, v := range tokens {
+		interfaces[i] = v
+	}
+	cacheMetaInstance.StoreSubscribedKeys(context.Background(), interfaces)
 
 	if len(tokens) == 0 {
 		return fmt.Errorf("no tokens provided for subscription")

@@ -458,7 +458,6 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 
 	// Process all positions from database (both real and paper trading)
 	for _, dbPos := range dbPositions {
-
 		// Skip non-option positions
 		if !isOptionPosition(dbPos.TradingSymbol) {
 			continue

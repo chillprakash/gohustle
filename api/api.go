@@ -165,7 +165,8 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// If this is a move operation, we need to handle it differently
-		s.handleMoveOperation(w, r, &req)
+		moveOp := GetMoveOperationInstance()
+		moveOp.HandleMoveOperation(w, r, &req)
 		return
 	}
 

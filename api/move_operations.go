@@ -8,13 +8,37 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gohustle/cache"
 	"gohustle/db"
 	"gohustle/logger"
+	"gohustle/utils"
 	"gohustle/zerodha"
+
+	redis "github.com/redis/go-redis/v9"
 )
+
+// MoveOperation is a singleton that handles option position movement operations
+type MoveOperation struct {
+	log *logger.Logger
+}
+
+var (
+	moveOperationInstance *MoveOperation
+	moveOperationOnce     sync.Once
+)
+
+// GetMoveOperationInstance returns the singleton instance of MoveOperation
+func GetMoveOperationInstance() *MoveOperation {
+	moveOperationOnce.Do(func() {
+		moveOperationInstance = &MoveOperation{
+			log: logger.L(),
+		}
+	})
+	return moveOperationInstance
+}
 
 // StrikeInfo contains information about an option strike
 type StrikeInfo struct {
@@ -24,8 +48,8 @@ type StrikeInfo struct {
 	TradingSymbol  string
 }
 
-// handleMoveOperation processes move_away, move_closer, and exit operations for options
-func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) {
+// HandleMoveOperation processes move_away, move_closer, and exit operations for options
+func (m *MoveOperation) HandleMoveOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) {
 	// Get the KiteConnect instance
 	kc := zerodha.GetKiteConnect()
 	if kc == nil {
@@ -35,17 +59,17 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 
 	cacheMetaInstance, err := cache.GetCacheMetaInstance()
 	if err != nil {
-		s.log.Error("Failed to get cache meta instance for move", map[string]interface{}{
+		m.log.Error("Failed to get cache meta instance for move", map[string]interface{}{
 			"error": err.Error(),
 		})
-		sendErrorResponse(w, fmt.Sprintf("Failed to get cache meta instance: %v", err), http.StatusInternalServerError)
+		sendErrorResponse(w, "Cache meta instance not available", http.StatusInternalServerError)
 		return
 	}
 
 	// 1. Extract strike, expiry, and instrument type from the trading symbol or token
 	tokenMetaData, err := cacheMetaInstance.GetMetadataOfToken(r.Context(), req.InstrumentToken)
 	if err != nil {
-		s.log.Error("Failed to extract strike info", map[string]interface{}{
+		m.log.Error("Failed to extract strike info", map[string]interface{}{
 			"error":            err.Error(),
 			"instrument_token": req.InstrumentToken,
 			"trading_symbol":   req.TradingSymbol,
@@ -54,7 +78,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	s.log.Info("Extracted strike info", map[string]interface{}{
+	m.log.Info("Extracted strike info", map[string]interface{}{
 		"strike":          tokenMetaData.StrikePrice,
 		"instrument_type": tokenMetaData.InstrumentType,
 		"expiry":          tokenMetaData.Expiry,
@@ -64,7 +88,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	// 2. Find the current position for this instrument
 	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol)
 	if err != nil {
-		s.log.Error("Failed to find current position", map[string]interface{}{
+		m.log.Error("Failed to find current position", map[string]interface{}{
 			"error":          err.Error(),
 			"trading_symbol": tokenMetaData.TradingSymbol,
 		})
@@ -77,7 +101,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	s.log.Info("Found current position", map[string]interface{}{
+	m.log.Info("Found current position", map[string]interface{}{
 		"position_id":    currentPosition.ID,
 		"trading_symbol": currentPosition.TradingSymbol,
 		"quantity":       currentPosition.Quantity,
@@ -88,7 +112,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	// 1. Get Instrument Token from Trading Symbol
 	instrumentTokenValue, tokenFound := cacheMetaInstance.GetInstrumentTokenForSymbol(r.Context(), currentPosition.TradingSymbol)
 	if !tokenFound {
-		s.log.Error("Could not find instrument token for position in cache", map[string]interface{}{ // Log token not found
+		m.log.Error("Could not find instrument token for position in cache", map[string]interface{}{ // Log token not found
 			"trading_symbol": currentPosition.TradingSymbol,
 		})
 		// Cannot proceed without token to determine lot size reliably
@@ -97,7 +121,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	}
 	instrumentTokenStr, ok := instrumentTokenValue.(string)
 	if !ok {
-		s.log.Error("Instrument token retrieved from cache is not a string", map[string]interface{}{ // Log invalid token type
+		m.log.Error("Instrument token retrieved from cache is not a string", map[string]interface{}{ // Log invalid token type
 			"trading_symbol": currentPosition.TradingSymbol,
 			"token_value":    instrumentTokenValue,
 		})
@@ -118,7 +142,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 			indexName = "SENSEX"
 		} else {
 			// Log error and potentially default or return error if index cannot be determined
-			s.log.Error("Could not determine index name for lot size calculation", map[string]interface{}{ // Log index not found/guessed
+			m.log.Error("Could not determine index name for lot size calculation", map[string]interface{}{ // Log index not found/guessed
 				"instrument_token": instrumentTokenStr,
 				"trading_symbol":   currentPosition.TradingSymbol,
 			})
@@ -131,7 +155,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	// 3. Calculate the quantity to process based on the fraction
 	toProcessQuantity, err := calculateQuantityToProcess(currentPosition.Quantity, req.QuantityFrac, tokenMetaData.InstrumentType, indexName)
 	if err != nil {
-		s.log.Error("Failed to calculate quantity to process", map[string]interface{}{ // Log quantity calculation failure
+		m.log.Error("Failed to calculate quantity to process", map[string]interface{}{ // Log quantity calculation failure
 			"error":            err.Error(),
 			"instrument_token": req.InstrumentToken,
 			"trading_symbol":   req.TradingSymbol,
@@ -145,7 +169,7 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	s.log.Info("Calculated quantity to process", map[string]interface{}{
+	m.log.Info("Calculated quantity to process", map[string]interface{}{
 		"original_quantity": currentPosition.Quantity,
 		"fraction":          req.QuantityFrac,
 		"to_process":        toProcessQuantity,
@@ -155,17 +179,17 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	switch req.MoveType {
 	case "exit":
 		// Exit operations handle their own response
-		s.handleExitOperation(w, r, req)
+		m.handleExitOperation(w, r, req)
 		return // Exit early as handleExitOperation handles its own response
 	case "move_away", "move_closer":
-		err = s.processMoveOperation(w, r, req, currentPosition, toProcessQuantity, tokenMetaData)
+		err = m.processMoveOperation(w, r, req, currentPosition, toProcessQuantity, tokenMetaData)
 	default:
 		sendErrorResponse(w, "Invalid move type", http.StatusBadRequest)
 		return
 	}
 
 	if err != nil {
-		s.log.Error("Failed to handle move operation", map[string]interface{}{
+		m.log.Error("Failed to handle move operation", map[string]interface{}{
 			"error":       err.Error(),
 			"move_type":   req.MoveType,
 			"position_id": currentPosition.ID,
@@ -182,13 +206,13 @@ func (s *Server) handleMoveOperation(w http.ResponseWriter, r *http.Request, req
 	if lotSize > 0 {
 		finalLots = finalQuantity / lotSize
 	} else {
-		s.log.Error("Lot size is zero or negative, cannot calculate lots for response", map[string]interface{}{
+		m.log.Error("Lot size is zero or negative, cannot calculate lots for response", map[string]interface{}{
 			"index_name": indexName,
 			"lot_size":   lotSize,
 		})
 	}
 
-	s.log.Info("Final response values", map[string]interface{}{ // Adjusted log
+	m.log.Info("Final response values", map[string]interface{}{ // Adjusted log
 		"final_quantity": finalQuantity,
 		"lot_size":       lotSize,
 		"final_lots":     finalLots,
@@ -519,7 +543,7 @@ func getLotSize(indexName string) int {
 }
 
 // handleExitOperation handles the exit operation for a position
-func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) {
+func (m *MoveOperation) handleExitOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) {
 	// Get the KiteConnect instance
 	kc := zerodha.GetKiteConnect()
 	if kc == nil {
@@ -529,10 +553,10 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 
 	cacheMetaInstance, err := cache.GetCacheMetaInstance()
 	if err != nil {
-		s.log.Error("Failed to get cache meta instance for exit", map[string]interface{}{
+		m.log.Error("Failed to get cache meta instance for exit", map[string]interface{}{
 			"error": err.Error(),
 		})
-		sendErrorResponse(w, fmt.Sprintf("Failed to get cache meta instance: %v", err), http.StatusInternalServerError)
+		sendErrorResponse(w, "Cache meta instance not available", http.StatusInternalServerError)
 		return
 	}
 
@@ -541,7 +565,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 	// 2. Find the current position for the instrument
 	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol)
 	if err != nil {
-		s.log.Error("Failed to find current position for exit", map[string]interface{}{
+		m.log.Error("Failed to find current position for exit", map[string]interface{}{
 			"error":          err.Error(),
 			"trading_symbol": tokenMetaData.TradingSymbol,
 		})
@@ -554,7 +578,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 		return
 	}
 
-	s.log.Info("Found position to exit", map[string]interface{}{
+	m.log.Info("Found position to exit", map[string]interface{}{
 		"position_id":      currentPosition.ID,
 		"trading_symbol":   currentPosition.TradingSymbol,
 		"current_quantity": currentPosition.Quantity,
@@ -564,7 +588,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 	// 3. Get Instrument Token from Trading Symbol
 	instrumentTokenValue, tokenFound := cacheMetaInstance.GetInstrumentTokenForSymbol(r.Context(), currentPosition.TradingSymbol)
 	if !tokenFound {
-		s.log.Error("Could not find instrument token for position in cache for exit", map[string]interface{}{
+		m.log.Error("Could not find instrument token for position in cache for exit", map[string]interface{}{
 			"trading_symbol": currentPosition.TradingSymbol,
 		})
 		sendErrorResponse(w, "Failed to retrieve instrument details for exit", http.StatusInternalServerError)
@@ -572,7 +596,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 	}
 	instrumentTokenStr, ok := instrumentTokenValue.(string)
 	if !ok {
-		s.log.Error("Instrument token retrieved from cache is not a string for exit", map[string]interface{}{
+		m.log.Error("Instrument token retrieved from cache is not a string for exit", map[string]interface{}{
 			"trading_symbol": currentPosition.TradingSymbol,
 			"token_value":    instrumentTokenValue,
 		})
@@ -613,7 +637,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 		// Convert back to quantity
 		exitQuantity = lotsToExit * lotSize
 
-		s.log.Info("Calculated partial exit quantity", map[string]interface{}{
+		m.log.Info("Calculated partial exit quantity", map[string]interface{}{
 			"fraction":      req.QuantityFrac,
 			"total_lots":    totalLots,
 			"lots_to_exit":  lotsToExit,
@@ -633,13 +657,13 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 			exitQuantity = absQuantity
 		}
 
-		s.log.Info("Calculated full exit quantity", map[string]interface{}{
+		m.log.Info("Calculated full exit quantity", map[string]interface{}{
 			"original_quantity": currentPosition.Quantity,
 			"exit_quantity":     exitQuantity,
 		})
 	}
 	if err != nil {
-		s.log.Error("Failed to calculate exit quantity", map[string]interface{}{
+		m.log.Error("Failed to calculate exit quantity", map[string]interface{}{
 			"error":            err.Error(),
 			"instrument_token": instrumentTokenStr,
 			"trading_symbol":   currentPosition.TradingSymbol,
@@ -660,7 +684,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 	// The direction (buy/sell) is determined by the transactionType
 	positiveExitQuantity := int(math.Abs(float64(exitQuantity)))
 
-	s.log.Info("Exit order details", map[string]interface{}{
+	m.log.Info("Exit order details", map[string]interface{}{
 		"position_quantity": currentPosition.Quantity,
 		"exit_quantity":     positiveExitQuantity,
 		"transaction_type":  transactionType,
@@ -681,9 +705,9 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 	}
 
 	// 8. Place the exit order
-	err = s.placeOrderInternal(r.Context(), exitOrderReq)
+	err = m.placeOrderInternal(r.Context(), exitOrderReq)
 	if err != nil {
-		s.log.Error("Failed to place exit order", map[string]interface{}{
+		m.log.Error("Failed to place exit order", map[string]interface{}{
 			"error":            err.Error(),
 			"instrument_token": instrumentTokenStr,
 			"trading_symbol":   currentPosition.TradingSymbol,
@@ -712,7 +736,7 @@ func (s *Server) handleExitOperation(w http.ResponseWriter, r *http.Request, req
 }
 
 // processMoveOperation handles the move_away and move_closer operations
-func (s *Server) processMoveOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest,
+func (m *MoveOperation) processMoveOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest,
 	currentPosition *db.PositionRecord, toProcessQuantity int, tokenMetaData cache.InstrumentData) error {
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
@@ -720,11 +744,10 @@ func (s *Server) processMoveOperation(w http.ResponseWriter, r *http.Request, re
 	}
 
 	// Calculate the new strike price based on the move type and steps
-	newStrike, _ := strconv.ParseFloat(tokenMetaData.StrikePrice, 64)
-	newStrike = calculateNewStrike(newStrike, tokenMetaData.InstrumentType, req.MoveType, req.Steps)
+	strikeToMove := m.calculateNewStrike(utils.StringToFloat64(tokenMetaData.StrikePrice), tokenMetaData.InstrumentType, req.MoveType, req.Steps, tokenMetaData.Name)
 
 	// Get the instrument token for the new strike
-	newInstrumentToken, err := cacheMeta.GetInstrumentTokenForStrike(r.Context(), newStrike, tokenMetaData.InstrumentType, tokenMetaData.Expiry)
+	newInstrumentToken, err := cacheMeta.GetInstrumentTokenForStrike(r.Context(), strikeToMove, tokenMetaData.InstrumentType, tokenMetaData.Expiry)
 	if err != nil {
 		return fmt.Errorf("failed to get instrument token for new strike: %w", err)
 	}
@@ -755,7 +778,7 @@ func (s *Server) processMoveOperation(w http.ResponseWriter, r *http.Request, re
 	}
 
 	// Place the exit order
-	err = s.placeOrderInternal(r.Context(), exitOrderReq)
+	err = m.placeOrderInternal(r.Context(), exitOrderReq)
 	if err != nil {
 		return fmt.Errorf("failed to place exit order: %w", err)
 	}
@@ -781,16 +804,18 @@ func (s *Server) processMoveOperation(w http.ResponseWriter, r *http.Request, re
 	}
 
 	// Place the entry order
-	return s.placeOrderInternal(r.Context(), entryOrderReq)
+	return m.placeOrderInternal(r.Context(), entryOrderReq)
 }
 
 // calculateNewStrike calculates the new strike price based on the move type and steps
-func calculateNewStrike(currentStrike float64, instrumentType string, moveType MoveType, steps int) float64 {
+func (m *MoveOperation) calculateNewStrike(currentStrike float64, instrumentType string, moveType MoveType, steps int, indexName string) float64 {
 	// Determine the step size based on the index
 	stepSize := 50.0 // Default for NIFTY
-	if strings.Contains(instrumentType, "SENSEX") {
+	if strings.Contains(indexName, "SENSEX") {
 		stepSize = 100.0
 	}
+
+	newStrike := currentStrike
 
 	// Calculate the strike price change
 	strikeChange := float64(steps) * stepSize
@@ -798,21 +823,31 @@ func calculateNewStrike(currentStrike float64, instrumentType string, moveType M
 	// Apply the change based on the move type and option type
 	if instrumentType == "CE" {
 		if moveType == MoveAway {
-			return currentStrike + strikeChange
+			newStrike = currentStrike + strikeChange
 		} else { // MoveCloser
-			return currentStrike - strikeChange
+			newStrike = currentStrike - strikeChange
 		}
 	} else { // PE
 		if moveType == MoveAway {
-			return currentStrike - strikeChange
+			newStrike = currentStrike - strikeChange
 		} else { // MoveCloser
-			return currentStrike + strikeChange
+			newStrike = currentStrike + strikeChange
 		}
 	}
+
+	m.log.Info("Calculated new strike", map[string]interface{}{
+		"current_strike":  currentStrike,
+		"instrument_type": instrumentType,
+		"move_type":       moveType,
+		"steps":           steps,
+		"new_strike":      newStrike,
+	})
+
+	return newStrike
 }
 
 // placeOrderInternal places an order using the internal order placement logic
-func (s *Server) placeOrderInternal(ctx context.Context, req *PlaceOrderAPIRequest) error {
+func (m *MoveOperation) placeOrderInternal(ctx context.Context, req *PlaceOrderAPIRequest) error {
 	// Convert the API request to a Zerodha order request
 	orderReq := zerodha.PlaceOrderRequest{
 		TradingSymbol: req.TradingSymbol,
@@ -834,7 +869,7 @@ func (s *Server) placeOrderInternal(ctx context.Context, req *PlaceOrderAPIReque
 	// Check if this is a paper trading order
 	if req.PaperTrading {
 		// Generate a simulated response for paper trading
-		s.log.Info("Processing paper trading order", map[string]interface{}{
+		m.log.Info("Processing paper trading order", map[string]interface{}{
 			"symbol": req.TradingSymbol,
 			"side":   req.Side,
 			"qty":    req.Quantity,
@@ -846,27 +881,39 @@ func (s *Server) placeOrderInternal(ctx context.Context, req *PlaceOrderAPIReque
 		if req.InstrumentToken != "" {
 			// Get Redis cache for LTP data
 			redisCache, err := cache.GetRedisCache()
-			if err == nil {
-				ltpDB := redisCache.GetLTPDB3()
-				if ltpDB != nil {
-					// Create a context with timeout for Redis operations
-					ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-					defer cancel()
+			if err != nil {
+				return err
+			}
+			ltpDB := redisCache.GetLTPDB3()
+			if ltpDB != nil {
+				// Create a context with timeout for Redis operations
+				ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+				defer cancel()
 
-					// Format the key as expected in Redis
-					ltpKey := fmt.Sprintf("%s_ltp", req.InstrumentToken)
+				// Format the key as expected in Redis
+				ltpKey := fmt.Sprintf("%s_ltp", req.InstrumentToken)
 
-					// Try to get the LTP from Redis
-					ltpStr, err := ltpDB.Get(ctx, ltpKey).Result()
-					if err == nil {
-						ltp, err := strconv.ParseFloat(ltpStr, 64)
-						if err == nil && ltp > 0 {
-							executionPrice = ltp
-							s.log.Info("Using Redis LTP for paper trading", map[string]interface{}{
-								"instrument_token": req.InstrumentToken,
-								"ltp":              ltp,
-							})
-						}
+				// Try to get the LTP from Redis
+				ltpStr, err := ltpDB.Get(ctx, ltpKey).Result()
+				if err != nil {
+					if err == redis.Nil {
+						m.log.Info("LTP not found in Redis", map[string]interface{}{
+							"instrument_token": req.InstrumentToken,
+						})
+					} else {
+						m.log.Error("Failed to get LTP from Redis", map[string]interface{}{
+							"instrument_token": req.InstrumentToken,
+							"error":            err.Error(),
+						})
+					}
+				} else {
+					ltp, err := strconv.ParseFloat(ltpStr, 64)
+					if err == nil && ltp > 0 {
+						executionPrice = ltp
+						m.log.Info("Using Redis LTP for paper trading", map[string]interface{}{
+							"instrument_token": req.InstrumentToken,
+							"ltp":              ltp,
+						})
 					}
 				}
 			}

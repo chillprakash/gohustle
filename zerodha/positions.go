@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,13 +16,27 @@ import (
 	"gohustle/logger"
 	"gohustle/utils"
 
+	"github.com/redis/go-redis/v9"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
+)
+
+// Redis key format constants
+const (
+	// PositionKeyFormat is the format for position keys in Redis
+	PositionKeyFormat = "position:%s:%s:%s" // category, tradingsymbol, product
+
+	// PositionTokenKeyFormat is the format for position token keys in Redis
+	PositionTokenKeyFormat = "position:token:%d" // instrumentToken
+
+	// PositionAllKeyFormat is the format for position token keys in Redis
+	PositionAllKeyFormat = "position:all_positions" // concatenated String
 )
 
 // PositionManager handles all position-related operations
 type PositionManager struct {
-	kite *KiteConnect
-	log  *logger.Logger
+	kite           *KiteConnect
+	log            *logger.Logger
+	positionsRedis *redis.Client
 }
 
 // PositionSummary represents the summary of all positions
@@ -72,6 +87,11 @@ type PositionAnalysis struct {
 	Positions []DetailedPosition `json:"positions"`
 }
 
+type CachedRedisPostitionsAndQuantity struct {
+	InstrumentToken string `json:"instrument_token"`
+	Quantity        int64  `json:"quantity"`
+}
+
 var (
 	positionInstance *PositionManager
 	positionOnce     sync.Once
@@ -82,18 +102,88 @@ func GetPositionManager() *PositionManager {
 	positionOnce.Do(func() {
 		log := logger.L()
 		kite := GetKiteConnect()
+		redisCache, err := cache.GetRedisCache()
+		if err != nil {
+			log.Error("Failed to get Redis cache", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return
+		}
 		if kite == nil {
 			log.Error("Failed to get KiteConnect instance", map[string]interface{}{})
 			return
 		}
 
 		positionInstance = &PositionManager{
-			log:  log,
-			kite: kite,
+			log:            log,
+			kite:           kite,
+			positionsRedis: redisCache.GetPositionsDB2(),
 		}
 		log.Info("Position manager initialized", map[string]interface{}{})
 	})
 	return positionInstance
+}
+
+func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.Context) (map[string]CachedRedisPostitionsAndQuantity, error) {
+	if pm == nil || pm.positionsRedis == nil {
+		return nil, fmt.Errorf("position manager or redis client not initialized")
+	}
+
+	// Initialize result map with instrument token as key
+	cachePositionsMap := make(map[string]CachedRedisPostitionsAndQuantity)
+
+	// Get the comma-separated position data from Redis
+	allPositions, err := pm.positionsRedis.Get(ctx, PositionAllKeyFormat).Result()
+	if err != nil {
+		pm.log.Error("Failed to get all positions from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to get all positions from Redis: %w", err)
+	}
+
+	// Handle empty string case
+	if allPositions == "" {
+		return cachePositionsMap, nil
+	}
+
+	// Split the comma-separated string into individual position entries
+	for _, posEntry := range strings.Split(allPositions, ",") {
+		// Skip empty entries
+		if posEntry == "" {
+			continue
+		}
+
+		// Parse the token and quantity from the format "token_quantity"
+		parts := strings.Split(posEntry, "_")
+		if len(parts) != 2 {
+			pm.log.Error("Invalid position entry format", map[string]interface{}{
+				"entry": posEntry,
+			})
+			continue
+		}
+
+		// Extract token and quantity
+		tokenStr := parts[0]
+		quantityStr := parts[1]
+
+		// Convert quantity string to int64
+		quantity, err := strconv.ParseInt(quantityStr, 10, 64)
+		if err != nil {
+			pm.log.Error("Failed to parse quantity", map[string]interface{}{
+				"quantity": quantityStr,
+				"error":    err.Error(),
+			})
+			continue
+		}
+
+		// Add to the result map with token as key
+		cachePositionsMap[tokenStr] = CachedRedisPostitionsAndQuantity{
+			InstrumentToken: tokenStr,
+			Quantity:        quantity,
+		}
+	}
+
+	return cachePositionsMap, nil
 }
 
 // GetOpenPositions fetches current positions from Zerodha
@@ -374,16 +464,16 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 
 // storePositionsInRedis stores a list of positions in Redis
 func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category string, positions []kiteconnect.Position) error {
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		return fmt.Errorf("failed to get Redis cache: %w", err)
-	}
+	// Build comma-separated list of instrument tokens and quantities
+	positionValues := make([]string, 0, len(positions))
 
-	positionsRedis := redisCache.GetPositionsDB2()
-
+	// Process each position
 	for _, pos := range positions {
+		// Add to the comma-separated list
+		positionValues = append(positionValues, fmt.Sprintf("%d_%d", pos.InstrumentToken, pos.Quantity))
+
 		// Store full position details
-		key := fmt.Sprintf("position:%s:%s:%s", category, pos.Tradingsymbol, pos.Product)
+		key := fmt.Sprintf(PositionKeyFormat, category, pos.Tradingsymbol, pos.Product)
 
 		// Convert position to JSON
 		posJSON, err := json.Marshal(pos)
@@ -396,7 +486,7 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 		}
 
 		// Store full position in Redis
-		err = positionsRedis.HSet(ctx, "positions", key, string(posJSON)).Err()
+		err = pm.positionsRedis.HSet(ctx, "positions", key, string(posJSON)).Err()
 		if err != nil {
 			pm.log.Error("Failed to store position in Redis", map[string]interface{}{
 				"symbol": pos.Tradingsymbol,
@@ -404,23 +494,17 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 			})
 			continue
 		}
-
-		// Store instrument token to quantity mapping
-		tokenKey := fmt.Sprintf("position:token:%d", pos.InstrumentToken)
-		err = positionsRedis.Set(ctx, tokenKey, pos.Quantity, 0).Err()
-		if err != nil {
-			pm.log.Error("Failed to store token quantity in Redis", map[string]interface{}{
-				"token":    pos.InstrumentToken,
-				"quantity": pos.Quantity,
-				"error":    err.Error(),
-			})
-		} else {
-			pm.log.Debug("Stored token quantity", map[string]interface{}{
-				"token":    pos.InstrumentToken,
-				"quantity": pos.Quantity,
-			})
-		}
 	}
+
+	// Join all position values with commas and store in Redis
+	positionAllKeyFormatValue := strings.Join(positionValues, ",")
+	err := pm.positionsRedis.Set(ctx, PositionAllKeyFormat, positionAllKeyFormatValue, 0).Err()
+	if err != nil {
+		pm.log.Error("Failed to store all positions in Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	return nil
 }
 

@@ -167,15 +167,6 @@ func (m *OptionChainManager) handleBroadcasts() {
 	}
 }
 
-// GetLatestChain returns the most recent option chain data for the given index, expiry, and strikes count
-func (m *OptionChainManager) GetLatestChain(index, expiry string, strikesCount int) *OptionChainResponse {
-	// Include strikes count in the cache key
-	key := fmt.Sprintf("%s:%s:%d", index, expiry, strikesCount)
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.latestData[key]
-}
-
 // storeTimeSeriesMetrics stores the calculated metrics for different intervals
 func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index string, chain []*StrikeData, underlyingPrice float64) error {
 	// Create a context with timeout for database operations
@@ -286,6 +277,22 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 		return nil, fmt.Errorf("redis cache not initialized: %w", err)
 	}
 
+	positionManager := zerodha.GetPositionManager()
+	if positionManager == nil {
+		m.log.Error("Failed to get position manager", map[string]interface{}{
+			"error": "position manager not initialized",
+		})
+		return nil, fmt.Errorf("position manager not initialized")
+	}
+
+	cachePositionsMap, err := positionManager.GetOpenPositionTokensVsQuanityFromRedis(ctx)
+	if err != nil {
+		m.log.Error("Failed to get open positions from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to get open positions from Redis: %w", err)
+	}
+
 	strikes, err := cacheMeta.GetExpiryStrikes(ctx, index, expiry)
 	if err != nil {
 		m.log.Error("Failed to get strikes", map[string]interface{}{
@@ -364,6 +371,8 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 	for _, strike := range selectedStrikes {
 		strikeInt, _ := strconv.ParseInt(strike, 10, 64)
 		details := strikeVsOptionChainStrikeStructList[strikeInt]
+		peQuantity := cachePositionsMap[utils.Uint32ToString(details.PEToken)].Quantity
+		ceQuantity := cachePositionsMap[utils.Uint32ToString(details.CEToken)].Quantity
 
 		strikeFloat, _ := strconv.ParseFloat(strike, 64)
 		strikeData := &StrikeData{
@@ -373,12 +382,14 @@ func (m *OptionChainManager) CalculateOptionChain(ctx context.Context, index, ex
 				LTP:             details.PELTP,
 				OI:              details.PEOI,
 				Volume:          details.PEVolume,
+				PositionQty:     peQuantity,
 			},
 			CE: &OptionData{
 				InstrumentToken: utils.Uint32ToString(details.CEToken),
 				LTP:             details.CELTP,
 				OI:              details.CEOI,
 				Volume:          details.CEVolume,
+				PositionQty:     ceQuantity,
 			},
 		}
 

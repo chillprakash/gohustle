@@ -997,7 +997,6 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	index := r.URL.Query().Get("index")
 	expiry := r.URL.Query().Get("expiry")
 	strikes_count := r.URL.Query().Get("strikes")
-	force_calculate := r.URL.Query().Get("force") == "true"
 
 	// Validate required parameters
 	if index == "" {
@@ -1032,24 +1031,6 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 
 	var response *optionchain.OptionChainResponse
 	var err error
-
-	// Try to get from in-memory first unless force calculate is true
-	if !force_calculate {
-		// Include strikes count in cache key for proper caching
-		response = optionChainMgr.GetLatestChain(index, expiry, numStrikes)
-		if response != nil {
-			// Check if data is fresh (less than 2 seconds old)
-			if time.Since(time.Unix(0, response.Timestamp)) < 2*time.Second {
-				resp := Response{
-					Success: true,
-					Message: "Option chain retrieved from memory",
-					Data:    response,
-				}
-				sendJSONResponse(w, resp)
-				return
-			}
-		}
-	}
 
 	// If we don't have fresh data, calculate new
 	response, err = optionChainMgr.CalculateOptionChain(r.Context(), index, expiry, numStrikes)

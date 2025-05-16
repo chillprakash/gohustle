@@ -138,6 +138,80 @@ func (c *CacheMeta) GetExpiryStrikesWithExchangeAndInstrumentSymbol(ctx context.
 	return utils.StringSliceToUint32Slice(result), nil
 }
 
+func (c *CacheMeta) GetLTPforInstrumentToken(ctx context.Context, token string) (LTPData, error) {
+	ltpDB := c.ltpDB
+	// Process results
+	data := &LTPData{
+		instrumentToken: utils.StringToUint32(token),
+	}
+
+	// Create a map to store command results
+	cmdMap := make(map[string]*redis.StringCmd)
+
+	// Create pipeline
+	ltpPipe := ltpDB.Pipeline()
+
+	// Store commands in map for later retrieval
+	cmdMap[fmt.Sprintf("%s_ltp", token)] = ltpPipe.Get(ctx, fmt.Sprintf("%s_ltp", token))
+	cmdMap[fmt.Sprintf("%s_oi", token)] = ltpPipe.Get(ctx, fmt.Sprintf("%s_oi", token))
+	cmdMap[fmt.Sprintf("%s_volume", token)] = ltpPipe.Get(ctx, fmt.Sprintf("%s_volume", token))
+
+	// Execute pipeline
+	_, err := ltpPipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		c.log.Error("Failed to execute LTP pipeline", map[string]interface{}{
+			"error": err.Error(),
+			"token": token,
+		})
+		// Continue execution even if there's an error, as some commands might have succeeded
+	}
+
+	// Get LTP
+	ltpCmd := cmdMap[fmt.Sprintf("%s_ltp", token)]
+	if ltpCmd != nil {
+		ltp, err := ltpCmd.Float64()
+		if err == nil {
+			data.LTP = ltp
+		} else if err != redis.Nil {
+			c.log.Error("Failed to get LTP", map[string]interface{}{
+				"token": token,
+				"error": err.Error(),
+			})
+		}
+	}
+
+	// Get OI
+	oiCmd := cmdMap[fmt.Sprintf("%s_oi", token)]
+	if oiCmd != nil {
+		oi, err := oiCmd.Float64()
+		if err == nil {
+			data.OI = oi
+		} else if err != redis.Nil {
+			c.log.Error("Failed to get OI", map[string]interface{}{
+				"token": token,
+				"error": err.Error(),
+			})
+		}
+	}
+
+	// Get Volume
+	volumeCmd := cmdMap[fmt.Sprintf("%s_volume", token)]
+	if volumeCmd != nil {
+		volume, err := volumeCmd.Float64()
+		if err == nil {
+			data.Volume = volume
+		} else if err != redis.Nil {
+			c.log.Error("Failed to get Volume", map[string]interface{}{
+				"token": token,
+				"error": err.Error(),
+			})
+		}
+	}
+
+	return *data, nil
+
+}
+
 func (c *CacheMeta) GetLTPforInstrumentTokensList(ctx context.Context, tokens []string) ([]LTPData, error) {
 	ltpDB := c.ltpDB
 	ltpdataList := make([]LTPData, 0, len(tokens))

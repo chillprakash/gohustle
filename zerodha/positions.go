@@ -134,6 +134,14 @@ func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.C
 
 	// Get the comma-separated position data from Redis
 	allPositions, err := pm.positionsRedis.Get(ctx, PositionAllKeyFormat).Result()
+
+	if err == redis.Nil {
+		pm.log.Debug("No positions found in Redis", map[string]interface{}{
+			"key": PositionAllKeyFormat,
+		})
+		return cachePositionsMap, nil
+	}
+
 	if err != nil {
 		pm.log.Error("Failed to get all positions from Redis", map[string]interface{}{
 			"error": err.Error(),

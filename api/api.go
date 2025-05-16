@@ -170,38 +170,23 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If instrument token is provided, fetch trading symbol and exchange
-	if req.InstrumentToken != "" && (req.TradingSymbol == "" || req.Exchange == "") {
-		// Get the initialized KiteConnect instance
-		kc := zerodha.GetKiteConnect()
-
-		// Lookup the instrument details
-		tradingSymbol, exchange, err := kc.GetInstrumentDetailsByToken(r.Context(), req.InstrumentToken)
-		if err != nil {
-			s.log.Error("Failed to get instrument details", map[string]interface{}{
-				"error": err.Error(),
-				"token": req.InstrumentToken,
-			})
-			sendErrorResponse(w, fmt.Sprintf("Failed to get instrument details: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		// Set the trading symbol and exchange
-		req.TradingSymbol = tradingSymbol
-		req.Exchange = exchange
-
-		s.log.Info("Resolved instrument token", map[string]interface{}{
-			"token":          req.InstrumentToken,
-			"trading_symbol": tradingSymbol,
-			"exchange":       exchange,
-		})
-	}
-
-	// Validate that we have the required fields
-	if req.TradingSymbol == "" || req.Exchange == "" {
-		sendErrorResponse(w, "Trading symbol and exchange are required", http.StatusBadRequest)
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		s.log.Error("Failed to get cache meta instance", map[string]interface{}{})
+		sendErrorResponse(w, "Failed to get cache meta instance", http.StatusInternalServerError)
 		return
 	}
+
+	indexMeta, err := cacheMeta.GetMetadataOfToken(r.Context(), req.InstrumentToken)
+	if err != nil {
+		s.log.Error("Failed to get index meta", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to get index meta", http.StatusInternalServerError)
+		return
+	}
+	req.TradingSymbol = indexMeta.TradingSymbol
+	req.Exchange = indexMeta.Exchange
 
 	orderReq := zerodha.PlaceOrderRequest{
 		TradingSymbol: req.TradingSymbol,
@@ -230,36 +215,15 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		})
 
 		// Try to get the latest price for the instrument from Redis
-		var executionPrice float64 = req.Price // Default to the requested price
+		ltpData, err := cacheMeta.GetLTPforInstrumentToken(r.Context(), req.InstrumentToken)
+		if err != nil {
+			s.log.Error("Failed to get LTP for instrument token", map[string]interface{}{
+				"token": req.InstrumentToken,
+				"error": err.Error(),
+			})
 
-		if req.InstrumentToken != "" {
-			// Get Redis cache for LTP data
-			redisCache, err := cache.GetRedisCache()
-			if err == nil {
-				ltpDB := redisCache.GetLTPDB3()
-				if ltpDB != nil {
-					// Create a context with timeout for Redis operations
-					ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
-					defer cancel()
-
-					// Format the key as expected in Redis
-					ltpKey := fmt.Sprintf("%s_ltp", req.InstrumentToken)
-
-					// Try to get the LTP from Redis
-					ltpStr, err := ltpDB.Get(ctx, ltpKey).Result()
-					if err == nil {
-						ltp, err := strconv.ParseFloat(ltpStr, 64)
-						if err == nil && ltp > 0 {
-							executionPrice = ltp
-							s.log.Info("Using Redis LTP for paper trading", map[string]interface{}{
-								"instrument_token": req.InstrumentToken,
-								"ltp":              ltp,
-							})
-						}
-					}
-				}
-			}
 		}
+		var executionPrice float64 = ltpData.LTP
 
 		// Generate a unique order ID for paper trading
 		paperOrderID := fmt.Sprintf("paper-%s-%d", strings.ToLower(req.TradingSymbol), time.Now().UnixNano())
@@ -273,7 +237,6 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 
 		// For paper trades, KiteResponse should be nil as there's no actual Zerodha interaction
 		kiteResp = nil
-
 		// Store the execution price in the request for tracking purposes
 		orderReq.Price = executionPrice
 	} else {

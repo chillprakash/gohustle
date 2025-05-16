@@ -473,14 +473,6 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 		}
 	}
 
-	// Verify this is actually a paper trading order
-	if !order.PaperTrading {
-		log.Error("Attempted to manage position for non-paper trading order", map[string]interface{}{
-			"order_id": order.OrderID,
-		})
-		return
-	}
-
 	dbConn := db.GetTimescaleDB()
 	if dbConn == nil {
 		log.Error("Failed to get database connection for paper position management", nil)
@@ -516,13 +508,6 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			break
 		}
 	}
-	cacheMetaInstance, err := cache.GetCacheMetaInstance()
-	if err != nil {
-		log.Error("Failed to get cache meta instance", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return
-	}
 
 	// Calculate position quantity based on order side
 	quantity := order.Quantity
@@ -532,30 +517,6 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 
 	// Try to get the current market price
 	lastPrice := order.Price
-	if lastPrice == 0 && order.TradingSymbol != "" {
-		// Get the market data manager
-		marketDataMgr := GetMarketDataManager()
-
-		// First try to get the instrument token using our helper method
-		instrumentToken, exists := cacheMetaInstance.GetInstrumentTokenForSymbol(ctx, order.TradingSymbol)
-		if exists {
-			log.Info("Found instrument token for trading symbol", map[string]interface{}{
-				"trading_symbol":   order.TradingSymbol,
-				"instrument_token": instrumentToken,
-			})
-
-			// Try to get LTP using the instrument token
-			ltp, found := marketDataMgr.GetLTP(ctx, instrumentToken)
-			if found {
-				lastPrice = ltp
-				log.Info("Found LTP for paper trading position", map[string]interface{}{
-					"ltp":              ltp,
-					"instrument_token": instrumentToken,
-					"trading_symbol":   order.TradingSymbol,
-				})
-			}
-		}
-	}
 
 	if existingPosition != nil {
 		// Update existing position
@@ -681,51 +642,6 @@ func managePaperTradingPosition(ctx context.Context, order *db.OrderRecord) {
 			// For now, we'll leave it as nil
 			newPosition.StrategyID = strategyID
 		}
-		cacheMetaInstance, err := cache.GetCacheMetaInstance()
-		if err != nil {
-			log.Error("Failed to get cache meta instance", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return
-		}
-		// Try to get the instrument token
-		instrumentToken, exists := cacheMetaInstance.GetInstrumentTokenForSymbol(ctx, order.TradingSymbol)
-
-		// If token not found through the helper, try to extract from KiteResponse
-		if !exists && order.KiteResponse != nil {
-			if kiteOrder, ok := order.KiteResponse.(map[string]interface{}); ok {
-				if token, hasToken := kiteOrder["instrument_token"]; hasToken {
-					instrumentToken = token
-					exists = true
-
-					// Store the mapping in cache for future use
-					inMemoryCache := cache.GetInMemoryCacheInstance()
-					if inMemoryCache != nil {
-						inMemoryCache.Set(order.TradingSymbol, instrumentToken, 7*24*time.Hour)
-						log.Info("Stored trading symbol to token mapping for new position", map[string]interface{}{
-							"trading_symbol":   order.TradingSymbol,
-							"instrument_token": instrumentToken,
-						})
-					}
-				}
-			}
-		}
-
-		// If we have an instrument token, update the last price if needed
-		if exists && lastPrice == 0 {
-			// Use the MarketDataManager to get the LTP
-			marketDataMgr := GetMarketDataManager()
-			ltp, found := marketDataMgr.GetLTP(ctx, instrumentToken)
-			if found {
-				lastPrice = ltp
-				newPosition.LastPrice = ltp
-				log.Info("Updated position last price from LTP", map[string]interface{}{
-					"ltp":              ltp,
-					"instrument_token": instrumentToken,
-				})
-			}
-		}
-
 		// Calculate P&L
 		pnl := (lastPrice - newPosition.AveragePrice) * float64(newPosition.Quantity)
 		if newPosition.Quantity < 0 {
@@ -786,8 +702,6 @@ var exchangeQuantityLimits = map[string]int{
 // PlaceOrder places a regular order using the Kite Connect API
 // Automatically handles iceberg orders if quantity exceeds exchange limits
 func PlaceOrder(req PlaceOrderRequest) (*OrderResponse, error) {
-	// Get the KiteConnect instance
-	kc := GetKiteConnect()
 	log := logger.L()
 
 	// Extract index name from trading symbol (if applicable)
@@ -876,6 +790,7 @@ func PlaceOrder(req PlaceOrderRequest) (*OrderResponse, error) {
 		orderParams.Tag = req.Tag
 	}
 
+	kc := GetKiteConnect()
 	// Place the order using the Kite Connect client's PlaceOrder method
 	// "regular" is the variety for normal orders
 	kiteResp, err := kc.Kite.PlaceOrder("regular", orderParams)

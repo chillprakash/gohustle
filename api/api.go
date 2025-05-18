@@ -1060,18 +1060,20 @@ func (s *Server) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
 	// Get PnL manager
 	pnlManager := zerodha.GetPnLManager()
 
-	// Helper function to get float parameter, returns 0 if not found
-	getFloatParam := func(key string) float64 {
-		val, exists, err := pnlManager.AppParamManager().GetFloat(r.Context(), key)
-		if err != nil || !exists {
-			return 0
-		}
-		return val
+	// Get parameters with proper error handling
+	exitPnL, _, err := pnlManager.AppParamManager().GetFloat(r.Context(), "exit_pnl")
+	if err != nil {
+		s.log.Error("Failed to get exit_pnl parameter", map[string]interface{}{"error": err.Error()})
+		sendErrorResponse(w, "Failed to retrieve exit P&L parameter", http.StatusInternalServerError)
+		return
 	}
 
-	// Get parameters, defaulting to 0 if not found
-	exitPnL := getFloatParam("exit_pnl")
-	targetPnL := getFloatParam("target_pnl")
+	targetPnL, _, err := pnlManager.AppParamManager().GetFloat(r.Context(), "target_pnl")
+	if err != nil {
+		s.log.Error("Failed to get target_pnl parameter", map[string]interface{}{"error": err.Error()})
+		sendErrorResponse(w, "Failed to retrieve target P&L parameter", http.StatusInternalServerError)
+		return
+	}
 
 	sendJSONResponse(w, PnLParamsResponse{
 		Success: true,

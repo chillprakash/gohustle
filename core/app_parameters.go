@@ -75,24 +75,22 @@ func (apm *AppParameterManager) getParameter(ctx context.Context, key string) (*
 	// First check Redis if available
 	if apm.cache != nil {
 		redisKey := AppParamKeyPrefix + key
-		paramStr, err := apm.cache.Get(ctx, redisKey).Result()
+		// Only get the raw value from Redis
+		value, err := apm.cache.Get(ctx, redisKey).Result()
 		if err == nil {
-			var param AppParameter
-			if err := json.Unmarshal([]byte(paramStr), &param); err == nil {
-				return &param, nil
-			} else {
-				apm.log.Error("Failed to unmarshal parameter from Redis", map[string]interface{}{
-					"key":   key,
-					"error": err.Error(),
-				})
-			}
+			// Return a minimal parameter with just the value
+			// Type conversion will be handled by the caller
+			return &AppParameter{
+				Key:   key,
+				Value: value,
+			}, nil
 		}
 	}
 
-	// If not in Redis, check database
+	// Not found in cache or error, get from database
 	var param AppParameter
 	query := `SELECT id, key, value, value_type, description, created_at, updated_at 
-              FROM app_parameters WHERE key = $1`
+             FROM app_parameters WHERE key = $1`
 	err := apm.db.QueryRow(ctx, query, key).Scan(
 		&param.ID, &param.Key, &param.Value, &param.ValueType,
 		&param.Description, &param.CreatedAt, &param.UpdatedAt)
@@ -100,14 +98,12 @@ func (apm *AppParameterManager) getParameter(ctx context.Context, key string) (*
 		return nil, err
 	}
 
-	// Update Redis if available
+	// Update Redis if available - only store the value
 	if apm.cache != nil {
-		jsonBytes, err := json.Marshal(param)
-		if err == nil {
-			redisKey := AppParamKeyPrefix + key
-			apm.cache.Set(ctx, redisKey, string(jsonBytes), AppParamTTL)
-		} else {
-			apm.log.Error("Failed to marshal parameter for Redis", map[string]interface{}{
+		redisKey := AppParamKeyPrefix + key
+		// Only store the value string in Redis
+		if err := apm.cache.Set(ctx, redisKey, param.Value, AppParamTTL).Err(); err != nil {
+			apm.log.Error("Failed to cache parameter in Redis", map[string]interface{}{
 				"key":   key,
 				"error": err.Error(),
 			})
@@ -168,13 +164,16 @@ func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value, va
 	}
 
 	var param AppParameter
+	now := time.Now().UTC()
+
 	if exists {
 		// Update existing parameter
 		query = `UPDATE app_parameters 
-                 SET value = $1, value_type = $2, description = $3, updated_at = NOW() 
-                 WHERE key = $4 
-                 RETURNING id, key, value, value_type, description, created_at, updated_at`
-		err = apm.db.QueryRow(ctx, query, value, valueType, description, key).Scan(
+                SET value = $1, value_type = $2, description = $3, updated_at = $4
+                WHERE key = $5
+                RETURNING id, key, value, value_type, description, created_at, updated_at`
+		err = apm.db.QueryRow(ctx, query,
+			value, valueType, description, now, key).Scan(
 			&param.ID, &param.Key, &param.Value, &param.ValueType,
 			&param.Description, &param.CreatedAt, &param.UpdatedAt)
 		if err != nil {
@@ -182,10 +181,11 @@ func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value, va
 		}
 	} else {
 		// Create new parameter
-		query = `INSERT INTO app_parameters (key, value, value_type, description, created_at, updated_at) 
-                 VALUES ($1, $2, $3, $4, NOW(), NOW()) 
-                 RETURNING id, key, value, value_type, description, created_at, updated_at`
-		err = apm.db.QueryRow(ctx, query, key, value, valueType, description).Scan(
+		query = `INSERT INTO app_parameters (key, value, value_type, description, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING id, key, value, value_type, description, created_at, updated_at`
+		err = apm.db.QueryRow(ctx, query,
+			key, value, valueType, description, now, now).Scan(
 			&param.ID, &param.Key, &param.Value, &param.ValueType,
 			&param.Description, &param.CreatedAt, &param.UpdatedAt)
 		if err != nil {
@@ -193,14 +193,12 @@ func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value, va
 		}
 	}
 
-	// Update Redis if available
+	// Update Redis if available - only store the value
 	if apm.cache != nil {
-		jsonBytes, err := json.Marshal(param)
-		if err == nil {
-			redisKey := AppParamKeyPrefix + key
-			apm.cache.Set(ctx, redisKey, string(jsonBytes), AppParamTTL)
-		} else {
-			apm.log.Error("Failed to marshal parameter for Redis cache", map[string]interface{}{
+		redisKey := AppParamKeyPrefix + key
+		// Only store the value string in Redis
+		if err := apm.cache.Set(ctx, redisKey, param.Value, AppParamTTL).Err(); err != nil {
+			apm.log.Error("Failed to cache parameter in Redis", map[string]interface{}{
 				"key":   key,
 				"error": err.Error(),
 			})
@@ -265,10 +263,6 @@ func (apm *AppParameterManager) GetFloat(ctx context.Context, key string) (float
 			return 0, false, nil
 		}
 		return 0, false, err
-	}
-
-	if param.ValueType != "float" {
-		return 0, true, fmt.Errorf("parameter %s is not a float", key)
 	}
 
 	val, err := strconv.ParseFloat(param.Value, 64)

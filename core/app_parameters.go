@@ -65,15 +65,6 @@ func GetAppParameterManager() *AppParameterManager {
 			log:   logger.L(),
 			cache: redisCache.GetCacheDB1(),
 		}
-
-		// Initialize default parameters
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := appParamInstance.InitDefaultParameters(ctx); err != nil {
-			logger.L().Error("Failed to initialize default parameters", map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
 	})
 
 	return appParamInstance
@@ -360,71 +351,6 @@ func (apm *AppParameterManager) GetJSON(ctx context.Context, key string, result 
 	}
 
 	return json.Unmarshal([]byte(param.Value), result)
-}
-
-// InitDefaultParameters initializes default app parameters if they don't exist
-func (apm *AppParameterManager) InitDefaultParameters(ctx context.Context) error {
-	defaults := []struct {
-		key         string
-		value       string
-		valueType   string
-		description string
-	}{
-		{
-			key:         "target_pnl",
-			value:       "1000",
-			valueType:   "float",
-			description: "Target PNL in rupees at which to exit positions",
-		},
-		{
-			key:         "exit_pnl",
-			value:       "-500",
-			valueType:   "float",
-			description: "Stop-loss PNL in rupees at which to exit positions",
-		},
-		{
-			key:         "target_pnl_percent",
-			value:       "5",
-			valueType:   "float",
-			description: "Target PNL as percentage of investment",
-		},
-		{
-			key:         "exit_pnl_percent",
-			value:       "-3",
-			valueType:   "float",
-			description: "Stop-loss PNL as percentage of investment",
-		},
-		{
-			key:         "limit_order_percentage",
-			value:       "0.5",
-			valueType:   "float",
-			description: "Percentage above/below market price for limit orders",
-		},
-		{
-			key:         "auto_exit_enabled",
-			value:       "true",
-			valueType:   "bool",
-			description: "Whether automatic position exits are enabled",
-		},
-	}
-
-	for _, def := range defaults {
-		// Check if parameter exists
-		exists, err := apm.ParameterExists(ctx, def.key)
-		if err != nil {
-			return err
-		}
-
-		// If not, create it
-		if !exists {
-			_, err := apm.SetParameter(ctx, def.key, def.value, def.valueType, def.description)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
 }
 
 // Helper functions

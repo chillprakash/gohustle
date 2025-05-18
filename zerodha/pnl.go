@@ -9,12 +9,16 @@ import (
 	"gohustle/cache"
 	"gohustle/db"
 	"gohustle/logger"
+
+	"github.com/redis/go-redis/v9"
 )
 
 // PnLManager handles P&L calculations for positions
 type PnLManager struct {
-	log  *logger.Logger
-	kite *KiteConnect
+	log         *logger.Logger
+	timescaleDB *db.TimescaleDB
+	redisCache  *redis.Client
+	cacheMeta   *cache.CacheMeta
 }
 
 // PnLSummary represents a summary of P&L across all positions
@@ -80,8 +84,23 @@ func getStrategyIDValue(strategyID *int) int {
 func GetPnLManager() *PnLManager {
 	pnlOnce.Do(func() {
 		log := logger.L()
+		cacheMetaInstance, err := cache.GetCacheMetaInstance()
+		if err != nil {
+			log.Error("Failed to get cache meta instance", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		redisCache, err := cache.GetRedisCache()
+		if err != nil {
+			log.Error("Failed to get Redis cache", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 		pnlInstance = &PnLManager{
-			log: log,
+			log:         log,
+			timescaleDB: db.GetTimescaleDB(),
+			redisCache:  redisCache.GetLTPDB3(),
+			cacheMeta:   cacheMetaInstance,
 		}
 		log.Info("PnL manager initialized", map[string]interface{}{})
 	})
@@ -98,26 +117,8 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		UpdatedAt:        time.Now(),
 	}
 
-	cacheMetaInstance, err := cache.GetCacheMetaInstance()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get cache meta instance: %w", err)
-	}
-
-	// Get Redis cache for LTP data
-	redisCache, err := cache.GetRedisCache()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
-	}
-	ltpDB := redisCache.GetLTPDB3()
-
-	// Get positions from database (includes both real and paper trading positions)
-	timescaleDB := db.GetTimescaleDB()
-	if timescaleDB == nil {
-		return nil, fmt.Errorf("timescale DB is nil")
-	}
-
 	// Fetch all positions from database
-	dbPositions, err := timescaleDB.ListPositions(ctx)
+	dbPositions, err := pm.timescaleDB.ListPositions(ctx)
 	if err != nil {
 		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
 			"error": err.Error(),
@@ -134,13 +135,13 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		// Calculate P&L using the formula: pnl = (sellValue - buyValue) + (netQuantity * lastPrice * multiplier)
 		lastPrice := pos.LastPrice
 
-		instrumentToken, err := cacheMetaInstance.GetTokenBySymbol(ctx, pos.TradingSymbol)
+		instrumentToken, err := pm.cacheMeta.GetTokenBySymbol(ctx, pos.TradingSymbol)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get token metadata for trading symbol: %w", err)
 		}
 
 		ltpKey := fmt.Sprintf("%v_ltp", instrumentToken)
-		ltpVal, err := ltpDB.Get(ctx, ltpKey).Float64()
+		ltpVal, err := pm.redisCache.Get(ctx, ltpKey).Float64()
 		if err == nil && ltpVal > 0 {
 			lastPrice = ltpVal
 		}

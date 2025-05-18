@@ -22,6 +22,8 @@ CREATE TABLE app_parameters (
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_app_parameters_key ON app_parameters(key);
+
 -- Create NIFTY ticks table
 CREATE TABLE nifty_ticks (
     id BIGSERIAL,

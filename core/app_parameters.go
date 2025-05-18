@@ -257,100 +257,108 @@ func (apm *AppParameterManager) ParameterExists(ctx context.Context, key string)
 }
 
 // GetFloat retrieves a parameter as float64
-func (apm *AppParameterManager) GetFloat(ctx context.Context, key string, defaultValue float64) (float64, error) {
+// Returns (value, found, error) where found indicates if the parameter exists
+func (apm *AppParameterManager) GetFloat(ctx context.Context, key string) (float64, bool, error) {
 	param, err := apm.getParameter(ctx, key)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return defaultValue, nil
+			return 0, false, nil
 		}
-		return defaultValue, err
+		return 0, false, err
 	}
 
 	if param.ValueType != "float" {
-		return defaultValue, fmt.Errorf("parameter %s is not a float", key)
+		return 0, true, fmt.Errorf("parameter %s is not a float", key)
 	}
 
 	val, err := strconv.ParseFloat(param.Value, 64)
 	if err != nil {
-		return defaultValue, fmt.Errorf("failed to parse float value: %w", err)
+		return 0, true, fmt.Errorf("failed to parse float value: %w", err)
 	}
 
-	return val, nil
+	return val, true, nil
 }
 
 // GetInt retrieves a parameter as int
-func (apm *AppParameterManager) GetInt(ctx context.Context, key string, defaultValue int) (int, error) {
+// Returns (value, found, error) where found indicates if the parameter exists
+func (apm *AppParameterManager) GetInt(ctx context.Context, key string) (int, bool, error) {
 	param, err := apm.getParameter(ctx, key)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return defaultValue, nil
+			return 0, false, nil
 		}
-		return defaultValue, err
+		return 0, false, err
 	}
 
 	if param.ValueType != "int" {
-		return defaultValue, fmt.Errorf("parameter %s is not an int", key)
+		return 0, true, fmt.Errorf("parameter %s is not an int", key)
 	}
 
 	val, err := strconv.Atoi(param.Value)
 	if err != nil {
-		return defaultValue, fmt.Errorf("failed to parse int value: %w", err)
+		return 0, true, fmt.Errorf("failed to parse int value: %w", err)
 	}
 
-	return val, nil
+	return val, true, nil
 }
 
 // GetBool retrieves a parameter as bool
-func (apm *AppParameterManager) GetBool(ctx context.Context, key string, defaultValue bool) (bool, error) {
+// Returns (value, found, error) where found indicates if the parameter exists
+func (apm *AppParameterManager) GetBool(ctx context.Context, key string) (bool, bool, error) {
 	param, err := apm.getParameter(ctx, key)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return defaultValue, nil
+			return false, false, nil
 		}
-		return defaultValue, err
+		return false, false, err
 	}
 
 	if param.ValueType != "bool" {
-		return defaultValue, fmt.Errorf("parameter %s is not a bool", key)
+		return false, true, fmt.Errorf("parameter %s is not a bool", key)
 	}
 
 	val, err := strconv.ParseBool(param.Value)
 	if err != nil {
-		return defaultValue, fmt.Errorf("failed to parse bool value: %w", err)
+		return false, true, fmt.Errorf("failed to parse bool value: %w", err)
 	}
 
-	return val, nil
+	return val, true, nil
 }
 
 // GetString retrieves a parameter as string
-func (apm *AppParameterManager) GetString(ctx context.Context, key string, defaultValue string) (string, error) {
+// Returns (value, found, error) where found indicates if the parameter exists
+func (apm *AppParameterManager) GetString(ctx context.Context, key string) (string, bool, error) {
 	param, err := apm.getParameter(ctx, key)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return defaultValue, nil
+			return "", false, nil
 		}
-		return defaultValue, err
+		return "", false, err
 	}
 
 	if param.ValueType != "string" {
-		return defaultValue, fmt.Errorf("parameter %s is not a string", key)
+		return "", true, fmt.Errorf("parameter %s is not a string", key)
 	}
 
-	return param.Value, nil
+	return param.Value, true, nil
 }
 
 // GetJSON retrieves a parameter as JSON and unmarshals it into the provided interface
-func (apm *AppParameterManager) GetJSON(ctx context.Context, key string, result interface{}) error {
+// Returns (found, error) where found indicates if the parameter exists
+func (apm *AppParameterManager) GetJSON(ctx context.Context, key string, result interface{}) (bool, error) {
 	param, err := apm.getParameter(ctx, key)
 	if err != nil {
-		return err
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
 	}
 
 	if param.ValueType != "json" {
-		return fmt.Errorf("parameter %s is not JSON", key)
+		return true, fmt.Errorf("parameter %s is not JSON", key)
 	}
 
-	return json.Unmarshal([]byte(param.Value), result)
+	return true, json.Unmarshal([]byte(param.Value), result)
 }
 
 // Helper functions

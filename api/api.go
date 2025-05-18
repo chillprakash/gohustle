@@ -411,6 +411,25 @@ type Response struct {
 	Error   string      `json:"error,omitempty"`
 }
 
+// PnLParams represents P&L parameters
+type PnLParams struct {
+	ExitPnL   float64 `json:"exit_pnl"`
+	TargetPnL float64 `json:"target_pnl"`
+}
+
+// PnLParamsResponse represents the response for P&L parameters
+type PnLParamsResponse struct {
+	Success bool      `json:"success"`
+	Data    PnLParams `json:"data"`
+	Error   string    `json:"error,omitempty"`
+}
+
+// UpdatePnLParamsRequest represents the request to update P&L parameters
+type UpdatePnLParamsRequest struct {
+	ExitPnL   *float64 `json:"exit_pnl,omitempty"`
+	TargetPnL *float64 `json:"target_pnl,omitempty"`
+}
+
 // GeneralResponse represents the response structure for general market information
 type GeneralResponse struct {
 	LotSizes  map[string]int             `json:"lot_sizes"`
@@ -667,6 +686,8 @@ func (s *Server) setupRoutes() {
 
 	// P&L endpoints
 	authenticatedRouter.HandleFunc("/pnl", s.handleGetPnL).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/pnl/params", s.handleGetPnLParams).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/pnl/params", s.handleUpdatePnLParams).Methods("POST", "OPTIONS")
 	authenticatedRouter.HandleFunc("/pnl/summary", HandleGetLatestPnLSummary).Methods("GET", "OPTIONS")
 
 	// Time series metrics endpoint
@@ -1034,6 +1055,80 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetPnL returns P&L calculations for all positions
+// handleGetPnLParams returns the current P&L parameters
+func (s *Server) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
+	// Get PnL manager
+	pnlManager := zerodha.GetPnLManager()
+
+	// Get current parameters
+	exitPnL, _, err := pnlManager.AppParamManager().GetFloat(r.Context(), "exit_pnl")
+	if err != nil {
+		sendErrorResponse(w, fmt.Sprintf("Failed to get exit P&L: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	targetPnL, _, err := pnlManager.AppParamManager().GetFloat(r.Context(), "target_pnl")
+	if err != nil {
+		sendErrorResponse(w, fmt.Sprintf("Failed to get target P&L: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	sendJSONResponse(w, PnLParamsResponse{
+		Success: true,
+		Data: PnLParams{
+			ExitPnL:   exitPnL,
+			TargetPnL: targetPnL,
+		},
+	})
+}
+
+// handleUpdatePnLParams updates the P&L parameters
+func (s *Server) handleUpdatePnLParams(w http.ResponseWriter, r *http.Request) {
+	// Parse request body
+	var req UpdatePnLParamsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, fmt.Sprintf("Invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Validate at least one parameter is provided
+	if req.ExitPnL == nil && req.TargetPnL == nil {
+		sendErrorResponse(w, "No parameters provided for update", http.StatusBadRequest)
+		return
+	}
+
+	// Get PnL manager
+	pnlManager := zerodha.GetPnLManager()
+
+	// Update exit_pnl if provided
+	if req.ExitPnL != nil {
+		if err := pnlManager.SetExitPnL(r.Context(), *req.ExitPnL); err != nil {
+			sendErrorResponse(w, fmt.Sprintf("Failed to update exit P&L: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Update target_pnl if provided
+	if req.TargetPnL != nil {
+		if err := pnlManager.SetTargetPnL(r.Context(), *req.TargetPnL); err != nil {
+			sendErrorResponse(w, fmt.Sprintf("Failed to update target P&L: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Get updated parameters
+	exitPnL, _, _ := pnlManager.AppParamManager().GetFloat(r.Context(), "exit_pnl")
+	targetPnL, _, _ := pnlManager.AppParamManager().GetFloat(r.Context(), "target_pnl")
+
+	sendJSONResponse(w, PnLParamsResponse{
+		Success: true,
+		Data: PnLParams{
+			ExitPnL:   exitPnL,
+			TargetPnL: targetPnL,
+		},
+	})
+}
+
 func (s *Server) handleGetPnL(w http.ResponseWriter, r *http.Request) {
 	pnlManager := zerodha.GetPnLManager()
 	if pnlManager == nil {

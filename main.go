@@ -207,6 +207,14 @@ func main() {
 			"error": err.Error(),
 		})
 	}
+	defer func() {
+		log.Info("Closing Redis connections...", nil)
+		if err := redisCache.Close(); err != nil {
+			log.Error("Error closing Redis connections", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+	}()
 
 	// Verify Redis connections
 	if err := redisCache.Ping(); err != nil {
@@ -215,62 +223,87 @@ func main() {
 		})
 	}
 
-	// Create error and done channels
-	errChan := make(chan error, 2)
-	done := make(chan bool)
-
-	// Create root context
+	// Create root context that cancels on interrupt signal
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Create error channel with buffer for all goroutines
+	errChan := make(chan error, 3) // Buffer for data processing, API server, and any other goroutines
+
 	// Start data processing
 	go func() {
-		if err := startDataProcessing(ctx, cfg); err != nil {
-			errChan <- fmt.Errorf("failed to start data processing: %w", err)
+		log.Info("Starting data processing...", nil)
+		if err := startDataProcessing(ctx, cfg); err != nil && !isContextCanceledError(err) {
+			errChan <- fmt.Errorf("data processing error: %w", err)
 		}
+		log.Info("Data processing stopped", nil)
 	}()
 
 	// Start API server
+	apiServerDone := make(chan struct{})
 	go func() {
-		if err := startAPIServer(ctx, cfg); err != nil {
-			errChan <- fmt.Errorf("failed to start API server: %w", err)
+		log.Info("Starting API server...", nil)
+		if err := startAPIServer(ctx, cfg); err != nil && !isContextCanceledError(err) {
+			errChan <- fmt.Errorf("API server error: %w", err)
 		}
+		close(apiServerDone)
+		log.Info("API server stopped", nil)
 	}()
 
-	// Handle shutdown
-	go func() {
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		<-sig
+	// Wait for shutdown signal or error
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-		log.Info("Shutdown signal received", nil)
+	select {
+	case sig := <-sigChan:
+		log.Info("Shutdown signal received", map[string]interface{}{
+			"signal": sig.String(),
+		})
 
-		// Create context with timeout for graceful shutdown
+		// Start graceful shutdown with timeout
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutdownCancel()
 
-		// Cancel the main context to initiate shutdown
+		// Cancel the main context to signal all goroutines to stop
 		cancel()
 
-		// Cleanup and shutdown
+		// Wait for API server to shut down gracefully
+		select {
+		case <-apiServerDone:
+			log.Info("API server shut down gracefully", nil)
+		case <-shutdownCtx.Done():
+			log.Error("API server shutdown timed out, forcing exit", map[string]interface{}{
+				"timeout": "30s",
+			})
+		}
+
+		// Perform cleanup
 		if err := cleanup(shutdownCtx); err != nil {
 			log.Error("Error during cleanup", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}
 
-		close(done)
-	}()
-
-	// Wait for error or done signal
-	select {
 	case err := <-errChan:
-		log.Fatal("Application error", map[string]interface{}{
+		log.Error("Fatal error occurred", map[string]interface{}{
 			"error": err.Error(),
 		})
-	case <-done:
-		log.Info("Application shutdown complete", nil)
+		// Cancel context to initiate graceful shutdown
+		cancel()
+		// Wait a moment for goroutines to handle the cancellation
+		time.Sleep(2 * time.Second)
 	}
+
+	log.Info("Application shutdown complete", nil)
+}
+
+// isContextCanceledError checks if the error is a context.Canceled error or contains it
+func isContextCanceledError(err error) bool {
+	if err == context.Canceled {
+		return true
+	}
+	// Check if the error wraps context.Canceled
+	return err != nil && err.Error() == context.Canceled.Error()
 }
 
 // Helper function to convert string tokens to uint32

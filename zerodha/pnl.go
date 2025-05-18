@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gohustle/cache"
+	"gohustle/core"
 	"gohustle/db"
 	"gohustle/logger"
 
@@ -15,10 +16,16 @@ import (
 
 // PnLManager handles P&L calculations for positions
 type PnLManager struct {
-	log         *logger.Logger
-	timescaleDB *db.TimescaleDB
-	redisCache  *redis.Client
-	cacheMeta   *cache.CacheMeta
+	log             *logger.Logger
+	timescaleDB     *db.TimescaleDB
+	redisCache      *redis.Client
+	cacheMeta       *cache.CacheMeta
+	appParamManager *core.AppParameterManager
+}
+
+// AppParamManager returns the app parameter manager instance
+func (pm *PnLManager) AppParamManager() *core.AppParameterManager {
+	return pm.appParamManager
 }
 
 // PnLSummary represents a summary of P&L across all positions
@@ -97,10 +104,11 @@ func GetPnLManager() *PnLManager {
 			})
 		}
 		pnlInstance = &PnLManager{
-			log:         log,
-			timescaleDB: db.GetTimescaleDB(),
-			redisCache:  redisCache.GetLTPDB3(),
-			cacheMeta:   cacheMetaInstance,
+			log:             log,
+			timescaleDB:     db.GetTimescaleDB(),
+			redisCache:      redisCache.GetLTPDB3(),
+			cacheMeta:       cacheMetaInstance,
+			appParamManager: core.GetAppParameterManager(),
 		}
 		log.Info("PnL manager initialized", map[string]interface{}{})
 	})
@@ -317,6 +325,24 @@ func (pm *PnLManager) SchedulePnLCalculation(ctx context.Context, intervalSecond
 }
 
 // Note: High-frequency P&L tracking has been replaced by strategy-level P&L tracking
+
+// SetExitPnL sets the exit P&L percentage
+func (pm *PnLManager) SetExitPnL(ctx context.Context, pnl float64) error {
+	_, err := pm.appParamManager.SetParameter(ctx, "exit_pnl", fmt.Sprintf("%.2f", pnl), "float", "Exit P&L percentage")
+	if err != nil {
+		return fmt.Errorf("failed to set exit P&L: %w", err)
+	}
+	return nil
+}
+
+// SetTargetPnL sets the target P&L percentage
+func (pm *PnLManager) SetTargetPnL(ctx context.Context, pnl float64) error {
+	_, err := pm.appParamManager.SetParameter(ctx, "target_pnl", fmt.Sprintf("%.2f", pnl), "float", "Target P&L percentage")
+	if err != nil {
+		return fmt.Errorf("failed to set target P&L: %w", err)
+	}
+	return nil
+}
 
 // CalculateAndStorePositionPnL calculates and stores P&L for all positions
 func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {

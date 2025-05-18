@@ -162,58 +162,59 @@ func (r *RedisCache) GetCacheDB1() *redis.Client {
 // Close closes all Redis connections
 func (r *RedisCache) Close() error {
 	var errs []error
-
-	// Close connections in parallel
 	var wg sync.WaitGroup
-	errChan := make(chan error, 3) // Changed to 3
+	errChan := make(chan error, 10) // Buffer for parallel errors
 
-	wg.Add(3) // Changed to 3
-	go func() {
-		defer wg.Done()
-		if r.ltpDB3 != nil {
-			if err := r.ltpDB3.Close(); err != nil {
-				errChan <- fmt.Errorf("failed to close Redis DB 3: %w", err)
-			}
+	// Function to safely close a Redis client
+	closeClient := func(name string, client *redis.Client) {
+		if client == nil {
+			wg.Done()
+			return
 		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		if r.positionsDB2 != nil {
-			if err := r.positionsDB2.Close(); err != nil {
-				errChan <- fmt.Errorf("failed to close Redis DB 2: %w", err)
-			}
+		if err := client.Close(); err != nil {
+			errChan <- fmt.Errorf("failed to close %s: %w", name, err)
 		}
-	}()
+		wg.Done()
+	}
 
-	go func() {
-		defer wg.Done()
-		if r.timeSeriesDB4 != nil {
-			if err := r.timeSeriesDB4.Close(); err != nil {
-				errChan <- fmt.Errorf("failed to close Time Series DB: %w", err)
-			}
+	// List of all Redis clients to close
+	clients := []struct {
+		name   string
+		client *redis.Client
+	}{
+		{"cache DB1", r.cacheDB1},
+		{"positions DB2", r.positionsDB2},
+		{"LTP DB3", r.ltpDB3},
+		{"time series DB4", r.timeSeriesDB4},
+	}
+
+	// Count non-nil clients
+	var clientCount int
+	for _, c := range clients {
+		if c.client != nil {
+			clientCount++
 		}
-	}()
+	}
 
-	go func() {
-		defer wg.Done()
-		if r.cacheDB1 != nil {
-			if err := r.cacheDB1.Close(); err != nil {
-				errChan <- fmt.Errorf("failed to close Cache DB 1: %w", err)
-			}
+	// Set the WaitGroup counter
+	wg.Add(clientCount)
+
+	// Close all clients in parallel
+	for _, c := range clients {
+		if c.client != nil {
+			go closeClient(c.name, c.client)
 		}
-	}()
+	}
 
-	// Wait for all closures and collect errors
+	// Wait for all closures to complete
 	wg.Wait()
 	close(errChan)
 
+	// Collect any errors
 	for err := range errChan {
-		errs = append(errs, err)
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("errors closing Redis connections: %v", errs)
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	// Reset singleton instance
@@ -221,6 +222,9 @@ func (r *RedisCache) Close() error {
 	redisInstance = nil
 	redisMu.Unlock()
 
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing Redis connections: %v", errs)
+	}
 	return nil
 }
 

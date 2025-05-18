@@ -335,6 +335,14 @@ func (pm *PnLManager) SetExitPnL(ctx context.Context, pnl float64) error {
 	return nil
 }
 
+func (pm *PnLManager) GetExitPnL(ctx context.Context) (float64, bool, error) {
+	return pm.appParamManager.GetFloat(ctx, "exit_pnl")
+}
+
+func (pm *PnLManager) GetTargetPnL(ctx context.Context) (float64, bool, error) {
+	return pm.appParamManager.GetFloat(ctx, "target_pnl")
+}
+
 // SetTargetPnL sets the target P&L percentage
 func (pm *PnLManager) SetTargetPnL(ctx context.Context, pnl float64) error {
 	_, err := pm.appParamManager.SetParameter(ctx, "target_pnl", fmt.Sprintf("%.2f", pnl), "float", "Target P&L percentage")
@@ -369,10 +377,12 @@ func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {
 		return fmt.Errorf("failed to get positions from database: %w", err)
 	}
 
+	positionManager := GetPositionManager()
+
 	// Prepare batch insert
 	var positionPnLs []db.PositionPnLTimeseriesRecord
 	timestamp := time.Now()
-
+	totalPnL := 0.0
 	// Process each position
 	for _, pos := range dbPositions {
 		// Get latest LTP
@@ -428,6 +438,25 @@ func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {
 			})
 			// Continue with other positions even if one fails
 		}
+	}
+
+	exitPnL, _, _ := pm.GetExitPnL(ctx)
+	targetPnL, _, _ := pm.GetTargetPnL(ctx)
+
+	if totalPnL > exitPnL {
+		pm.log.Info("Position P&L exceeded exit P&L", map[string]interface{}{
+			"total_pnl": totalPnL,
+			"exit_pnl":  exitPnL,
+		})
+		positionManager.ExitAllPositions(ctx, false)
+	}
+
+	if totalPnL > targetPnL {
+		pm.log.Info("Position P&L exceeded target P&L", map[string]interface{}{
+			"total_pnl":  totalPnL,
+			"target_pnl": targetPnL,
+		})
+		positionManager.ExitAllPositions(ctx, false)
 	}
 
 	// Batch insert all position P&L records if there are any

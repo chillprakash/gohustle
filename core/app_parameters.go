@@ -284,10 +284,6 @@ func (apm *AppParameterManager) GetInt(ctx context.Context, key string) (int, bo
 		return 0, false, err
 	}
 
-	if param.ValueType != "int" {
-		return 0, true, fmt.Errorf("parameter %s is not an int", key)
-	}
-
 	val, err := strconv.Atoi(param.Value)
 	if err != nil {
 		return 0, true, fmt.Errorf("failed to parse int value: %w", err)

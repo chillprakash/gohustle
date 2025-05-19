@@ -17,7 +17,7 @@ type LoginResponse struct {
 }
 
 // handleLogin handles user login
-func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var creds auth.Credentials
 	if err := decodeJSONBody(w, r, &creds); err != nil {
 		sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
@@ -56,7 +56,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleLogout handles user logout
-func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleLogout(w http.ResponseWriter, r *http.Request) {
 	// Get token from Authorization header
 	token := r.Header.Get("Authorization")
 	if token == "" {
@@ -82,7 +82,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAuthCheck is a debug endpoint to check authentication status
-func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	resp := Response{
 		Success: true,
 		Message: "Authentication check successful",

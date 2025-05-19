@@ -24,14 +24,14 @@ Instrument tokens can be obtained from the option chain response or other market
 
 ### Place Order
 
-Places a new order with Zerodha or as a paper trade.
+Places a new order with Zerodha or as a paper trade. Supports both regular orders and position management operations.
 
 **Endpoint:** `POST /api/orders/place`
 
-**Request:**
+#### Regular Order Request:
 ```json
 {
-  "instrumentToken": "12345",  
+  "instrumentToken": "12345",
   "orderType": "MARKET",
   "side": "BUY",
   "quantity": 75,
@@ -45,6 +45,22 @@ Places a new order with Zerodha or as a paper trade.
 }
 ```
 
+#### Move Operation Request:
+```json
+{
+  "instrumentToken": "12345",
+  "orderType": "MARKET",
+  "side": "SELL",
+  "product": "NRML",
+  "tag": "ExitStrategy1",
+  "move": {
+    "type": "exit",
+    "steps": 1,
+    "quantity": "full"
+  }
+}
+```
+
 **Response:**
 ```json
 {
@@ -55,9 +71,9 @@ Places a new order with Zerodha or as a paper trade.
 }
 ```
 
-**Parameters:**
+### Parameters
 
-**Instrument Identification (choose one method):**
+#### Instrument Identification (choose one method):
 - `instrumentToken`: Instrument token (recommended) - uniquely identifies the instrument without needing symbol and exchange
   
   OR
@@ -65,21 +81,171 @@ Places a new order with Zerodha or as a paper trade.
 - `tradingSymbol`: Trading symbol of the instrument
 - `exchange`: Exchange code (NSE, BSE, NFO, etc.)
 
-**Order Parameters (required):**
-- `orderType`: Type of order (MARKET, LIMIT, SL, SL-M)
-- `side`: Order side (BUY, SELL)
-- `quantity`: Order quantity
-- `product`: Product type (NRML, MIS, CNC)
+#### Order Parameters (required for regular orders):
+- `orderType`: Type of order (`MARKET`, `LIMIT`, `SL`, `SL-M`)
+- `side`: Order side (`BUY`, `SELL`)
+- `quantity`: Order quantity (not required for move operations)
+- `product`: Product type (`NRML`, `MIS`, `CNC`)
 
-**Conditional Parameters:**
-- `price`: Order price (required for LIMIT orders)
-- `triggerPrice`: Trigger price (required for SL and SL-M orders)
+#### Move Operation Parameters (optional):
+- `move.type`: Type of move operation (required for move operations):
+  - `exit`: Close the position
+  - `move_away`: Move the position further away from the current price
+  - `move_closer`: Move the position closer to the current price
+- `move.steps`: Number of strike steps to move (1 or 2, required for `move_away`/`move_closer`)
+- `move.quantity`: Portion of position to process (optional, defaults to `full`):
+  - `full`: 100% of the position
+  - `half`: 50% of the position
+  - `quarter`: 25% of the position
 
-**Optional Parameters:**
-- `validity`: Order validity (DAY, IOC) - defaults to DAY if not specified
-- `disclosedQty`: Disclosed quantity
+#### Conditional Parameters:
+- `price`: Order price (required for `LIMIT` orders)
+- `triggerPrice`: Trigger price (required for `SL` and `SL-M` orders)
+
+#### Optional Parameters:
+- `validity`: Order validity (`DAY`, `IOC`) - defaults to `DAY` if not specified
+- `disclosedQty`: Disclosed quantity (for iceberg orders)
 - `tag`: Custom tag for the order
-- `paperTrading`: If true, order will be simulated and not sent to broker
+- `paperTrading`: If `true`, order will be simulated and not sent to broker
+
+### Examples
+
+#### 1. Market Order
+```json
+{
+  "instrumentToken": "12345",
+  "orderType": "MARKET",
+  "side": "BUY",
+  "quantity": 75,
+  "product": "NRML"
+}
+```
+
+#### 2. Limit Order with Tag
+```json
+{
+  "tradingSymbol": "NIFTY23JUNFUT",
+  "exchange": "NFO",
+  "orderType": "LIMIT",
+  "side": "SELL",
+  "quantity": 50,
+  "price": 19500.50,
+  "product": "NRML",
+  "tag": "TargetExit"
+}
+```
+
+#### 3. Move Operation - Exit Full Position
+```json
+{
+  "instrumentToken": "12345",
+  "orderType": "MARKET",
+  "side": "SELL",
+  "product": "NRML",
+  "move": {
+    "type": "exit",
+    "quantity": "full"
+  }
+}
+```
+
+#### 4. Move Operation - Move Away by 1 Strike (50% of position)
+```json
+{
+  "instrumentToken": "12345",
+  "orderType": "LIMIT",
+  "side": "SELL",
+  "product": "NRML",
+  "move": {
+    "type": "move_away",
+    "steps": 1,
+    "quantity": "half"
+  }
+}
+```
+
+#### 5. Paper Trading Order
+```json
+{
+  "instrumentToken": "12345",
+  "orderType": "MARKET",
+  "side": "BUY",
+  "quantity": 25,
+  "product": "MIS",
+  "paperTrading": true
+}
+```
+
+### Complete Parameter Reference
+
+#### Order Parameters
+
+| Parameter | Type | Required | Default | Allowed Values | Description |
+|-----------|------|----------|---------|----------------|-------------|
+| `instrumentToken` | string | Conditional | - | Valid instrument token | Unique identifier for the instrument (use either this or tradingSymbol+exchange) |
+| `tradingSymbol` | string | Conditional | - | Valid trading symbol | Trading symbol (must be used with `exchange`) |
+| `exchange` | string | Conditional | - | "NSE", "BSE", "NFO", "BFO", etc. | Exchange code (required if using `tradingSymbol`) |
+| `orderType` | string | Yes | - | "MARKET", "LIMIT", "SL", "SL-M" | Type of order to place |
+| `side` | string | Yes | - | "BUY", "SELL" | Order side |
+| `product` | string | Yes | - | "NRML", "MIS", "CNC" | Product type |
+| `quantity` | integer | Conditional | - | Positive integer | Order quantity (not required for move operations) |
+| `price` | number | Conditional | - | Positive number | Order price (required for LIMIT orders) |
+| `triggerPrice` | number | Conditional | - | Positive number | Trigger price (required for SL/SL-M orders) |
+| `validity` | string | No | "DAY" | "DAY", "IOC" | Order validity period |
+| `disclosedQty` | integer | No | 0 | 0 to order quantity | Disclosed quantity for iceberg orders |
+| `tag` | string | No | "" | Any string | Custom tag for order tracking |
+| `paperTrading` | boolean | No | false | true, false | If true, simulates the order without real execution |
+
+#### Move Operation Parameters (optional)
+
+| Parameter | Type | Required | Default | Allowed Values | Description |
+|-----------|------|----------|---------|----------------|-------------|
+| `move.type` | string | Yes | - | "exit", "move_away", "move_closer" | Type of move operation |
+| `move.steps` | integer | Conditional | - | 1, 2 | Number of strike steps to move (required for move_away/move_closer) |
+| `move.quantity` | string | No | "1" | "1", "0.5", "0.25" | Portion of position to process |
+
+### Dependencies and Validation Rules
+
+1. **Instrument Identification**:
+   - Must provide either `instrumentToken` OR both `tradingSymbol` and `exchange`
+
+2. **Move Operations**:
+   - When `move` is specified:
+     - `move.type` is required
+     - `move.steps` is required if type is `move_away` or `move_closer`
+     - `quantity` in the main request is ignored (use `move.quantity` instead)
+
+3. **Order Type Requirements**:
+   - `MARKET`: No price required
+   - `LIMIT`: `price` is required
+   - `SL`/`SL-M`: Both `price` and `triggerPrice` are required
+
+4. **Quantity Handling**:
+   - Required for non-move operations
+   - For move operations, specify `move.quantity` instead (defaults to "1" if not specified)
+
+### Complete Example with All Parameters
+
+```json
+{
+  "instrumentToken": "12345",
+  "orderType": "LIMIT",
+  "side": "SELL",
+  "product": "NRML",
+  "quantity": 100,
+  "price": 19500.50,
+  "triggerPrice": 19450.75,
+  "validity": "DAY",
+  "disclosedQty": 0,
+  "tag": "Strategy1",
+  "paperTrading": false,
+  "move": {
+    "type": "move_away",
+    "steps": 1,
+    "quantity": "half"
+  }
+}
+```
 
 ### Place GTT Order
 

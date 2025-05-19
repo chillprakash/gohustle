@@ -55,7 +55,7 @@ func handleGetArchiveJobs(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	indexName := r.URL.Query().Get("index_name")
 	limit := 50 // Default limit
-	
+
 	// Parse limit if provided
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		parsedLimit, err := strconv.Atoi(limitStr)
@@ -105,14 +105,14 @@ func handleGetArchiveJobs(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var job ArchiveJobResponse
 		var startedAt, completedAt, nextRetryAt interface{}
-		
-		// Use sql.Null types to handle nullable fields
-	var tickCount sql.NullInt64
-	var filePath sql.NullString
-	var fileSizeBytes sql.NullInt64
-	var errorMessage sql.NullString
 
-	err := rows.Scan(
+		// Use sql.Null types to handle nullable fields
+		var tickCount sql.NullInt64
+		var filePath sql.NullString
+		var fileSizeBytes sql.NullInt64
+		var errorMessage sql.NullString
+
+		err := rows.Scan(
 			&job.ID,
 			&job.JobID,
 			&job.IndexName,
@@ -129,24 +129,24 @@ func handleGetArchiveJobs(w http.ResponseWriter, r *http.Request) {
 			&job.RetryCount,
 			&nextRetryAt,
 		)
-		
-	// Convert sql.Null types to pointer types
-	if tickCount.Valid {
-		tCount := int(tickCount.Int64)
-		job.TickCount = &tCount
-	}
-	if filePath.Valid {
-		fPath := filePath.String
-		job.FilePath = &fPath
-	}
-	if fileSizeBytes.Valid {
-		fSize := fileSizeBytes.Int64
-		job.FileSizeBytes = &fSize
-	}
-	if errorMessage.Valid {
-		errMsg := errorMessage.String
-		job.ErrorMessage = &errMsg
-	}
+
+		// Convert sql.Null types to pointer types
+		if tickCount.Valid {
+			tCount := int(tickCount.Int64)
+			job.TickCount = &tCount
+		}
+		if filePath.Valid {
+			fPath := filePath.String
+			job.FilePath = &fPath
+		}
+		if fileSizeBytes.Valid {
+			fSize := fileSizeBytes.Int64
+			job.FileSizeBytes = &fSize
+		}
+		if errorMessage.Valid {
+			errMsg := errorMessage.String
+			job.ErrorMessage = &errMsg
+		}
 		if err != nil {
 			logger.L().Error("Failed to scan job row", map[string]interface{}{
 				"error": err.Error(),
@@ -161,14 +161,14 @@ func handleGetArchiveJobs(w http.ResponseWriter, r *http.Request) {
 				job.StartedAt = &tCopy
 			}
 		}
-		
+
 		if completedAt != nil {
 			if t, ok := completedAt.(time.Time); ok {
 				tCopy := t // Create a copy to avoid referencing a loop variable
 				job.CompletedAt = &tCopy
 			}
 		}
-		
+
 		if nextRetryAt != nil {
 			if t, ok := nextRetryAt.(time.Time); ok {
 				tCopy := t // Create a copy to avoid referencing a loop variable
@@ -281,16 +281,16 @@ type RunArchiveJobRequest struct {
 
 // ArchiveFileInfo represents information about an archived file
 type ArchiveFileInfo struct {
-	FileName     string    `json:"file_name"`
-	FilePath     string    `json:"file_path"`
-	IndexName    string    `json:"index_name"`
-	SizeBytes    int64     `json:"size_bytes"`
-	SizeMB       float64   `json:"size_mb"`
-	CreatedAt    time.Time `json:"created_at"`
-	TickCount    int       `json:"tick_count,omitempty"`
-	StartTime    time.Time `json:"start_time,omitempty"`
-	EndTime      time.Time `json:"end_time,omitempty"`
-	IsDaily      bool      `json:"is_daily"`
+	FileName  string    `json:"file_name"`
+	FilePath  string    `json:"file_path"`
+	IndexName string    `json:"index_name"`
+	SizeBytes int64     `json:"size_bytes"`
+	SizeMB    float64   `json:"size_mb"`
+	CreatedAt time.Time `json:"created_at"`
+	TickCount int       `json:"tick_count,omitempty"`
+	StartTime time.Time `json:"start_time,omitempty"`
+	EndTime   time.Time `json:"end_time,omitempty"`
+	IsDaily   bool      `json:"is_daily"`
 }
 
 // handleRunArchiveJob manually triggers an archive job

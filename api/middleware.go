@@ -9,7 +9,7 @@ import (
 )
 
 // AuthMiddleware checks for valid JWT token in Authorization header
-func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
+func (s *APIServer) AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Get token from Authorization header
 		authHeader := r.Header.Get("Authorization")

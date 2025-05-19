@@ -27,75 +27,48 @@ import (
 	"github.com/gorilla/mux"
 )
 
-// PlaceOrderAPIRequest is the API payload for placing a regular order
-// (mirrors zerodha.PlaceOrderRequest, but with camelCase for JSON)
-// MoveType represents the type of option position movement
-type MoveType string
-
-const (
-	MoveAway   MoveType = "move_away"
-	MoveCloser MoveType = "move_closer"
-	Exit       MoveType = "exit"
-)
-
-// QuantityFraction represents the fraction of the position to process
-type QuantityFraction string
-
-const (
-	FullPosition    QuantityFraction = "1"
-	HalfPosition    QuantityFraction = "0.5"
-	QuarterPosition QuantityFraction = "0.25"
-)
-
-type PlaceOrderAPIRequest struct {
-	// Either provide InstrumentToken OR both TradingSymbol and Exchange
-	InstrumentToken string  `json:"instrumentToken,omitempty"`
-	TradingSymbol   string  `json:"tradingSymbol,omitempty"`
-	Exchange        string  `json:"exchange,omitempty"`
-	OrderType       string  `json:"orderType"`
-	Side            string  `json:"side"`
-	Quantity        int     `json:"quantity"`
-	Price           float64 `json:"price,omitempty"`
-	TriggerPrice    float64 `json:"triggerPrice,omitempty"`
-	Product         string  `json:"product"`
-	Validity        string  `json:"validity,omitempty"`
-	DisclosedQty    int     `json:"disclosedQty,omitempty"`
-	Tag             string  `json:"tag,omitempty"`
-	PaperTrading    bool    `json:"paperTrading,omitempty"`
-
-	// New fields for option movement functionality
-	// These are populated from query parameters
-	MoveType     MoveType         `json:"-"` // move_away, move_closer, or exit
-	Steps        int              `json:"-"` // Number of strike steps to move (1 or 2)
-	QuantityFrac QuantityFraction `json:"-"` // Fraction of position to process (1, 0.5, 0.25)
+// APIServer represents the HTTP API server
+type APIServer struct {
+	router          *mux.Router
+	server          *http.Server
+	port            string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	log             *logger.Logger
+	orderManager    *zerodha.OrderManager
+	positionManager *zerodha.PositionManager
 }
 
-// PlaceGTTAPIRequest is the API payload for placing a GTT order
-type PlaceGTTAPIRequest struct {
-	TriggerType string `json:"triggerType"`
-	// Either provide InstrumentToken OR both TradingSymbol and Exchange
-	InstrumentToken string                   `json:"instrumentToken,omitempty"`
-	TradingSymbol   string                   `json:"tradingSymbol,omitempty"`
-	Exchange        string                   `json:"exchange,omitempty"`
-	TriggerValues   []float64                `json:"triggerValues"`
-	LastPrice       float64                  `json:"lastPrice"`
-	Orders          []map[string]interface{} `json:"orders"`
+// GetAPIServer returns the singleton instance of the API server
+func GetAPIServer() *APIServer {
+	mu.RLock()
+	if instance != nil {
+		mu.RUnlock()
+		return instance
+	}
+	mu.RUnlock()
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	once.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		instance = &APIServer{
+			router:          mux.NewRouter(),
+			port:            "8080", // Default port, can be changed
+			ctx:             ctx,
+			cancel:          cancel,
+			log:             logger.L(),
+			orderManager:    zerodha.GetOrderManager(),
+			positionManager: zerodha.GetPositionManager(),
+		}
+		// Initialize routes
+		instance.setupRoutes()
+	})
+	return instance
 }
 
-// Server represents the HTTP API server
-type Server struct {
-	router       *mux.Router
-	server       *http.Server
-	port         string
-	ctx          context.Context
-	cancel       context.CancelFunc
-	log          *logger.Logger
-	tickStore    *filestore.TickStore
-	parquetStore *filestore.ParquetStore
-}
-
-// --- Order Handlers ---
-func (s *Server) handleGetOrders(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetOrders(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	orders, err := db.GetTimescaleDB().ListOrders(ctx)
 	if err != nil {
@@ -114,60 +87,37 @@ func (s *Server) handleGetOrders(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
-	// Parse query parameters for option movement functionality
-	queryParams := r.URL.Query()
-
+// mapToPlaceOrderRequest converts an HTTP request to a PlaceOrderAPIRequest
+func (s *APIServer) mapToPlaceOrderRequest(request *http.Request) (*zerodha.PlaceOrderRequest, error) {
 	// Parse request body
-	var req PlaceOrderAPIRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendErrorResponse(w, "Invalid request payload", http.StatusBadRequest)
-		return
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading request body: %w", err)
 	}
 
-	// Check if this is a move operation by looking for the 'type' query parameter
-	moveTypeStr := queryParams.Get("type")
-	if moveTypeStr != "" {
-		// This is a move operation, parse the parameters
-		req.MoveType = MoveType(moveTypeStr)
+	// Log the raw request body for debugging
+	s.log.Debug("Place order request", map[string]interface{}{
+		"body": string(body),
+	})
 
-		// Validate move type
-		if req.MoveType != MoveAway && req.MoveType != MoveCloser && req.MoveType != Exit {
-			sendErrorResponse(w, "Invalid move type. Must be one of: move_away, move_closer, exit", http.StatusBadRequest)
-			return
-		}
+	// Unmarshal the request body into PlaceOrderAPIRequest
+	var orderReq zerodha.PlaceOrderRequest
+	if err := json.Unmarshal(body, &orderReq); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
 
-		// Parse steps parameter
-		stepsStr := queryParams.Get("steps")
-		if stepsStr != "" {
-			steps, err := strconv.Atoi(stepsStr)
-			if err != nil || (steps != 1 && steps != 2) {
-				sendErrorResponse(w, "Invalid steps value. Must be 1 or 2", http.StatusBadRequest)
-				return
-			}
-			req.Steps = steps
-		} else if req.MoveType != Exit {
-			// Steps is required for move_away and move_closer
-			sendErrorResponse(w, "Steps parameter is required for move operations", http.StatusBadRequest)
-			return
-		}
+	// Set default values if not provided
+	if orderReq.Validity == "" {
+		orderReq.Validity = "DAY"
+	}
 
-		// Parse quantity fraction parameter
-		quantityStr := queryParams.Get("quantity")
-		if quantityStr != "" {
-			req.QuantityFrac = QuantityFraction(quantityStr)
-			if req.QuantityFrac != FullPosition && req.QuantityFrac != HalfPosition && req.QuantityFrac != QuarterPosition {
-				sendErrorResponse(w, "Invalid quantity value. Must be 1, 0.5, or 0.25", http.StatusBadRequest)
-				return
-			}
-		} else {
-			// Default to full position if not specified
-			req.QuantityFrac = FullPosition
-		}
+	return &orderReq, nil
+}
 
-		// If this is a move operation, we need to handle it differently
-		moveOp := GetMoveOperationInstance()
-		moveOp.HandleMoveOperation(w, r, &req)
+func (s *APIServer) handlePlaceOrder(w http.ResponseWriter, request *http.Request) {
+	orderReq, err := s.mapToPlaceOrderRequest(request)
+	if err != nil {
+		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -178,7 +128,7 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	indexMeta, err := cacheMeta.GetMetadataOfToken(r.Context(), req.InstrumentToken)
+	indexMeta, err := cacheMeta.GetMetadataOfToken(request.Context(), utils.Uint32ToString(orderReq.InstrumentToken))
 	if err != nil {
 		s.log.Error("Failed to get index meta", map[string]interface{}{
 			"error": err.Error(),
@@ -186,48 +136,101 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, "Failed to get index meta", http.StatusInternalServerError)
 		return
 	}
-	req.TradingSymbol = indexMeta.TradingSymbol
-	req.Exchange = indexMeta.Exchange
+	orderReq.TradingSymbol = indexMeta.TradingSymbol
+	orderReq.Exchange = indexMeta.Exchange
 
-	orderReq := zerodha.PlaceOrderRequest{
-		TradingSymbol: req.TradingSymbol,
-		Exchange:      req.Exchange,
-		OrderType:     zerodha.OrderType(req.OrderType),
-		Side:          zerodha.OrderSide(req.Side),
-		Quantity:      req.Quantity,
-		Price:         req.Price,
-		TriggerPrice:  req.TriggerPrice,
-		Product:       zerodha.ProductType(req.Product),
-		Validity:      req.Validity,
-		DisclosedQty:  req.DisclosedQty,
-		Tag:           req.Tag,
+	// Convert to zerodha.PlaceOrderRequest
+	var orderType zerodha.OrderType
+	switch orderReq.OrderType {
+	case "MARKET":
+		orderType = zerodha.OrderTypeMarket
+	case "LIMIT":
+		orderType = zerodha.OrderTypeLimit
+	case "SL":
+		orderType = zerodha.OrderTypeSL
+	case "SL-M":
+		orderType = zerodha.OrderTypeSLM
+	default:
+		http.Error(w, "invalid order type", http.StatusBadRequest)
+		return
+	}
+
+	var productType zerodha.ProductType
+	switch orderReq.Product {
+	case "NRML":
+		productType = zerodha.ProductTypeNRML
+	case "MIS":
+		productType = zerodha.ProductTypeMIS
+	case "CNC":
+		productType = zerodha.ProductTypeCNC
+	default:
+		http.Error(w, "invalid product type", http.StatusBadRequest)
+		return
+	}
+
+	var side zerodha.OrderSide
+	if orderReq.Side == "BUY" {
+		side = zerodha.OrderSideBuy
+	} else if orderReq.Side == "SELL" {
+		side = zerodha.OrderSideSell
+	} else {
+		http.Error(w, "invalid transaction type", http.StatusBadRequest)
+		return
+	}
+
+	// Create the order request
+	zOrderReq := zerodha.PlaceOrderRequest{
+		TradingSymbol: orderReq.TradingSymbol,
+		Exchange:      orderReq.Exchange,
+		OrderType:     orderType,
+		Side:          side,
+		Quantity:      orderReq.Quantity,
+		Price:         orderReq.Price,
+		TriggerPrice:  orderReq.TriggerPrice,
+		Product:       productType,
+		Validity:      orderReq.Validity,
+		DisclosedQty:  orderReq.DisclosedQty,
+		Tag:           orderReq.Tag,
+	}
+
+	// Only set price for LIMIT orders
+	if orderReq.OrderType == "LIMIT" {
+		zOrderReq.Price = orderReq.Price
+	}
+
+	// Set trigger price for SL/STOP_LOSS orders
+	if orderReq.OrderType == "SL" || orderReq.OrderType == "STOP_LOSS" {
+		zOrderReq.TriggerPrice = orderReq.TriggerPrice
 	}
 
 	var resp *zerodha.OrderResponse
 	var kiteResp interface{}
 
 	// Check if this is a paper trading order
-	if req.PaperTrading {
+	if orderReq.PaperTrading {
 		// Generate a simulated response for paper trading
 		s.log.Info("Processing paper trading order", map[string]interface{}{
-			"symbol": req.TradingSymbol,
-			"side":   req.Side,
-			"qty":    req.Quantity,
+			"symbol": orderReq.TradingSymbol,
+			"side":   side,
+			"qty":    orderReq.Quantity,
 		})
 
-		// Try to get the latest price for the instrument from Redis
-		ltpData, err := cacheMeta.GetLTPforInstrumentToken(r.Context(), req.InstrumentToken)
+		var executionPrice float64
+
+		// Try to get the latest price for the instrument from Redis if available
+		ltpData, err := cacheMeta.GetLTPforInstrumentToken(request.Context(), utils.Uint32ToString(orderReq.InstrumentToken))
 		if err != nil {
-			s.log.Error("Failed to get LTP for instrument token", map[string]interface{}{
-				"token": req.InstrumentToken,
+			s.log.Debug("Failed to get LTP for instrument token, using order price", map[string]interface{}{
+				"token": orderReq.InstrumentToken,
 				"error": err.Error(),
 			})
-
+			executionPrice = orderReq.Price
+		} else {
+			executionPrice = ltpData.LTP
 		}
-		var executionPrice float64 = ltpData.LTP
 
 		// Generate a unique order ID for paper trading
-		paperOrderID := fmt.Sprintf("paper-%s-%d", strings.ToLower(req.TradingSymbol), time.Now().UnixNano())
+		paperOrderID := fmt.Sprintf("paper-%s-%d", strings.ToLower(orderReq.TradingSymbol), time.Now().UnixNano())
 
 		// Create a simulated response
 		resp = &zerodha.OrderResponse{
@@ -236,183 +239,54 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 			Message: "Paper trading order simulated successfully",
 		}
 
-		// For paper trades, KiteResponse should be nil as there's no actual Zerodha interaction
-		kiteResp = nil
+		// Create a simulated kite response
+		kiteResp = map[string]interface{}{
+			"order_id":           paperOrderID,
+			"status":             "PAPER",
+			"tradingsymbol":      orderReq.TradingSymbol,
+			"exchange":           orderReq.Exchange,
+			"transaction_type":   orderReq.Side,
+			"order_type":         orderReq.OrderType,
+			"product":            orderReq.Product,
+			"average_price":      executionPrice,
+			"price":              orderReq.Price,
+			"trigger_price":      orderReq.TriggerPrice,
+			"quantity":           orderReq.Quantity,
+			"disclosed_quantity": orderReq.DisclosedQty,
+			"validity":           orderReq.Validity,
+			"tag":                orderReq.Tag,
+		}
 		// Store the execution price in the request for tracking purposes
-		orderReq.Price = executionPrice
-	} else {
-		// Place the actual order with Zerodha using the token from KiteConnect
-		s.log.Info("Placing order", map[string]interface{}{
-			"order": orderReq,
+		zOrderReq.Price = executionPrice
+
+		// Persist the order to the database (both real and paper) - using "system" as userID
+		zerodha.SaveOrderAsync(orderReq, resp, "system", kiteResp)
+
+		// Return the response to the client
+		sendJSONResponse(w, map[string]interface{}{
+			"order_id":      resp.OrderID,
+			"status":        resp.Status,
+			"message":       resp.Message,
+			"paper_trading": orderReq.PaperTrading,
 		})
-		resp, err := zerodha.PlaceOrder(orderReq)
+	} else {
+		// Place the actual order with Zerodha
+		s.log.Info("Placing order", map[string]interface{}{
+			"order": zOrderReq,
+		})
+		resp, err := zerodha.PlaceOrder(zOrderReq)
 		if err != nil {
 			s.log.Error("Order placement failed", map[string]interface{}{"error": err.Error()})
-			sendErrorResponse(w, err.Error(), http.StatusBadGateway)
+			sendErrorResponse(w, "Order placement failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		// Store the Kite response for persistence
-		kiteResp = resp
+		// Persist the order to the database (both real and paper) - using "system" as userID
+		zerodha.SaveOrderAsync(orderReq, resp, "system", resp)
+
+		// Return the response to the client
+		sendJSONResponse(w, resp)
 	}
-
-	// Persist the order to the database (both real and paper) - using "system" as userID
-	zerodha.SaveOrderAsync(orderReq, resp, "system", kiteResp)
-
-	// Return the response to the client
-	sendJSONResponse(w, map[string]interface{}{
-		"order_id":      resp.OrderID,
-		"status":        resp.Status,
-		"message":       resp.Message,
-		"paper_trading": req.PaperTrading,
-	})
-}
-
-func (s *Server) handlePlaceGTTOrder(w http.ResponseWriter, r *http.Request) {
-	var req PlaceGTTAPIRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendErrorResponse(w, "Invalid request payload", http.StatusBadRequest)
-		return
-	}
-
-	// Default to regular trading mode
-	paperTrading := false
-
-	// If instrument token is provided, fetch trading symbol and exchange
-	if req.InstrumentToken != "" && (req.TradingSymbol == "" || req.Exchange == "") {
-		// Get the initialized KiteConnect instance
-		kc := zerodha.GetKiteConnect()
-
-		// Lookup the instrument details
-		tradingSymbol, exchange, err := kc.GetInstrumentDetailsByToken(r.Context(), req.InstrumentToken)
-		if err != nil {
-			s.log.Error("Failed to get instrument details for GTT order", map[string]interface{}{
-				"error": err.Error(),
-				"token": req.InstrumentToken,
-			})
-			sendErrorResponse(w, fmt.Sprintf("Failed to get instrument details: %v", err), http.StatusBadRequest)
-			return
-		}
-
-		// Set the trading symbol and exchange
-		req.TradingSymbol = tradingSymbol
-		req.Exchange = exchange
-
-		s.log.Info("Resolved instrument token for GTT order", map[string]interface{}{
-			"token":          req.InstrumentToken,
-			"trading_symbol": tradingSymbol,
-			"exchange":       exchange,
-		})
-	}
-
-	// Validate that we have the required fields
-	if req.TradingSymbol == "" || req.Exchange == "" {
-		sendErrorResponse(w, "Trading symbol and exchange are required", http.StatusBadRequest)
-		return
-	}
-
-	gttReq := zerodha.GTTOrderRequest{
-		TriggerType:   req.TriggerType,
-		TradingSymbol: req.TradingSymbol,
-		Exchange:      req.Exchange,
-		TriggerValues: req.TriggerValues,
-		LastPrice:     req.LastPrice,
-		Orders:        req.Orders,
-	}
-
-	var resp *zerodha.OrderResponse
-	var err error
-
-	if paperTrading {
-		// Generate a simulated response for paper trading GTT order
-		s.log.Info("Processing paper trading GTT order", map[string]interface{}{
-			"symbol":         req.TradingSymbol,
-			"trigger_type":   req.TriggerType,
-			"trigger_values": req.TriggerValues,
-		})
-
-		// Try to get the latest price for the instrument from Redis
-		var currentPrice float64 = req.LastPrice // Default to the requested last price
-
-		if req.InstrumentToken != "" {
-			// Get Redis cache for LTP data
-			redisCache, err := cache.GetRedisCache()
-			if err == nil {
-				ltpDB := redisCache.GetLTPDB3()
-				if ltpDB != nil {
-					// Create a context with timeout for Redis operations
-					ctx, cancel := context.WithTimeout(r.Context(), 500*time.Millisecond)
-					defer cancel()
-
-					// Format the key as expected in Redis
-					ltpKey := fmt.Sprintf("%s_ltp", req.InstrumentToken)
-
-					// Try to get the LTP from Redis
-					ltpStr, err := ltpDB.Get(ctx, ltpKey).Result()
-					if err == nil {
-						ltp, err := strconv.ParseFloat(ltpStr, 64)
-						if err == nil && ltp > 0 {
-							currentPrice = ltp
-							s.log.Info("Using Redis LTP for paper trading GTT", map[string]interface{}{
-								"instrument_token": req.InstrumentToken,
-								"ltp":              ltp,
-							})
-						}
-					}
-				}
-			}
-		}
-
-		// Generate a unique order ID for paper trading GTT
-		paperOrderID := fmt.Sprintf("paper-gtt-%s-%d", strings.ToLower(req.TradingSymbol), time.Now().UnixNano())
-
-		// Create a simulated response
-		resp = &zerodha.OrderResponse{
-			OrderID: paperOrderID,
-			Status:  "PAPER",
-			Message: "Paper trading GTT order simulated successfully",
-		}
-
-		// Update the last price in the request with the current market price
-		gttReq.LastPrice = currentPrice
-	} else {
-		// Place the actual GTT order with Zerodha
-		resp, err = zerodha.PlaceGTTOrder(gttReq)
-		if err != nil {
-			s.log.Error("GTT order placement failed", map[string]interface{}{"error": err.Error()})
-			sendErrorResponse(w, err.Error(), http.StatusBadGateway)
-			return
-		}
-	}
-
-	// Create a variable to hold the Kite response
-	var kiteResp interface{}
-
-	// For paper trades, kiteResp should be nil as there's no actual Zerodha interaction
-	if paperTrading {
-		kiteResp = nil
-	} else {
-		// For real trades, use the response from Zerodha
-		kiteResp = resp
-	}
-
-	// Persist the GTT order to the database (both real and paper) with system user ID
-	zerodha.SaveOrderAsync(gttReq, resp, "system", kiteResp)
-
-	sendJSONResponse(w, map[string]interface{}{
-		"order_id":      resp.OrderID,
-		"status":        resp.Status,
-		"message":       resp.Message,
-		"paper_trading": paperTrading,
-	})
-}
-
-// Response is a standard API response structure
-type Response struct {
-	Success bool        `json:"success"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
 }
 
 // PnLParams represents P&L parameters
@@ -455,48 +329,18 @@ var LotSizes = map[string]int{
 }
 
 var (
-	instance *Server
+	instance *APIServer
 	once     sync.Once
 	mu       sync.RWMutex
 )
 
-// GetAPIServer returns the singleton instance of the API server
-func GetAPIServer() *Server {
-	mu.RLock()
-	if instance != nil {
-		mu.RUnlock()
-		return instance
-	}
-	mu.RUnlock()
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	once.Do(func() {
-		ctx, cancel := context.WithCancel(context.Background())
-		instance = &Server{
-			router:       mux.NewRouter(),
-			port:         "8080", // Default port, can be changed
-			ctx:          ctx,
-			cancel:       cancel,
-			log:          logger.L(),
-			tickStore:    filestore.GetTickStore(),
-			parquetStore: filestore.GetParquetStore(),
-		}
-		// Initialize routes
-		instance.setupRoutes()
-	})
-
-	return instance
-}
-
 // SetPort allows changing the default port
-func (s *Server) SetPort(port string) {
+func (s *APIServer) SetPort(port string) {
 	s.port = port
 }
 
 // Start starts the HTTP server
-func (s *Server) Start(ctx context.Context) error {
+func (s *APIServer) Start(ctx context.Context) error {
 	// Setup all routes
 	s.setupRoutes()
 
@@ -537,7 +381,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 // Shutdown gracefully shuts down the server
-func (s *Server) Shutdown() error {
+func (s *APIServer) Shutdown() error {
 	s.log.Info("Shutting down API server", nil)
 
 	// Create a timeout context for shutdown
@@ -621,7 +465,7 @@ type TimeSeriesMetricsResponse struct {
 }
 
 // CORSMiddleware adds CORS headers to responses
-func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
+func (s *APIServer) CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Log the incoming request for debugging
 		s.log.Debug("CORS Middleware", map[string]interface{}{
@@ -654,99 +498,8 @@ func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// setupRoutes initializes all API routes
-func (s *Server) setupRoutes() {
-	// Remove the global CORS middleware since we're applying it at the server level
-	s.router.Use(func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Log all incoming requests for debugging
-			s.log.Debug("Request received", map[string]interface{}{
-				"method": r.Method,
-				"path":   r.URL.Path,
-			})
-			next.ServeHTTP(w, r)
-		})
-	})
-
-	// --- Order APIs ---
-	// v1 API routes (with version in path)
-	v1 := s.router.PathPrefix("/api/v1").Subrouter()
-	v1.HandleFunc("/orders/place", s.handlePlaceOrder).Methods("POST", "OPTIONS")
-	v1.HandleFunc("/orders/gtt", s.handlePlaceGTTOrder).Methods("POST", "OPTIONS")
-
-	// Direct API routes (without version in path, for React app compatibility)
-	directAPI := s.router.PathPrefix("/api").Subrouter()
-	directAPI.HandleFunc("/orders/place", s.handlePlaceOrder).Methods("POST", "OPTIONS")
-	directAPI.HandleFunc("/orders/gtt", s.handlePlaceGTTOrder).Methods("POST", "OPTIONS")
-
-	// Auth routes (no authentication required)
-	s.router.HandleFunc("/api/auth/login", s.handleLogin).Methods("POST", "OPTIONS")
-	s.router.HandleFunc("/api/auth/logout", s.handleLogout).Methods("POST", "OPTIONS")
-	s.router.HandleFunc("/api/auth/check", s.handleAuthCheck).Methods("GET", "OPTIONS") // Debug endpoint
-
-	// Create authenticated router
-	authenticatedRouter := s.router.PathPrefix("/api").Subrouter()
-	// Apply Auth middleware to the authenticated router
-	// (CORS is already applied at the router level)
-	authenticatedRouter.Use(s.AuthMiddleware)
-
-	// Health check endpoint
-	authenticatedRouter.HandleFunc("/health", s.handleHealthCheck).Methods("GET", "OPTIONS")
-
-	// Expiries endpoint
-	authenticatedRouter.HandleFunc("/expiries", s.handleGetExpiries).Methods("GET", "OPTIONS")
-
-	// Option chain endpoint
-	authenticatedRouter.HandleFunc("/option-chain", s.handleGetOptionChain).Methods("GET", "OPTIONS")
-
-	// Position routes
-	positionRouter := authenticatedRouter.PathPrefix("/positions").Subrouter()
-	positionRouter.HandleFunc("", s.handleGetPositions).Methods("GET", "OPTIONS")
-	positionRouter.HandleFunc("/exit", s.handleExitAllPositions).Methods("POST", "OPTIONS")
-
-	// P&L endpoints
-	authenticatedRouter.HandleFunc("/pnl", s.handleGetPnL).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/pnl/params", s.handleGetPnLParams).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/pnl/params", s.handleUpdatePnLParams).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/pnl/summary", HandleGetLatestPnLSummary).Methods("GET", "OPTIONS")
-
-	// Time series metrics endpoint
-	authenticatedRouter.HandleFunc("/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")
-
-	// API version 1 routes
-	v1 = authenticatedRouter.PathPrefix("/v1").Subrouter()
-
-	// Market data endpoints
-	market := v1.PathPrefix("/market").Subrouter()
-	market.HandleFunc("/indices", s.handleListIndices).Methods("GET", "OPTIONS")
-	market.HandleFunc("/instruments", s.handleListInstruments).Methods("GET", "OPTIONS")
-	market.HandleFunc("/status", s.handleGetMarketStatus).Methods("GET", "OPTIONS")
-
-	// Data export endpoints
-	export := v1.PathPrefix("/export").Subrouter()
-	export.HandleFunc("/wal-to-parquet", s.handleWalToParquet).Methods("POST", "OPTIONS")
-
-	// Tick data export endpoints
-	authenticatedRouter.HandleFunc("/ticks/dates", handleGetAvailableTickDates).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/export", handleExportTickData).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/delete", handleDeleteTickData).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/files", handleListExportedFiles).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/samples", handleGetTickSamples).Methods("POST", "OPTIONS")
-
-	// Archive management endpoints
-	authenticatedRouter.HandleFunc("/archive/jobs", handleGetArchiveJobs).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/retry", handleRetryArchiveJob).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/run", handleRunArchiveJob).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/consolidate", handleRunConsolidationJob).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/files", handleListArchiveFiles).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/tick-data/dashboard", handleGetTickDataDashboard).Methods("GET", "OPTIONS")
-
-	// General endpoint
-	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET", "OPTIONS")
-}
-
 // Health check handler
-func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	resp := Response{
 		Success: true,
 		Message: "API server is running",
@@ -761,7 +514,7 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) handleListIndices(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleListIndices(w http.ResponseWriter, r *http.Request) {
 	// Implementation to be added
 	// This would list available indices from your application
 	resp := Response{
@@ -775,7 +528,7 @@ func (s *Server) handleListIndices(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) handleListInstruments(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleListInstruments(w http.ResponseWriter, r *http.Request) {
 	// Implementation to be added
 	// This would list available instruments from your application
 	resp := Response{
@@ -789,7 +542,7 @@ func (s *Server) handleListInstruments(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) handleGetMarketStatus(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetMarketStatus(w http.ResponseWriter, r *http.Request) {
 	// Implementation to be added
 	// This would return the current market status
 	resp := Response{
@@ -818,7 +571,7 @@ func sendJSONResponse(w http.ResponseWriter, data interface{}) {
 }
 
 // Add after imports
-func (s *Server) readRawParquetSamples(filePath string, numSamples int) error {
+func (s *APIServer) readRawParquetSamples(filePath string, numSamples int) error {
 	s.log.Info("Reading parquet file samples", map[string]interface{}{
 		"file":        filePath,
 		"num_samples": numSamples,
@@ -847,7 +600,7 @@ func (s *Server) readRawParquetSamples(filePath string, numSamples int) error {
 }
 
 // Update handleWalToParquet to use the method
-func (s *Server) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
 	// Parse request
 	var req WalToParquetRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -933,7 +686,7 @@ func (s *Server) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetExpiries returns the expiry dates for all indices from Redis cache
-func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
 	// Get the Redis cache instance
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
@@ -996,7 +749,7 @@ func (s *Server) handleGetExpiries(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetOptionChain returns the option chain for a specific index and expiry
-func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	// Get query parameters
 	index := r.URL.Query().Get("index")
 	expiry := r.URL.Query().Get("expiry")
@@ -1061,7 +814,7 @@ type ExitAllPositionsRequest struct {
 // handleGetPositions returns detailed analysis of positions
 // Query parameters:
 // - filter: "all" (default), "paper", or "real"
-func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	pm := zerodha.GetPositionManager()
 	if pm == nil {
 		sendErrorResponse(w, "Position manager not initialized", http.StatusInternalServerError)
@@ -1104,7 +857,7 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleExitAllPositions exits all positions of the specified type (paper/real)
-func (s *Server) handleExitAllPositions(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleExitAllPositions(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("Handling exit all positions request")
 
 	// Set CORS headers for all responses
@@ -1191,7 +944,7 @@ func (s *Server) handleExitAllPositions(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleGetPnLParams returns the current P&L parameters
-func (s *Server) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
 	// Get PnL manager
 	pnlManager := zerodha.GetPnLManager()
 
@@ -1220,7 +973,7 @@ func (s *Server) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleUpdatePnLParams updates the P&L parameters
-func (s *Server) handleUpdatePnLParams(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleUpdatePnLParams(w http.ResponseWriter, r *http.Request) {
 	// Parse request body
 	var req UpdatePnLParamsRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1266,7 +1019,7 @@ func (s *Server) handleUpdatePnLParams(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleGetPnL(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetPnL(w http.ResponseWriter, r *http.Request) {
 	pnlManager := zerodha.GetPnLManager()
 	if pnlManager == nil {
 		sendErrorResponse(w, "PnL manager not initialized", http.StatusInternalServerError)
@@ -1377,7 +1130,7 @@ func convertRedisZMemberToFloat64(member interface{}) float64 {
 }
 
 // handleGetTimeSeriesMetrics handles requests for time series metrics
-func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Request) {
 	// Parse query parameters into request struct
 	req := TimeSeriesMetricsRequest{
 		Index:              r.URL.Query().Get("index"),
@@ -1543,7 +1296,7 @@ func (s *Server) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Reque
 }
 
 // handleGeneral handles the /general endpoint that returns general market information
-func (s *Server) handleGeneral(w http.ResponseWriter, r *http.Request) {
+func (s *APIServer) handleGeneral(w http.ResponseWriter, r *http.Request) {
 	// Get all indices to include their metadata
 	allIndices := core.GetIndices()
 

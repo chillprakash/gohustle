@@ -15,6 +15,46 @@ import (
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
+// PlaceOrderAPIRequest is the API payload for placing a regular order
+// (mirrors zerodha.PlaceOrderRequest, but with camelCase for JSON)
+// MoveType represents the type of option position movement
+type MoveType string
+
+const (
+	MoveAway   MoveType = "move_away"
+	MoveCloser MoveType = "move_closer"
+	Exit       MoveType = "exit"
+)
+
+// QuantityFraction represents the fraction of the position to process
+type QuantityFraction string
+
+const (
+	FullPosition    QuantityFraction = "1"
+	HalfPosition    QuantityFraction = "0.5"
+	QuarterPosition QuantityFraction = "0.25"
+)
+
+// PlaceOrderRequest represents the parameters for placing an order
+type PlaceOrderRequest struct {
+	InstrumentToken uint32           `json:"instrument_token"`
+	TradingSymbol   string           `json:"trading_symbol"`
+	Exchange        string           `json:"exchange"`
+	OrderType       OrderType        `json:"order_type"`
+	Side            OrderSide        `json:"side"`
+	Quantity        int              `json:"quantity"`
+	Price           float64          `json:"price,omitempty"`
+	TriggerPrice    float64          `json:"trigger_price,omitempty"`
+	Product         ProductType      `json:"product"`
+	Validity        string           `json:"validity,omitempty"`
+	DisclosedQty    int              `json:"disclosed_qty,omitempty"`
+	Tag             string           `json:"tag,omitempty"`
+	PaperTrading    bool             `json:"paperTrading,omitempty"`
+	MoveType        MoveType         `json:"-"` // move_away, move_closer, or exit
+	Steps           int              `json:"-"` // Number of strike steps to move (1 or 2)
+	QuantityFrac    QuantityFraction `json:"-"` // Fraction of position to process (1, 0.5, 0.25)
+}
+
 // OrderManager handles order status polling and updates
 type OrderManager struct {
 	log  *logger.Logger
@@ -326,21 +366,6 @@ const (
 	ProductTypeMIS  ProductType = "MIS"
 	ProductTypeCNC  ProductType = "CNC"
 )
-
-// PlaceOrderRequest represents the parameters for placing an order
-type PlaceOrderRequest struct {
-	TradingSymbol string      `json:"trading_symbol"`
-	Exchange      string      `json:"exchange"`
-	OrderType     OrderType   `json:"order_type"`
-	Side          OrderSide   `json:"side"`
-	Quantity      int         `json:"quantity"`
-	Price         float64     `json:"price,omitempty"`
-	TriggerPrice  float64     `json:"trigger_price,omitempty"`
-	Product       ProductType `json:"product"`
-	Validity      string      `json:"validity,omitempty"`
-	DisclosedQty  int         `json:"disclosed_qty,omitempty"`
-	Tag           string      `json:"tag,omitempty"`
-}
 
 // OrderResponse represents a simplified response for order placement
 // (expand as needed for your UI)

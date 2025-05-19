@@ -49,7 +49,7 @@ type StrikeInfo struct {
 }
 
 // HandleMoveOperation processes move_away, move_closer, and exit operations for options
-func (m *MoveOperation) HandleMoveOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) {
+func (m *MoveOperation) HandleMoveOperation(w http.ResponseWriter, r *http.Request, req *zerodha.PlaceOrderRequest) {
 	// Get the KiteConnect instance
 	kc := zerodha.GetKiteConnect()
 	if kc == nil {
@@ -73,7 +73,7 @@ func (m *MoveOperation) HandleMoveOperation(w http.ResponseWriter, r *http.Reque
 	}
 
 	// 1. Extract strike, expiry, and instrument type from the trading symbol or token
-	tokenMetaData, err := cacheMetaInstance.GetMetadataOfToken(r.Context(), req.InstrumentToken)
+	tokenMetaData, err := cacheMetaInstance.GetMetadataOfToken(r.Context(), utils.Uint32ToString(req.InstrumentToken))
 	if err != nil {
 		m.log.Error("Failed to extract strike info", map[string]interface{}{
 			"error":            err.Error(),
@@ -245,7 +245,7 @@ func (m *MoveOperation) HandleMoveOperation(w http.ResponseWriter, r *http.Reque
 }
 
 // extractStrikeInfo extracts the strike price, instrument type, and expiry from the trading symbol or token
-func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeInfo, error) {
+func extractStrikeInfo(ctx context.Context, req *zerodha.PlaceOrderRequest) (*StrikeInfo, error) {
 	log := logger.L()
 	log.Info("Starting extractStrikeInfo", map[string]interface{}{
 		"instrument_token": req.InstrumentToken,
@@ -261,7 +261,7 @@ func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeI
 	}
 
 	// We need an instrument token to fetch the information
-	if req.InstrumentToken == "" {
+	if req.InstrumentToken == 0 {
 		// If we only have a trading symbol, try to get the instrument token
 		if req.TradingSymbol != "" {
 			log.Info("Getting instrument token from trading symbol", map[string]interface{}{
@@ -274,14 +274,14 @@ func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeI
 				})
 				return nil, fmt.Errorf("failed to get instrument token for trading symbol: %s", req.TradingSymbol)
 			}
-			req.InstrumentToken = token.(string)
+			req.InstrumentToken = token.(uint32)
 		} else {
 			log.Error("Neither instrument token nor trading symbol provided", nil)
 			return nil, fmt.Errorf("neither instrument token nor trading symbol provided")
 		}
 	}
 
-	instrumentMetadata, err := cacheMetaInstance.GetMetadataOfToken(ctx, req.InstrumentToken)
+	instrumentMetadata, err := cacheMetaInstance.GetMetadataOfToken(ctx, utils.Uint32ToString(req.InstrumentToken))
 	if err != nil {
 		log.Error("Failed to get instrument metadata for token", map[string]interface{}{
 			"instrument_token": req.InstrumentToken,
@@ -348,7 +348,7 @@ func findCurrentPosition(ctx context.Context, tradingSymbol string, paperTrading
 
 // calculateQuantityToProcess calculates the quantity to move/exit based on fraction and ensures it's a multiple of lot size.
 // It returns the quantity with the correct sign (negative for SELL, positive for BUY).
-func calculateQuantityToProcess(currentQuantity int, fraction QuantityFraction, instrumentType string, indexName string) (int, error) {
+func calculateQuantityToProcess(currentQuantity int, fraction zerodha.QuantityFraction, instrumentType string, indexName string) (int, error) {
 	log := logger.L()
 
 	if currentQuantity == 0 {
@@ -549,7 +549,7 @@ func getLotSize(indexName string) int {
 }
 
 // handleExitOperation handles the exit operation for a position
-func (m *MoveOperation) handleExitOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest) {
+func (m *MoveOperation) handleExitOperation(w http.ResponseWriter, r *http.Request, req *zerodha.PlaceOrderRequest) {
 	// Get the KiteConnect instance
 	kc := zerodha.GetKiteConnect()
 	if kc == nil {
@@ -566,7 +566,7 @@ func (m *MoveOperation) handleExitOperation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	tokenMetaData, _ := cacheMetaInstance.GetMetadataOfToken(r.Context(), req.InstrumentToken)
+	tokenMetaData, _ := cacheMetaInstance.GetMetadataOfToken(r.Context(), utils.Uint32ToString(req.InstrumentToken))
 
 	// 2. Find the current position for the instrument
 	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol, req.PaperTrading)
@@ -697,14 +697,14 @@ func (m *MoveOperation) handleExitOperation(w http.ResponseWriter, r *http.Reque
 	})
 
 	// 7. Prepare the order details
-	exitOrderReq := &PlaceOrderAPIRequest{
-		InstrumentToken: instrumentTokenStr,
+	exitOrderReq := &zerodha.PlaceOrderRequest{
+		InstrumentToken: utils.StringToUint32(instrumentTokenStr),
 		TradingSymbol:   currentPosition.TradingSymbol,
 		Exchange:        currentPosition.Exchange,
 		OrderType:       "MARKET",
-		Side:            transactionType,
+		Side:            zerodha.OrderSide(transactionType),
 		Quantity:        positiveExitQuantity, // Always positive
-		Product:         currentPosition.Product,
+		Product:         zerodha.ProductType(currentPosition.Product),
 		Validity:        "DAY",
 		Tag:             "exit_position",
 		PaperTrading:    currentPosition.PaperTrading,
@@ -742,7 +742,7 @@ func (m *MoveOperation) handleExitOperation(w http.ResponseWriter, r *http.Reque
 }
 
 // processMoveOperation handles the move_away and move_closer operations
-func (m *MoveOperation) processMoveOperation(w http.ResponseWriter, r *http.Request, req *PlaceOrderAPIRequest,
+func (m *MoveOperation) processMoveOperation(w http.ResponseWriter, r *http.Request, req *zerodha.PlaceOrderRequest,
 	currentPosition *db.PositionRecord, toProcessQuantity int, tokenMetaData cache.InstrumentData) error {
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
@@ -770,14 +770,14 @@ func (m *MoveOperation) processMoveOperation(w http.ResponseWriter, r *http.Requ
 		exitSide = "SELL"
 	}
 
-	exitOrderReq := &PlaceOrderAPIRequest{
+	exitOrderReq := &zerodha.PlaceOrderRequest{
 		InstrumentToken: req.InstrumentToken,
 		TradingSymbol:   currentPosition.TradingSymbol,
 		Exchange:        currentPosition.Exchange,
 		OrderType:       "MARKET",
-		Side:            exitSide,
+		Side:            zerodha.OrderSide(exitSide),
 		Quantity:        int(math.Abs(float64(toProcessQuantity))),
-		Product:         currentPosition.Product,
+		Product:         zerodha.ProductType(currentPosition.Product),
 		Validity:        "DAY",
 		Tag:             fmt.Sprintf("move_%s_exit", req.MoveType),
 		PaperTrading:    currentPosition.PaperTrading,
@@ -796,14 +796,14 @@ func (m *MoveOperation) processMoveOperation(w http.ResponseWriter, r *http.Requ
 		entrySide = "SELL"
 	}
 
-	entryOrderReq := &PlaceOrderAPIRequest{
-		InstrumentToken: newInstrumentToken,
+	entryOrderReq := &zerodha.PlaceOrderRequest{
+		InstrumentToken: utils.StringToUint32(newInstrumentToken),
 		TradingSymbol:   newTradingSymbol,
 		Exchange:        newExchange,
 		OrderType:       "MARKET",
-		Side:            entrySide,
+		Side:            zerodha.OrderSide(entrySide),
 		Quantity:        int(math.Abs(float64(toProcessQuantity))),
-		Product:         currentPosition.Product,
+		Product:         zerodha.ProductType(currentPosition.Product),
 		Validity:        "DAY",
 		Tag:             fmt.Sprintf("move_%s_entry", req.MoveType),
 		PaperTrading:    currentPosition.PaperTrading,
@@ -814,7 +814,7 @@ func (m *MoveOperation) processMoveOperation(w http.ResponseWriter, r *http.Requ
 }
 
 // calculateNewStrike calculates the new strike price based on the move type and steps
-func (m *MoveOperation) calculateNewStrike(currentStrike float64, instrumentType string, moveType MoveType, steps int, indexName string) float64 {
+func (m *MoveOperation) calculateNewStrike(currentStrike float64, instrumentType string, moveType zerodha.MoveType, steps int, indexName string) float64 {
 	// Determine the step size based on the index
 	stepSize := 50.0 // Default for NIFTY
 	if strings.Contains(indexName, "SENSEX") {
@@ -828,13 +828,13 @@ func (m *MoveOperation) calculateNewStrike(currentStrike float64, instrumentType
 
 	// Apply the change based on the move type and option type
 	if instrumentType == "CE" {
-		if moveType == MoveAway {
+		if moveType == zerodha.MoveAway {
 			newStrike = currentStrike + strikeChange
 		} else { // MoveCloser
 			newStrike = currentStrike - strikeChange
 		}
 	} else { // PE
-		if moveType == MoveAway {
+		if moveType == zerodha.MoveAway {
 			newStrike = currentStrike - strikeChange
 		} else { // MoveCloser
 			newStrike = currentStrike + strikeChange
@@ -853,7 +853,7 @@ func (m *MoveOperation) calculateNewStrike(currentStrike float64, instrumentType
 }
 
 // placeOrderInternal places an order using the internal order placement logic
-func (m *MoveOperation) placeOrderInternal(ctx context.Context, req *PlaceOrderAPIRequest) error {
+func (m *MoveOperation) placeOrderInternal(ctx context.Context, req *zerodha.PlaceOrderRequest) error {
 	// Convert the API request to a Zerodha order request
 	orderReq := zerodha.PlaceOrderRequest{
 		TradingSymbol: req.TradingSymbol,
@@ -884,7 +884,7 @@ func (m *MoveOperation) placeOrderInternal(ctx context.Context, req *PlaceOrderA
 		// Try to get the latest price for the instrument from Redis
 		var executionPrice float64 = req.Price // Default to the requested price
 
-		if req.InstrumentToken != "" {
+		if req.InstrumentToken != 0 {
 			// Get Redis cache for LTP data
 			redisCache, err := cache.GetRedisCache()
 			if err != nil {

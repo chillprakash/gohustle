@@ -33,50 +33,50 @@ func (s *APIServer) setupRoutes() {
 	// Health check endpoint
 	authenticatedRouter.HandleFunc("/health", s.handleHealthCheck).Methods("GET")
 
-	authenticatedRouter.HandleFunc("/orders/place", s.handlePlaceOrder).Methods("POST")
-
 	// Expiries endpoint
-	authenticatedRouter.HandleFunc("/expiries", s.handleGetExpiries).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/expiries", s.handleGetExpiries).Methods("GET")
 
 	// Option chain endpoint
-	authenticatedRouter.HandleFunc("/option-chain", s.handleGetOptionChain).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/option-chain", s.handleGetOptionChain).Methods("GET")
+
+	authenticatedRouter.HandleFunc("/orders", s.handlePlaceOrder).Methods("POST")
 
 	// Position routes
 	positionRouter := authenticatedRouter.PathPrefix("/positions").Subrouter()
-	positionRouter.HandleFunc("", s.handleGetPositions).Methods("GET", "OPTIONS")
-	positionRouter.HandleFunc("/exit", s.handleExitAllPositions).Methods("POST", "OPTIONS")
+	positionRouter.HandleFunc("", s.handleGetPositions).Methods("GET")
+	positionRouter.HandleFunc("/exit", s.handleExitAllPositions).Methods("POST")
 
 	// P&L endpoints
-	authenticatedRouter.HandleFunc("/pnl", s.handleGetPnL).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/pnl/params", s.handleGetPnLParams).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/pnl/params", s.handleUpdatePnLParams).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/pnl/summary", HandleGetLatestPnLSummary).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/pnl", s.handleGetPnL).Methods("GET")
+	authenticatedRouter.HandleFunc("/pnl/params", s.handleGetPnLParams).Methods("GET")
+	authenticatedRouter.HandleFunc("/pnl/params", s.handleUpdatePnLParams).Methods("POST")
+	authenticatedRouter.HandleFunc("/pnl/summary", HandleGetLatestPnLSummary).Methods("GET")
 
 	// Time series metrics endpoint
-	authenticatedRouter.HandleFunc("/metrics", s.handleGetTimeSeriesMetrics).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/metrics", s.handleGetTimeSeriesMetrics).Methods("GET")
 
-	authenticatedRouter.HandleFunc("/indices", s.handleListIndices).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/instruments", s.handleListInstruments).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/status", s.handleGetMarketStatus).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/indices", s.handleListIndices).Methods("GET")
+	authenticatedRouter.HandleFunc("/instruments", s.handleListInstruments).Methods("GET")
+	authenticatedRouter.HandleFunc("/status", s.handleGetMarketStatus).Methods("GET")
 
 	// Data export endpoints
-	authenticatedRouter.HandleFunc("/export/wal-to-parquet", s.handleWalToParquet).Methods("POST", "OPTIONS")
+	authenticatedRouter.HandleFunc("/export/wal-to-parquet", s.handleWalToParquet).Methods("POST")
 
 	// Tick data export endpoints
-	authenticatedRouter.HandleFunc("/ticks/dates", handleGetAvailableTickDates).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/export", handleExportTickData).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/delete", handleDeleteTickData).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/files", handleListExportedFiles).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/ticks/samples", handleGetTickSamples).Methods("POST", "OPTIONS")
+	authenticatedRouter.HandleFunc("/ticks/dates", handleGetAvailableTickDates).Methods("GET")
+	authenticatedRouter.HandleFunc("/ticks/export", handleExportTickData).Methods("POST")
+	authenticatedRouter.HandleFunc("/ticks/delete", handleDeleteTickData).Methods("POST")
+	authenticatedRouter.HandleFunc("/ticks/files", handleListExportedFiles).Methods("GET")
+	authenticatedRouter.HandleFunc("/ticks/samples", handleGetTickSamples).Methods("POST")
 
 	// Archive management endpoints
-	authenticatedRouter.HandleFunc("/archive/jobs", handleGetArchiveJobs).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/retry", handleRetryArchiveJob).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/run", handleRunArchiveJob).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/consolidate", handleRunConsolidationJob).Methods("POST", "OPTIONS")
-	authenticatedRouter.HandleFunc("/archive/files", handleListArchiveFiles).Methods("GET", "OPTIONS")
-	authenticatedRouter.HandleFunc("/tick-data/dashboard", handleGetTickDataDashboard).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/archive/jobs", handleGetArchiveJobs).Methods("GET")
+	authenticatedRouter.HandleFunc("/archive/retry", handleRetryArchiveJob).Methods("POST")
+	authenticatedRouter.HandleFunc("/archive/run", handleRunArchiveJob).Methods("POST")
+	authenticatedRouter.HandleFunc("/archive/consolidate", handleRunConsolidationJob).Methods("POST")
+	authenticatedRouter.HandleFunc("/archive/files", handleListArchiveFiles).Methods("GET")
+	authenticatedRouter.HandleFunc("/tick-data/dashboard", handleGetTickDataDashboard).Methods("GET")
 
 	// General endpoint
-	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET", "OPTIONS")
+	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET")
 }

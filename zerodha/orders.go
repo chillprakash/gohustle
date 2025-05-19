@@ -49,7 +49,7 @@ type PlaceOrderRequest struct {
 	Validity        string           `json:"validity,omitempty"`
 	DisclosedQty    int              `json:"disclosed_qty,omitempty"`
 	Tag             string           `json:"tag,omitempty"`
-	PaperTrading    bool             `json:"paperTrading,omitempty"`
+	PaperTrading    bool             `json:"paper_trading,omitempty"`
 	MoveType        MoveType         `json:"-"` // move_away, move_closer, or exit
 	Steps           int              `json:"-"` // Number of strike steps to move (1 or 2)
 	QuantityFrac    QuantityFraction `json:"-"` // Fraction of position to process (1, 0.5, 0.25)

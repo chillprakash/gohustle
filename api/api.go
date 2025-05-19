@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -241,6 +242,9 @@ func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 		orderReq.Price = executionPrice
 	} else {
 		// Place the actual order with Zerodha using the token from KiteConnect
+		s.log.Info("Placing order", map[string]interface{}{
+			"order": orderReq,
+		})
 		resp, err := zerodha.PlaceOrder(orderReq)
 		if err != nil {
 			s.log.Error("Order placement failed", map[string]interface{}{"error": err.Error()})
@@ -493,14 +497,13 @@ func (s *Server) SetPort(port string) {
 
 // Start starts the HTTP server
 func (s *Server) Start(ctx context.Context) error {
-	s.router.HandleFunc("/api/orders", func(w http.ResponseWriter, r *http.Request) {
-		s.CORSMiddleware(http.HandlerFunc(s.handleGetOrders)).ServeHTTP(w, r)
-	}).Methods("GET", "OPTIONS")
+	// Setup all routes
+	s.setupRoutes()
 
-	// Create HTTP server
+	// Create HTTP server with CORS middleware
 	s.server = &http.Server{
 		Addr:         ":" + s.port,
-		Handler:      s.router,
+		Handler:      s.CORSMiddleware(s.router),
 		ReadTimeout:  2400 * time.Second, // Reduced from 300s
 		WriteTimeout: 2400 * time.Second, // Reduced from 300s
 		IdleTimeout:  2400 * time.Second, // Reduced from 600s
@@ -620,35 +623,50 @@ type TimeSeriesMetricsResponse struct {
 // CORSMiddleware adds CORS headers to responses
 func (s *Server) CORSMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always set CORS headers for all responses
-		w.Header().Set("Access-Control-Allow-Origin", "*") // Allow all origins
+		// Log the incoming request for debugging
+		s.log.Debug("CORS Middleware", map[string]interface{}{
+			"method":   r.Method,
+			"path":     r.URL.Path,
+			"origin":   r.Header.Get("Origin"),
+			"endpoint": r.URL.String(),
+		})
+
+		// Allow requests from any origin
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+
+		// Allow specific HTTP methods
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Kite-Token, X-User-ID")
-		w.Header().Set("Access-Control-Max-Age", "3600")
 
-		// Add these headers to ensure CORS works properly
+		// Allow specific headers
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
+
+		// Allow credentials
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Vary", "Origin")
 
-		// Handle preflight OPTIONS requests
+		// Handle preflight requests
 		if r.Method == "OPTIONS" {
-			// Return 200 OK with no content for OPTIONS requests
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
-		// Process the actual request
+		// Call the next handler
 		next.ServeHTTP(w, r)
 	})
 }
 
 // setupRoutes initializes all API routes
 func (s *Server) setupRoutes() {
-	// Create a global CORS middleware handler
-	corsMiddleware := s.CORSMiddleware
-
-	// Apply CORS middleware to the main router FIRST, before any routes are defined
-	s.router.Use(corsMiddleware)
+	// Remove the global CORS middleware since we're applying it at the server level
+	s.router.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Log all incoming requests for debugging
+			s.log.Debug("Request received", map[string]interface{}{
+				"method": r.Method,
+				"path":   r.URL.Path,
+			})
+			next.ServeHTTP(w, r)
+		})
+	})
 
 	// --- Order APIs ---
 	// v1 API routes (with version in path)
@@ -681,8 +699,10 @@ func (s *Server) setupRoutes() {
 	// Option chain endpoint
 	authenticatedRouter.HandleFunc("/option-chain", s.handleGetOptionChain).Methods("GET", "OPTIONS")
 
-	// Positions endpoint
-	authenticatedRouter.HandleFunc("/positions", s.handleGetPositions).Methods("GET", "OPTIONS")
+	// Position routes
+	positionRouter := authenticatedRouter.PathPrefix("/positions").Subrouter()
+	positionRouter.HandleFunc("", s.handleGetPositions).Methods("GET", "OPTIONS")
+	positionRouter.HandleFunc("/exit", s.handleExitAllPositions).Methods("POST", "OPTIONS")
 
 	// P&L endpoints
 	authenticatedRouter.HandleFunc("/pnl", s.handleGetPnL).Methods("GET", "OPTIONS")
@@ -1032,6 +1052,12 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, resp)
 }
 
+// ExitAllPositionsRequest represents the request to exit all positions
+type ExitAllPositionsRequest struct {
+	// PositionType must be either "paper" or "real"
+	PositionType string `json:"positionType"`
+}
+
 // handleGetPositions returns detailed analysis of positions
 // Query parameters:
 // - filter: "all" (default), "paper", or "real"
@@ -1045,7 +1071,7 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	// Get filter from query parameter, default to "all"
 	filterParam := r.URL.Query().Get("filter")
 	filterType := zerodha.PositionFilterAll
-	
+
 	// Validate filter parameter
 	switch filterParam {
 	case "paper":
@@ -1077,7 +1103,93 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, resp)
 }
 
-// handleGetPnL returns P&L calculations for all positions
+// handleExitAllPositions exits all positions of the specified type (paper/real)
+func (s *Server) handleExitAllPositions(w http.ResponseWriter, r *http.Request) {
+	s.log.Info("Handling exit all positions request")
+
+	// Set CORS headers for all responses
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	// Handle CORS preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		sendErrorResponse(w, "Method not allowed. Use POST.", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse request body
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		sendErrorResponse(w, "Error reading request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Log the raw request body for debugging
+	s.log.Debug("Exit positions request body", map[string]interface{}{
+		"body": string(body),
+	})
+
+	// Validate JSON
+	if len(body) == 0 {
+		sendErrorResponse(w, "Request body cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	var req ExitAllPositionsRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		sendErrorResponse(w, "Invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.log.Info("Exiting all positions", map[string]interface{}{
+		"positionType": req.PositionType,
+	})
+
+	// Validate position type
+	var paperTrading bool
+	switch req.PositionType {
+	case "paper":
+		paperTrading = true
+	case "real":
+		paperTrading = false
+	default:
+		sendErrorResponse(w, "Invalid positionType. Must be 'paper' or 'real'.", http.StatusBadRequest)
+		return
+	}
+
+	// Get position manager
+	pm := zerodha.GetPositionManager()
+	if pm == nil {
+		sendErrorResponse(w, "Position manager not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Call ExitAllPositions
+	responses, err := pm.ExitAllPositions(r.Context(), paperTrading)
+	if err != nil {
+		sendErrorResponse(w, "Failed to exit positions: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Send success response
+	resp := Response{
+		Success: true,
+		Message: fmt.Sprintf("Successfully initiated exit for %d positions", len(responses)),
+		Data:    responses,
+	}
+
+	// Set content type and send response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+	s.log.Info("Successfully processed exit positions request")
+}
+
 // handleGetPnLParams returns the current P&L parameters
 func (s *Server) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
 	// Get PnL manager

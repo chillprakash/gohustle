@@ -57,6 +57,12 @@ func (m *MoveOperation) HandleMoveOperation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	m.log.Info("Processing move operation", map[string]interface{}{
+		"move_type":     req.MoveType,
+		"quantity":      req.Quantity,
+		"paper_trading": req.PaperTrading,
+	})
+
 	cacheMetaInstance, err := cache.GetCacheMetaInstance()
 	if err != nil {
 		m.log.Error("Failed to get cache meta instance for move", map[string]interface{}{
@@ -86,7 +92,7 @@ func (m *MoveOperation) HandleMoveOperation(w http.ResponseWriter, r *http.Reque
 	})
 
 	// 2. Find the current position for this instrument
-	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol)
+	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol, req.PaperTrading)
 	if err != nil {
 		m.log.Error("Failed to find current position", map[string]interface{}{
 			"error":          err.Error(),
@@ -319,7 +325,7 @@ func extractStrikeInfo(ctx context.Context, req *PlaceOrderAPIRequest) (*StrikeI
 // to get the instrument type, expiry, and strike price directly from the cache
 
 // findCurrentPosition finds the current position for the given instrument
-func findCurrentPosition(ctx context.Context, tradingSymbol string) (*db.PositionRecord, error) {
+func findCurrentPosition(ctx context.Context, tradingSymbol string, paperTrading bool) (*db.PositionRecord, error) {
 	timescaleDB := db.GetTimescaleDB()
 	if timescaleDB == nil {
 		return nil, fmt.Errorf("database connection not available")
@@ -327,7 +333,7 @@ func findCurrentPosition(ctx context.Context, tradingSymbol string) (*db.Positio
 
 	// First try to find by trading symbol (most efficient)
 	if tradingSymbol != "" {
-		position, err := timescaleDB.GetPositionByTradingSymbol(ctx, tradingSymbol)
+		position, err := timescaleDB.GetPositionByTradingSymbol(ctx, tradingSymbol, paperTrading)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get position by trading symbol: %w", err)
 		}
@@ -563,7 +569,7 @@ func (m *MoveOperation) handleExitOperation(w http.ResponseWriter, r *http.Reque
 	tokenMetaData, _ := cacheMetaInstance.GetMetadataOfToken(r.Context(), req.InstrumentToken)
 
 	// 2. Find the current position for the instrument
-	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol)
+	currentPosition, err := findCurrentPosition(r.Context(), tokenMetaData.TradingSymbol, req.PaperTrading)
 	if err != nil {
 		m.log.Error("Failed to find current position for exit", map[string]interface{}{
 			"error":          err.Error(),

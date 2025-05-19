@@ -1399,6 +1399,7 @@ func (c *CacheMeta) GetMetadataOfToken(ctx context.Context, token string) (Instr
 
 func convertMetadataToInstrumentData(metadata string, token string) (InstrumentData, error) {
 	// The metadata string format is "{name}:{strikePrice}:{instrumentType}:{expiry}"
+	//SENSEX:80500:PE:20-05-2025:SENSEX2552080500PE
 	parts := strings.Split(metadata, ":")
 
 	// Create a new InstrumentData instance
@@ -1426,6 +1427,10 @@ func convertMetadataToInstrumentData(metadata string, token string) (InstrumentD
 
 	if len(parts) >= 5 {
 		inst.TradingSymbol = parts[4]
+	}
+
+	if len(parts) >= 6 {
+		inst.Exchange = parts[5]
 	}
 
 	return inst, nil
@@ -1482,7 +1487,7 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 
 				// Cache strike price
 				strikeKey := fmt.Sprintf("%s%s", InstrumentMetadataPrefix, inst.Token)
-				value := fmt.Sprintf("%s:%s:%s:%s:%s", inst.Name, strikeStr, inst.InstrumentType, inst.Expiry, inst.TradingSymbol)
+				value := fmt.Sprintf("%s:%s:%s:%s:%s:%s", inst.Name, strikeStr, inst.InstrumentType, inst.Expiry, inst.TradingSymbol, inst.Exchange)
 				pipe.Set(ctx, strikeKey, value, LongCacheExpiry)
 
 				tokenKey := fmt.Sprintf("%s%s", InstrumentTokenPrefix, inst.Token)

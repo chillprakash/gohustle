@@ -126,12 +126,12 @@ func (t *TimescaleDB) UpsertPosition(ctx context.Context, position *PositionReco
 }
 
 // GetPositionByTradingSymbol fetches a position record by trading symbol
-func (t *TimescaleDB) GetPositionByTradingSymbol(ctx context.Context, tradingSymbol string) (*PositionRecord, error) {
-	query := `SELECT id, position_id, trading_symbol, exchange, product, quantity, average_price, last_price, pnl, realized_pnl, unrealized_pnl, multiplier, buy_quantity, sell_quantity, buy_price, sell_price, buy_value, sell_value, position_type, strategy_id, user_id, updated_at, paper_trading, kite_response FROM positions WHERE trading_symbol = $1 ORDER BY updated_at DESC LIMIT 1`
+func (t *TimescaleDB) GetPositionByTradingSymbol(ctx context.Context, tradingSymbol string, paperTrading bool) (*PositionRecord, error) {
+	query := `SELECT id, position_id, trading_symbol, exchange, product, quantity, average_price, last_price, pnl, realized_pnl, unrealized_pnl, multiplier, buy_quantity, sell_quantity, buy_price, sell_price, buy_value, sell_value, position_type, strategy_id, user_id, updated_at, paper_trading, kite_response FROM positions WHERE trading_symbol = $1 AND paper_trading = $2 ORDER BY updated_at DESC LIMIT 1`
 
 	position := &PositionRecord{}
 	var kiteRespBytes []byte
-	err := t.pool.QueryRow(ctx, query, tradingSymbol).Scan(
+	err := t.pool.QueryRow(ctx, query, tradingSymbol, paperTrading).Scan(
 		&position.ID,
 		&position.PositionID,
 		&position.TradingSymbol,

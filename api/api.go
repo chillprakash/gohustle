@@ -1032,7 +1032,9 @@ func (s *Server) handleGetOptionChain(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, resp)
 }
 
-// handleGetPositions returns detailed analysis of all positions
+// handleGetPositions returns detailed analysis of positions
+// Query parameters:
+// - filter: "all" (default), "paper", or "real"
 func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	pm := zerodha.GetPositionManager()
 	if pm == nil {
@@ -1040,9 +1042,30 @@ func (s *Server) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	analysis, err := pm.GetPositionAnalysis(r.Context())
+	// Get filter from query parameter, default to "all"
+	filterParam := r.URL.Query().Get("filter")
+	filterType := zerodha.PositionFilterAll
+	
+	// Validate filter parameter
+	switch filterParam {
+	case "paper":
+		filterType = zerodha.PositionFilterPaper
+	case "real":
+		filterType = zerodha.PositionFilterReal
+	case "", "all":
+		// Default to all positions
+	default:
+		sendErrorResponse(w, "Invalid filter parameter. Must be 'all', 'paper', or 'real'.", http.StatusBadRequest)
+		return
+	}
+
+	s.log.Debug("Getting positions", map[string]interface{}{
+		"filter": filterType,
+	})
+
+	analysis, err := pm.GetPositionAnalysis(r.Context(), filterType)
 	if err != nil {
-		sendErrorResponse(w, "Failed to get position analysis", http.StatusInternalServerError)
+		sendErrorResponse(w, "Failed to get position analysis: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 

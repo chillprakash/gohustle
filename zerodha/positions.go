@@ -615,8 +615,21 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 	return nil
 }
 
-// GetPositionAnalysis returns detailed analysis of all positions
-func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAnalysis, error) {
+// PositionFilterType represents the type of position filtering to apply
+type PositionFilterType string
+
+const (
+	// PositionFilterAll returns all positions (default)
+	PositionFilterAll PositionFilterType = "all"
+	// PositionFilterPaper returns only paper trading positions
+	PositionFilterPaper PositionFilterType = "paper"
+	// PositionFilterReal returns only real trading positions
+	PositionFilterReal PositionFilterType = "real"
+)
+
+// GetPositionAnalysis returns detailed analysis of positions
+// filterType specifies which positions to include (all, paper, or real)
+func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType PositionFilterType) (*PositionAnalysis, error) {
 	// Initialize analysis structure
 	analysis := &PositionAnalysis{
 		Summary:   PositionSummary{},
@@ -652,6 +665,19 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAn
 		// Skip non-option positions
 		if !isOptionPosition(dbPos.TradingSymbol) {
 			continue
+		}
+
+		// Apply position filter
+		switch filterType {
+		case PositionFilterPaper:
+			if !dbPos.PaperTrading {
+				continue
+			}
+		case PositionFilterReal:
+			if dbPos.PaperTrading {
+				continue
+			}
+			// PositionFilterAll or any other value - include all positions
 		}
 
 		// Get option type

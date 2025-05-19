@@ -21,8 +21,14 @@ func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
 		// Remove Bearer prefix if present
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 
-		// Validate token
-		username, err := auth.ValidateToken(token)
+		// Get auth manager and validate token
+		authManager, err := auth.GetAuthManager(auth.Config{})
+		if err != nil {
+			sendErrorResponse(w, "Failed to initialize auth", http.StatusInternalServerError)
+			return
+		}
+
+		username, err := authManager.ValidateToken(token)
 		if err != nil {
 			sendErrorResponse(w, "Invalid token", http.StatusUnauthorized)
 			return

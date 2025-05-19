@@ -24,14 +24,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get auth manager
+	authManager, err := auth.GetAuthManager(auth.Config{})
+	if err != nil {
+		sendErrorResponse(w, "Failed to initialize auth", http.StatusInternalServerError)
+		return
+	}
+
 	// Validate credentials
-	if !auth.ValidateCredentials(creds.Username, creds.Password) {
+	if !authManager.ValidateCredentials(creds.Username, creds.Password) {
 		sendErrorResponse(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
 
 	// Generate token
-	token, err := auth.GenerateToken(creds.Username)
+	token, err := authManager.GenerateToken(creds.Username)
 	if err != nil {
 		sendErrorResponse(w, "Failed to generate token", http.StatusInternalServerError)
 		return
@@ -57,8 +64,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get auth manager
+	authManager, err := auth.GetAuthManager(auth.Config{})
+	if err != nil {
+		sendErrorResponse(w, "Failed to initialize auth", http.StatusInternalServerError)
+		return
+	}
+
 	// Invalidate token
-	auth.InvalidateToken(token)
+	authManager.InvalidateToken(token)
 
 	resp := Response{
 		Success: true,

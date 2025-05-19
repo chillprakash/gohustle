@@ -137,10 +137,11 @@ func initialize() error {
 		password = "admin"
 	}
 
-	if err := auth.Initialize(auth.Config{
+	_, err := auth.GetAuthManager(auth.Config{
 		Username: username,
 		Password: password,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("failed to initialize auth system: %w", err)
 	}
 

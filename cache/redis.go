@@ -11,6 +11,7 @@ import (
 )
 
 type RedisCache struct {
+	tokenDB0      *redis.Client
 	cacheDB1      *redis.Client
 	positionsDB2  *redis.Client
 	ltpDB3        *redis.Client
@@ -62,6 +63,14 @@ func GetRedisCache() (*RedisCache, error) {
 // initializeRedisCache creates and initializes a new Redis cache instance
 func initializeRedisCache() (*RedisCache, error) {
 	cfg := config.GetConfig()
+
+	tokenDB0 := redis.NewClient(&redis.Options{
+		Addr:         fmt.Sprintf("%s:%s", cfg.Redis.Host, cfg.Redis.Port),
+		Password:     cfg.Redis.Password,
+		DB:           0,
+		MinIdleConns: cfg.Redis.MinConnections,
+		PoolSize:     cfg.Redis.MaxConnections,
+	})
 
 	cacheDB1 := redis.NewClient(&redis.Options{
 		Addr:         fmt.Sprintf("%s:%s", cfg.Redis.Host, cfg.Redis.Port),
@@ -120,15 +129,19 @@ func initializeRedisCache() (*RedisCache, error) {
 	go func() {
 		errChan <- cacheDB1.Ping(ctx).Err()
 	}()
+	go func() {
+		errChan <- tokenDB0.Ping(ctx).Err()
+	}()
 
 	// Wait for all pings
-	for i := 0; i < 3; i++ { // Changed to 3
+	for i := 0; i < 4; i++ { // Changed to 4
 		if err := <-errChan; err != nil {
 			// Clean up on failure
 			positionsDB2.Close()
 			ltpDB3.Close()
 			timeSeriesDB4.Close()
 			cacheDB1.Close()
+			tokenDB0.Close()
 			return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 		}
 	}
@@ -138,6 +151,7 @@ func initializeRedisCache() (*RedisCache, error) {
 		positionsDB2:  positionsDB2,
 		timeSeriesDB4: timeSeriesDB4,
 		cacheDB1:      cacheDB1,
+		tokenDB0:      tokenDB0,
 	}, nil
 }
 
@@ -157,6 +171,10 @@ func (r *RedisCache) GetTimeSeriesDB() *redis.Client {
 
 func (r *RedisCache) GetCacheDB1() *redis.Client {
 	return r.cacheDB1
+}
+
+func (r *RedisCache) GetTokenDB0() *redis.Client {
+	return r.tokenDB0
 }
 
 // Close closes all Redis connections
@@ -186,6 +204,7 @@ func (r *RedisCache) Close() error {
 		{"positions DB2", r.positionsDB2},
 		{"LTP DB3", r.ltpDB3},
 		{"time series DB4", r.timeSeriesDB4},
+		{"token DB0", r.tokenDB0},
 	}
 
 	// Count non-nil clients
@@ -242,6 +261,7 @@ func (c *RedisCache) Ping() error {
 		{"Positions_DB2", c.GetPositionsDB2()},
 		{"TimeSeries_DB4", c.GetTimeSeriesDB()},
 		{"Cache_DB1", c.GetCacheDB1()},
+		{"Token_DB0", c.GetTokenDB0()},
 	}
 
 	for _, db := range dbs {

@@ -83,8 +83,9 @@ type DetailedPosition struct {
 
 // PositionAnalysis represents the complete position analysis
 type PositionAnalysis struct {
-	Summary   PositionSummary    `json:"summary"`
-	Positions []DetailedPosition `json:"positions"`
+	Summary         PositionSummary    `json:"summary"`
+	OpenPositions   []DetailedPosition `json:"open_positions"`
+	ClosedPositions []DetailedPosition `json:"closed_positions,omitempty"`
 }
 
 type CachedRedisPostitionsAndQuantity struct {
@@ -194,109 +195,6 @@ func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.C
 	}
 
 	return cachePositionsMap, nil
-}
-
-// ExitAllPositions closes all open positions, optionally filtering by paperTrading flag
-func (pm *PositionManager) ExitAllPositions(ctx context.Context, paperTrading bool) ([]*OrderResponse, error) {
-	if pm == nil || pm.kite == nil {
-		return nil, fmt.Errorf("position manager or kite client not initialized")
-	}
-
-	// Get all open positions from database
-	timescaleDB := db.GetTimescaleDB()
-	if timescaleDB == nil {
-		return nil, fmt.Errorf("database connection not available")
-	}
-
-	positions, err := timescaleDB.ListPositions(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list positions: %w", err)
-	}
-
-	var responses []*OrderResponse
-
-	for _, pos := range positions {
-		// Skip positions that don't match the paperTrading filter
-		if pos.PaperTrading != paperTrading {
-			continue
-		}
-
-		// Skip positions with zero quantity
-		if pos.Quantity == 0 {
-			continue
-		}
-
-		// Determine order side (BUY to close short, SELL to close long)
-		side := "SELL"
-		if pos.Quantity < 0 {
-			side = "BUY"
-		}
-
-		// Create order request
-		orderReq := PlaceOrderRequest{
-			TradingSymbol: pos.TradingSymbol,
-			Exchange:      pos.Exchange,
-			OrderType:     "MARKET",
-			Side:          OrderSide(side),
-			Quantity:      absInt(pos.Quantity),
-			Product:       ProductType(pos.Product),
-			Tag:           "exit_all_positions",
-		}
-
-		var resp *OrderResponse
-
-		if paperTrading {
-			// For paper trading, simulate order execution
-			resp = &OrderResponse{
-				OrderID: fmt.Sprintf("PAPER_%d", time.Now().UnixNano()),
-				Status:  "COMPLETE",
-				Message: "Paper trading order executed",
-			}
-
-			// Update position in database - set quantity to 0 to close the position
-			pos.Quantity = 0
-			pos.UpdatedAt = time.Now()
-
-			// Use UpsertPosition to update the position
-			if err := timescaleDB.UpsertPosition(ctx, pos); err != nil {
-				pm.log.Error("Failed to update paper position in database", map[string]interface{}{
-					"trading_symbol": pos.TradingSymbol,
-					"error":          err.Error(),
-				})
-			}
-		} else {
-			// For real trading, place actual order
-			var err error
-			resp, err = PlaceOrder(orderReq)
-			if err != nil {
-				pm.log.Error("Failed to place exit order", map[string]interface{}{
-					"trading_symbol": pos.TradingSymbol,
-					"error":          err.Error(),
-				})
-				continue
-			}
-		}
-
-		responses = append(responses, resp)
-
-		// Update position in Redis
-		if err := pm.storePositionsInRedis(ctx, "net", []kiteconnect.Position{
-			{
-				Tradingsymbol: pos.TradingSymbol,
-				Exchange:      pos.Exchange,
-				Product:       pos.Product,
-				Quantity:      0, // Close the position
-				AveragePrice:  pos.AveragePrice,
-			},
-		}); err != nil {
-			pm.log.Error("Failed to update position in Redis", map[string]interface{}{
-				"trading_symbol": pos.TradingSymbol,
-				"error":          err.Error(),
-			})
-		}
-	}
-
-	return responses, nil
 }
 
 func absInt(n int) int {
@@ -632,8 +530,9 @@ const (
 func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType PositionFilterType) (*PositionAnalysis, error) {
 	// Initialize analysis structure
 	analysis := &PositionAnalysis{
-		Summary:   PositionSummary{},
-		Positions: make([]DetailedPosition, 0),
+		Summary:         PositionSummary{},
+		OpenPositions:   make([]DetailedPosition, 0),
+		ClosedPositions: make([]DetailedPosition, 0),
 	}
 
 	// Get positions from database (includes both real and paper trading positions)
@@ -776,13 +675,24 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 			analysis.Summary.TotalPutPending += pendingValue
 		}
 
-		analysis.Positions = append(analysis.Positions, detailedPos)
+		// Separate open and closed positions
+		if dbPos.Quantity != 0 {
+			analysis.OpenPositions = append(analysis.OpenPositions, detailedPos)
+		} else {
+			analysis.ClosedPositions = append(analysis.ClosedPositions, detailedPos)
+		}
 
 	}
 
 	// Calculate totals
 	analysis.Summary.TotalValue = analysis.Summary.TotalCallValue + analysis.Summary.TotalPutValue
 	analysis.Summary.TotalPendingValue = analysis.Summary.TotalCallPending + analysis.Summary.TotalPutPending
+
+	// Log position counts
+	pm.log.Info("Position analysis complete", map[string]interface{}{
+		"open_positions":   len(analysis.OpenPositions),
+		"closed_positions": len(analysis.ClosedPositions),
+	})
 	return analysis, nil
 }
 

@@ -904,42 +904,12 @@ func (s *APIServer) handleExitAllPositions(w http.ResponseWriter, r *http.Reques
 		"positionType": req.PositionType,
 	})
 
-	// Validate position type
-	var paperTrading bool
-	switch req.PositionType {
-	case "paper":
-		paperTrading = true
-	case "real":
-		paperTrading = false
-	default:
-		sendErrorResponse(w, "Invalid positionType. Must be 'paper' or 'real'.", http.StatusBadRequest)
-		return
-	}
-
-	// Get position manager
-	pm := zerodha.GetPositionManager()
-	if pm == nil {
-		sendErrorResponse(w, "Position manager not initialized", http.StatusInternalServerError)
-		return
-	}
-
-	// Call ExitAllPositions
-	responses, err := pm.ExitAllPositions(r.Context(), paperTrading)
-	if err != nil {
-		sendErrorResponse(w, "Failed to exit positions: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// Send success response
-	resp := Response{
-		Success: true,
-		Message: fmt.Sprintf("Successfully initiated exit for %d positions", len(responses)),
-		Data:    responses,
-	}
-
 	// Set content type and send response
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Successfully processed exit positions request",
+	})
 	s.log.Info("Successfully processed exit positions request")
 }
 

@@ -377,8 +377,6 @@ func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {
 		return fmt.Errorf("failed to get positions from database: %w", err)
 	}
 
-	positionManager := GetPositionManager()
-
 	// Prepare batch insert
 	var positionPnLs []db.PositionPnLTimeseriesRecord
 	timestamp := time.Now()
@@ -448,7 +446,7 @@ func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {
 			"total_pnl": totalPnL,
 			"exit_pnl":  exitPnL,
 		})
-		positionManager.ExitAllPositions(ctx, false)
+
 	}
 
 	if totalPnL > targetPnL {
@@ -456,7 +454,7 @@ func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {
 			"total_pnl":  totalPnL,
 			"target_pnl": targetPnL,
 		})
-		positionManager.ExitAllPositions(ctx, false)
+
 	}
 
 	// Batch insert all position P&L records if there are any

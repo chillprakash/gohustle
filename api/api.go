@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -89,26 +88,14 @@ func (s *APIServer) handleGetOrders(w http.ResponseWriter, r *http.Request) {
 
 // mapToPlaceOrderRequest converts an HTTP request to a PlaceOrderAPIRequest
 func (s *APIServer) mapToPlaceOrderRequest(request *http.Request) (*zerodha.PlaceOrderRequest, error) {
-	// Parse request body
 	body, err := io.ReadAll(request.Body)
 	if err != nil {
 		return nil, fmt.Errorf("error reading request body: %w", err)
 	}
 
-	// Log the raw request body for debugging
-	s.log.Debug("Place order request", map[string]interface{}{
-		"body": string(body),
-	})
-
-	// Unmarshal the request body into PlaceOrderAPIRequest
 	var orderReq zerodha.PlaceOrderRequest
 	if err := json.Unmarshal(body, &orderReq); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)
-	}
-
-	// Set default values if not provided
-	if orderReq.Validity == "" {
-		orderReq.Validity = "DAY"
 	}
 
 	return &orderReq, nil
@@ -121,172 +108,15 @@ func (s *APIServer) handlePlaceOrder(w http.ResponseWriter, request *http.Reques
 		return
 	}
 
-	cacheMeta, err := cache.GetCacheMetaInstance()
+	resp, err := zerodha.PlaceOrder(*orderReq)
 	if err != nil {
-		s.log.Error("Failed to get cache meta instance", map[string]interface{}{})
-		sendErrorResponse(w, "Failed to get cache meta instance", http.StatusInternalServerError)
+		s.log.Error("Order placement failed", map[string]interface{}{"error": err.Error()})
+		sendErrorResponse(w, "Order placement failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Return the response to the client
+	sendJSONResponse(w, resp)
 
-	indexMeta, err := cacheMeta.GetMetadataOfToken(request.Context(), utils.Uint32ToString(orderReq.InstrumentToken))
-	if err != nil {
-		s.log.Error("Failed to get index meta", map[string]interface{}{
-			"error": err.Error(),
-		})
-		sendErrorResponse(w, "Failed to get index meta", http.StatusInternalServerError)
-		return
-	}
-	orderReq.TradingSymbol = indexMeta.TradingSymbol
-	orderReq.Exchange = indexMeta.Exchange
-
-	// Convert to zerodha.PlaceOrderRequest
-	var orderType zerodha.OrderType
-	switch orderReq.OrderType {
-	case "MARKET":
-		orderType = zerodha.OrderTypeMarket
-	case "LIMIT":
-		orderType = zerodha.OrderTypeLimit
-	case "SL":
-		orderType = zerodha.OrderTypeSL
-	case "SL-M":
-		orderType = zerodha.OrderTypeSLM
-	default:
-		http.Error(w, "invalid order type", http.StatusBadRequest)
-		return
-	}
-
-	var productType zerodha.ProductType
-	switch orderReq.Product {
-	case "NRML":
-		productType = zerodha.ProductTypeNRML
-	case "MIS":
-		productType = zerodha.ProductTypeMIS
-	case "CNC":
-		productType = zerodha.ProductTypeCNC
-	default:
-		http.Error(w, "invalid product type", http.StatusBadRequest)
-		return
-	}
-
-	var side zerodha.OrderSide
-	if orderReq.Side == "BUY" {
-		side = zerodha.OrderSideBuy
-	} else if orderReq.Side == "SELL" {
-		side = zerodha.OrderSideSell
-	} else {
-		http.Error(w, "invalid transaction type", http.StatusBadRequest)
-		return
-	}
-
-	// Create the order request
-	zOrderReq := zerodha.PlaceOrderRequest{
-		TradingSymbol: orderReq.TradingSymbol,
-		Exchange:      orderReq.Exchange,
-		OrderType:     orderType,
-		Side:          side,
-		Quantity:      orderReq.Quantity,
-		Price:         orderReq.Price,
-		TriggerPrice:  orderReq.TriggerPrice,
-		Product:       productType,
-		Validity:      orderReq.Validity,
-		DisclosedQty:  orderReq.DisclosedQty,
-		Tag:           orderReq.Tag,
-	}
-
-	// Only set price for LIMIT orders
-	if orderReq.OrderType == "LIMIT" {
-		zOrderReq.Price = orderReq.Price
-	}
-
-	// Set trigger price for SL/STOP_LOSS orders
-	if orderReq.OrderType == "SL" || orderReq.OrderType == "STOP_LOSS" {
-		zOrderReq.TriggerPrice = orderReq.TriggerPrice
-	}
-
-	var resp *zerodha.OrderResponse
-	var kiteResp interface{}
-
-	// Check if this is a paper trading order
-	if orderReq.PaperTrading {
-		// Generate a simulated response for paper trading
-		s.log.Info("Processing paper trading order", map[string]interface{}{
-			"symbol": orderReq.TradingSymbol,
-			"side":   side,
-			"qty":    orderReq.Quantity,
-		})
-
-		var executionPrice float64
-
-		// Try to get the latest price for the instrument from Redis if available
-		ltpData, err := cacheMeta.GetLTPforInstrumentToken(request.Context(), utils.Uint32ToString(orderReq.InstrumentToken))
-		if err != nil {
-			s.log.Debug("Failed to get LTP for instrument token, using order price", map[string]interface{}{
-				"token": orderReq.InstrumentToken,
-				"error": err.Error(),
-			})
-			executionPrice = orderReq.Price
-		} else {
-			executionPrice = ltpData.LTP
-		}
-
-		// Generate a unique order ID for paper trading
-		paperOrderID := fmt.Sprintf("paper-%s-%d", strings.ToLower(orderReq.TradingSymbol), time.Now().UnixNano())
-
-		// Create a simulated response
-		resp = &zerodha.OrderResponse{
-			OrderID: paperOrderID,
-			Status:  "PAPER",
-			Message: "Paper trading order simulated successfully",
-		}
-
-		// Create a simulated kite response
-		kiteResp = map[string]interface{}{
-			"order_id":           paperOrderID,
-			"status":             "PAPER",
-			"tradingsymbol":      orderReq.TradingSymbol,
-			"exchange":           orderReq.Exchange,
-			"transaction_type":   orderReq.Side,
-			"order_type":         orderReq.OrderType,
-			"product":            orderReq.Product,
-			"average_price":      executionPrice,
-			"price":              orderReq.Price,
-			"trigger_price":      orderReq.TriggerPrice,
-			"quantity":           orderReq.Quantity,
-			"disclosed_quantity": orderReq.DisclosedQty,
-			"validity":           orderReq.Validity,
-			"tag":                orderReq.Tag,
-		}
-		// Store the execution price in the request for tracking purposes
-		zOrderReq.Price = executionPrice
-
-		// Persist the order to the database (both real and paper) - using "system" as userID
-		zerodha.SaveOrderAsync(orderReq, resp, "system", kiteResp)
-
-		// Return the response to the client
-		sendJSONResponse(w, map[string]interface{}{
-			"order_id":      resp.OrderID,
-			"status":        resp.Status,
-			"message":       resp.Message,
-			"paper_trading": orderReq.PaperTrading,
-		})
-	} else {
-		// Place the actual order with Zerodha
-		s.log.Info("Placing order", map[string]interface{}{
-			"order": zOrderReq,
-		})
-		resp, err := zerodha.PlaceOrder(zOrderReq)
-		if err != nil {
-			s.log.Error("Order placement failed", map[string]interface{}{"error": err.Error()})
-			sendErrorResponse(w, "Order placement failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Persist the order to the database (both real and paper) - using "system" as userID
-		zerodha.SaveOrderAsync(orderReq, resp, "system", resp)
-
-		// Return the response to the client
-		sendJSONResponse(w, resp)
-	}
 }
 
 // PnLParams represents P&L parameters

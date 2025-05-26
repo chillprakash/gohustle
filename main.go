@@ -68,9 +68,6 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 
 	scheduler.InitializePositionPolling(ctx)
 
-	// // Initialize order polling to track order statuses
-	scheduler.InitializeOrderPolling(ctx)
-
 	// // Initialize strategy P&L tracking
 	scheduler.InitializeStrategyPnLTracking(ctx)
 

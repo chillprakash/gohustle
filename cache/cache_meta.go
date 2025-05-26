@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"gohustle/core"
 	"gohustle/logger"
 	"gohustle/utils"
 	"slices"
@@ -670,11 +671,18 @@ func (c *CacheMeta) GetExpiryMap(ctx context.Context) (map[string][]time.Time, e
 	return result, nil
 }
 
+type InstrumentType string
+
+const (
+	InstrumentTypeCE InstrumentType = "CE"
+	InstrumentTypePE InstrumentType = "PE"
+)
+
 // InstrumentData represents the essential data for an instrument
 type InstrumentData struct {
-	Name            string
+	Name            core.Index
 	TradingSymbol   string
-	InstrumentType  string
+	InstrumentType  InstrumentType
 	StrikePrice     string
 	Expiry          string
 	Exchange        string
@@ -979,7 +987,7 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 
 	// Create a nested map to organize instruments by name, expiry, and strike
 	// Structure: map[name]map[expiry]map[strike]map[type]instrumentData
-	instrumentMap := make(map[string]map[string]map[string]map[string]InstrumentData)
+	instrumentMap := make(map[core.Index]map[string]map[string]map[string]InstrumentData)
 
 	// Process each instrument to populate the map
 	for _, inst := range instruments {
@@ -1014,7 +1022,7 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 		}
 
 		// Store the instrument data
-		instrumentMap[inst.Name][inst.Expiry][strikeStr][inst.InstrumentType] = inst
+		instrumentMap[inst.Name][inst.Expiry][strikeStr][string(inst.InstrumentType)] = inst
 	}
 
 	// Now process the instrumentMap to create the formatted data for Redis
@@ -1348,9 +1356,9 @@ func (c *CacheMeta) FilterInstrumentsByOI(ctx context.Context, indexName string,
 
 		// Create an InstrumentData object
 		inst := InstrumentData{
-			Name:           indexName,
+			Name:           core.Index{NameInOptions: indexName},
 			TradingSymbol:  symbol,
-			InstrumentType: data.Type,
+			InstrumentType: InstrumentType(data.Type),
 			StrikePrice:    data.Strike,
 			Expiry:         expiry,
 			Exchange:       "NFO", // Assuming NFO for options
@@ -1410,7 +1418,7 @@ func convertMetadataToInstrumentData(metadata string, token string) (InstrumentD
 
 	// Map the parts to the InstrumentData struct fields
 	if len(parts) >= 1 {
-		inst.Name = parts[0]
+		inst.Name = core.Index{NameInOptions: parts[0]}
 	}
 
 	if len(parts) >= 2 {
@@ -1418,7 +1426,7 @@ func convertMetadataToInstrumentData(metadata string, token string) (InstrumentD
 	}
 
 	if len(parts) >= 3 {
-		inst.InstrumentType = parts[2]
+		inst.InstrumentType = InstrumentType(parts[2])
 	}
 
 	if len(parts) >= 4 {

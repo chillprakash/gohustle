@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"gohustle/core"
 	"gohustle/db"
 	"gohustle/logger"
 	pb "gohustle/proto"
@@ -192,7 +191,7 @@ func (c *TickConsumer) processMessages(ctx context.Context, workerId int) {
 		// Group ticks by table name
 		ticksByTable := make(map[string][]*pb.TickData)
 		for _, tick := range batch {
-			tableName := core.GetTableNameForToken(ctx, tick.InstrumentToken)
+			tableName := ""
 			if tableName == "" {
 				c.log.Error("Invalid table name", map[string]interface{}{
 					"worker_id": workerId,

@@ -7,6 +7,12 @@ type Index struct {
 	NameInIndices   string
 	Enabled         bool
 	IndexNumber     int // For ordering/rendering in client and server
+	StrikeGap       int
+}
+
+// GetStrikeGap returns the strike gap for this index
+func (i Index) GetStrikeGap() int {
+	return i.StrikeGap
 }
 
 // Indices represents all available market indices
@@ -25,6 +31,7 @@ var GetIndices = func() Indices {
 			NameInIndices:   "NIFTY 50",
 			Enabled:         true,
 			IndexNumber:     1, // Primary index
+			StrikeGap:       50,
 		},
 		SENSEX: Index{
 			NameInOptions:   "SENSEX",
@@ -32,6 +39,7 @@ var GetIndices = func() Indices {
 			NameInIndices:   "SENSEX",
 			Enabled:         true,
 			IndexNumber:     0, // Secondary index
+			StrikeGap:       100,
 		},
 		BANKNIFTY: Index{
 			NameInOptions:   "BANKNIFTY",
@@ -39,6 +47,7 @@ var GetIndices = func() Indices {
 			NameInIndices:   "NIFTY BANK",
 			Enabled:         false,
 			IndexNumber:     2, // Tertiary index
+			StrikeGap:       100,
 		},
 	}
 }

@@ -23,13 +23,13 @@ import (
 // Redis key format constants
 const (
 	// PositionKeyFormat is the format for position keys in Redis
-	PositionKeyFormat = "position:%s:%s:%s" // category, tradingsymbol, product
+	RealTradingPositionKeyFormat  = "position:real_trading:%s:%s:%s"  // category, tradingsymbol, product
+	PaperTradingPositionKeyFormat = "position:paper_trading:%s:%s:%s" // category, tradingsymbol, product
 
 	// PositionTokenKeyFormat is the format for position token keys in Redis
 	PositionTokenKeyFormat = "position:token:%d" // instrumentToken
 
-	// PositionAllKeyFormat is the format for position token keys in Redis
-	PositionAllKeyFormat = "position:all_positions" // concatenated String
+	PostionsJSONKeyFormat = "positionsdump:%s" // paper or real
 )
 
 // PositionManager handles all position-related operations
@@ -136,11 +136,11 @@ func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.C
 	cachePositionsMap := make(map[string]CachedRedisPostitionsAndQuantity)
 
 	// Get the comma-separated position data from Redis
-	allPositions, err := pm.positionsRedis.Get(ctx, PositionAllKeyFormat).Result()
+	allPositions, err := pm.positionsRedis.Get(ctx, RealTradingPositionKeyFormat).Result()
 
 	if err == redis.Nil {
 		pm.log.Debug("No positions found in Redis", map[string]interface{}{
-			"key": PositionAllKeyFormat,
+			"key": RealTradingPositionKeyFormat,
 		})
 		return cachePositionsMap, nil
 	}
@@ -226,7 +226,7 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 	go func() {
 		defer wg.Done()
 		// Store net positions alone in Redis
-		if err := pm.storePositionsInRedis(ctx, "net", positions.Net); err != nil {
+		if err := pm.storePositionsInRedis(ctx, positions.Net); err != nil {
 			pm.log.Error("Failed to store positions in Redis", map[string]interface{}{
 				"error": err.Error(),
 			})
@@ -468,7 +468,7 @@ func (pm *PositionManager) storePositionsInDB(ctx context.Context, positions []k
 }
 
 // storePositionsInRedis stores a list of positions in Redis
-func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category string, positions []kiteconnect.Position) error {
+func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions []kiteconnect.Position) error {
 	// Build comma-separated list of instrument tokens and quantities
 	positionValues := make([]string, 0, len(positions))
 
@@ -478,7 +478,7 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 		positionValues = append(positionValues, fmt.Sprintf("%d_%d", pos.InstrumentToken, pos.Quantity))
 
 		// Store full position details
-		key := fmt.Sprintf(PositionKeyFormat, category, pos.Tradingsymbol, pos.Product)
+		key := fmt.Sprintf(PostionsJSONKeyFormat, pos.Tradingsymbol)
 
 		// Convert position to JSON
 		posJSON, err := json.Marshal(pos)
@@ -503,7 +503,7 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, category s
 
 	// Join all position values with commas and store in Redis
 	positionAllKeyFormatValue := strings.Join(positionValues, ",")
-	err := pm.positionsRedis.Set(ctx, PositionAllKeyFormat, positionAllKeyFormatValue, 0).Err()
+	err := pm.positionsRedis.Set(ctx, PaperTradingPositionKeyFormat, positionAllKeyFormatValue, 0).Err()
 	if err != nil {
 		pm.log.Error("Failed to store all positions in Redis", map[string]interface{}{
 			"error": err.Error(),

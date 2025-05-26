@@ -11,6 +11,26 @@ DROP TABLE IF EXISTS credentials;
 DROP TABLE IF EXISTS index_metrics;
 DROP TABLE IF EXISTS straddle_metrics;
 
+CREATE TABLE orders (
+    id SERIAL PRIMARY KEY,
+    external_order_id TEXT,
+    order_type TEXT NOT NULL,
+    instrument_token BIGINT NOT NULL,
+    trading_symbol TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    paper_trading BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    payload_to_broker JSONB,
+    
+    -- Add indexes for common query patterns
+    CONSTRAINT uq_external_order_id UNIQUE (external_order_id)
+);
+
+-- Add indexes for common query patterns
+CREATE INDEX idx_orders_instrument_token ON orders(instrument_token);
+CREATE INDEX idx_orders_created_at ON orders(created_at);
+CREATE INDEX idx_orders_paper_trading ON orders(paper_trading);
+
 
 CREATE TABLE app_parameters (
     id SERIAL PRIMARY KEY,
@@ -114,28 +134,6 @@ COMMENT ON TABLE credentials IS 'API credentials and configuration values';
 COMMENT ON TABLE index_metrics IS 'Derived metrics for indices (spot, fair, straddle prices)';
 COMMENT ON TABLE straddle_metrics IS 'Detailed straddle metrics per strike price';
 
-CREATE TABLE orders (
-    id                  SERIAL PRIMARY KEY,
-    order_id            VARCHAR(64),           -- Zerodha order ID or GTT trigger ID
-    order_type          VARCHAR(16),           -- MARKET, LIMIT, SL, SL-M, GTT
-    gtt_type            VARCHAR(16),           -- NULL for regular, 'single'/'oco' for GTT
-    status              VARCHAR(32),           -- Status from Zerodha (e.g., 'success', 'rejected')
-    message             TEXT,                  -- Any message from Zerodha
-    trading_symbol      VARCHAR(32) NOT NULL,
-    exchange            VARCHAR(16) NOT NULL,
-    side                VARCHAR(8),            -- BUY/SELL
-    quantity            INT,
-    price               NUMERIC(12,2),
-    trigger_price       NUMERIC(12,2),
-    product             VARCHAR(8),
-    validity            VARCHAR(8),
-    disclosed_qty       INT,
-    tag                 VARCHAR(64),
-    user_id             VARCHAR(64),           -- If you support multi-user
-    placed_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- When the order was placed
-    kite_response       JSONB,                 -- Raw Zerodha response for audit/debug
-    paper_trading       BOOLEAN DEFAULT FALSE  -- Whether this is a paper trade (not sent to broker)
-);
 
 CREATE TABLE strategies (
     id                SERIAL PRIMARY KEY,

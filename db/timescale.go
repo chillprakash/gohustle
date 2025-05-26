@@ -143,6 +143,48 @@ func (t *TimescaleDB) Exec(ctx context.Context, query string, args ...interface{
 	return t.pool.Exec(ctx, query, args...)
 }
 
+// WithTx executes a function within a database transaction.
+// It handles beginning the transaction, committing on success, and rolling back on error.
+// The provided function should return an error to indicate failure, which will trigger a rollback.
+func (t *TimescaleDB) WithTx(ctx context.Context, fn func(pgx.Tx) error) error {
+	tx, err := t.pool.Begin(ctx)
+	if err != nil {
+		t.log.Error("failed to begin transaction", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			// Ensure we rollback on panic
+			tx.Rollback(ctx)
+			panic(p) // re-throw panic after rollback
+		} else if err != nil {
+			// If there's an error, rollback
+			tx.Rollback(ctx)
+		} else {
+			// Otherwise, commit
+			err = tx.Commit(ctx)
+		}
+	}()
+
+	err = fn(tx)
+	return err
+}
+
+// Begin starts a new transaction
+func (t *TimescaleDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := t.pool.Begin(ctx)
+	if err != nil {
+		t.log.Error("failed to begin transaction", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	return tx, nil
+}
+
 // Row interface for query results
 type Row interface {
 	Scan(dest ...interface{}) error

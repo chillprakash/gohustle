@@ -6,8 +6,8 @@ import (
 	sync "sync"
 	"time"
 
+	"gohustle/appparameters"
 	"gohustle/cache"
-	"gohustle/core"
 	"gohustle/db"
 	"gohustle/logger"
 
@@ -20,12 +20,7 @@ type PnLManager struct {
 	timescaleDB     *db.TimescaleDB
 	redisCache      *redis.Client
 	cacheMeta       *cache.CacheMeta
-	appParamManager *core.AppParameterManager
-}
-
-// AppParamManager returns the app parameter manager instance
-func (pm *PnLManager) AppParamManager() *core.AppParameterManager {
-	return pm.appParamManager
+	appParamManager *appparameters.AppParameterManager
 }
 
 // PnLSummary represents a summary of P&L across all positions
@@ -108,7 +103,7 @@ func GetPnLManager() *PnLManager {
 			timescaleDB:     db.GetTimescaleDB(),
 			redisCache:      redisCache.GetLTPDB3(),
 			cacheMeta:       cacheMetaInstance,
-			appParamManager: core.GetAppParameterManager(),
+			appParamManager: appparameters.GetAppParameterManager(),
 		}
 		log.Info("PnL manager initialized", map[string]interface{}{})
 	})

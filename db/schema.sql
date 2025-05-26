@@ -36,8 +36,6 @@ CREATE TABLE app_parameters (
     id SERIAL PRIMARY KEY,
     key VARCHAR(100) NOT NULL UNIQUE,
     value TEXT NOT NULL,
-    value_type VARCHAR(20) NOT NULL, -- 'float', 'int', 'bool', 'string', 'json'
-    description TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );

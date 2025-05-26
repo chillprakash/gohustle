@@ -8,11 +8,23 @@ type Index struct {
 	Enabled         bool
 	IndexNumber     int // For ordering/rendering in client and server
 	StrikeGap       int
+	UnitsPerLot     int
+	MaxLotsPerOrder int
 }
 
 // GetStrikeGap returns the strike gap for this index
 func (i Index) GetStrikeGap() int {
 	return i.StrikeGap
+}
+
+// GetUnitsPerLot returns the units per lot for this index
+func (i Index) GetUnitsPerLot() int {
+	return i.UnitsPerLot
+}
+
+// GetMaxLotsPerOrder returns the max lots per order for this index
+func (i Index) GetMaxLotsPerOrder() int {
+	return i.MaxLotsPerOrder
 }
 
 // Indices represents all available market indices
@@ -32,6 +44,8 @@ var GetIndices = func() Indices {
 			Enabled:         true,
 			IndexNumber:     1, // Primary index
 			StrikeGap:       50,
+			UnitsPerLot:     1800,
+			MaxLotsPerOrder: 75,
 		},
 		SENSEX: Index{
 			NameInOptions:   "SENSEX",
@@ -40,6 +54,8 @@ var GetIndices = func() Indices {
 			Enabled:         true,
 			IndexNumber:     0, // Secondary index
 			StrikeGap:       100,
+			UnitsPerLot:     1000,
+			MaxLotsPerOrder: 20,
 		},
 		BANKNIFTY: Index{
 			NameInOptions:   "BANKNIFTY",
@@ -48,6 +64,8 @@ var GetIndices = func() Indices {
 			Enabled:         false,
 			IndexNumber:     2, // Tertiary index
 			StrikeGap:       100,
+			UnitsPerLot:     900,
+			MaxLotsPerOrder: 35,
 		},
 	}
 }

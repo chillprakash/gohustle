@@ -341,9 +341,9 @@ func (k *KiteConnect) SyncAllInstrumentDataToCache(ctx context.Context) error {
 
 		// Add filtered instrument data for caching
 		filteredInstrumentData = append(filteredInstrumentData, cache.InstrumentData{
-			Name:            inst.Name,
+			Name:            *core.GetIndices().GetIndexByName(inst.Name),
 			TradingSymbol:   inst.Tradingsymbol,
-			InstrumentType:  inst.InstrumentType,
+			InstrumentType:  cache.InstrumentType(inst.InstrumentType),
 			StrikePrice:     inst.StrikePrice,
 			Expiry:          inst.Expiry,
 			Exchange:        inst.Exchange,
@@ -622,9 +622,9 @@ func (k *KiteConnect) GetFilteredInstrumentsBasedOnOI(ctx context.Context) ([]ca
 						"symbol": instrument.Tradingsymbol,
 					})
 					instrumentList = append(instrumentList, cache.InstrumentData{
-						Name:           instrument.Name,
+						Name:           *core.GetIndices().GetIndexByName(instrument.Name),
 						TradingSymbol:  instrument.Tradingsymbol,
-						InstrumentType: instrument.InstrumentType,
+						InstrumentType: cache.InstrumentType(instrument.InstrumentType),
 						StrikePrice:    instrument.StrikePrice,
 						Expiry:         instrument.Expiry,
 						Exchange:       instrument.Exchange,

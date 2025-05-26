@@ -2,13 +2,11 @@ package appparameters
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"fmt"
 	"gohustle/cache"
 	"gohustle/db"
 	"gohustle/logger"
-	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,15 +19,27 @@ const (
 	AppParamTTL       = 24 * time.Hour
 )
 
+type AppParameterTypes string
+
+const (
+	AppParamOrderProductType AppParameterTypes = "order_product_type" //CNC, MIS, NRML
+	AppParamOrderType        AppParameterTypes = "order_type"         //LIMIT, MARKET
+	AppParamExitPNL          AppParameterTypes = "exit_pnl"
+	AppParamTargetPNL        AppParameterTypes = "target_pnl"
+)
+
 // AppParameter represents a configurable application parameter
 type AppParameter struct {
-	ID          int       `db:"id" json:"id"`
-	Key         string    `db:"key" json:"key"`
-	Value       string    `db:"value" json:"value"`
-	ValueType   string    `db:"value_type" json:"value_type"`
-	Description string    `db:"description" json:"description"`
-	CreatedAt   time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+	ID        int       `db:"id" json:"id"`
+	Key       string    `db:"key" json:"key"`
+	Value     string    `db:"value" json:"value"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type OrderAppParameters struct {
+	ProductType AppParameterTypes `json:"product_type"` //CNC, MIS, NRML
+	OrderType   AppParameterTypes `json:"order_type"`   //LIMIT, MARKET
 }
 
 // AppParameterManager handles operations on app parameters
@@ -44,22 +54,9 @@ var (
 	appParamOnce     sync.Once
 )
 
-// GetAppParameterManager returns a singleton instance
 func GetAppParameterManager() *AppParameterManager {
 	appParamOnce.Do(func() {
-		redisCache, err := cache.GetRedisCache()
-		if err != nil {
-			logger.L().Error("Failed to get Redis cache", map[string]interface{}{
-				"error": err.Error(),
-			})
-			// Continue without Redis
-			appParamInstance = &AppParameterManager{
-				db:  db.GetTimescaleDB(),
-				log: logger.L(),
-			}
-			return
-		}
-
+		redisCache, _ := cache.GetRedisCache()
 		appParamInstance = &AppParameterManager{
 			db:    db.GetTimescaleDB(),
 			log:   logger.L(),
@@ -70,53 +67,132 @@ func GetAppParameterManager() *AppParameterManager {
 	return appParamInstance
 }
 
-// getParameter retrieves a parameter by key
-func (apm *AppParameterManager) getParameter(ctx context.Context, key string) (*AppParameter, error) {
-	// First check Redis if available
-	if apm.cache != nil {
-		redisKey := AppParamKeyPrefix + key
-		// Only get the raw value from Redis
-		value, err := apm.cache.Get(ctx, redisKey).Result()
-		if err == nil {
-			// Return a minimal parameter with just the value
-			// Type conversion will be handled by the caller
-			return &AppParameter{
-				Key:   key,
-				Value: value,
-			}, nil
-		}
+func (apm *AppParameterManager) GetOrderAppParameters() OrderAppParameters {
+	params, _ := apm.GetParameters(context.Background(), []AppParameterTypes{
+		AppParamOrderProductType,
+		AppParamOrderType,
+	})
+	return OrderAppParameters{
+		ProductType: AppParameterTypes(params[string(AppParamOrderProductType)].Value),
+		OrderType:   AppParameterTypes(params[string(AppParamOrderType)].Value),
 	}
 
-	// Not found in cache or error, get from database
-	var param AppParameter
-	query := `SELECT id, key, value, value_type, description, created_at, updated_at 
-             FROM app_parameters WHERE key = $1`
-	err := apm.db.QueryRow(ctx, query, key).Scan(
-		&param.ID, &param.Key, &param.Value, &param.ValueType,
-		&param.Description, &param.CreatedAt, &param.UpdatedAt)
+}
+
+func (apm *AppParameterManager) GetParameter(ctx context.Context, key AppParameterTypes) (*AppParameter, error) {
+	params, err := apm.GetParameters(ctx, []AppParameterTypes{key})
 	if err != nil {
 		return nil, err
 	}
+	return params[string(key)], nil
+}
 
-	// Update Redis if available - only store the value
-	if apm.cache != nil {
-		redisKey := AppParamKeyPrefix + key
-		// Only store the value string in Redis
-		if err := apm.cache.Set(ctx, redisKey, param.Value, AppParamTTL).Err(); err != nil {
-			apm.log.Error("Failed to cache parameter in Redis", map[string]interface{}{
-				"key":   key,
+// GetParameters retrieves multiple parameters at once by their keys
+// Returns a map of parameter key to AppParameter
+func (apm *AppParameterManager) GetParameters(ctx context.Context, keys []AppParameterTypes) (map[string]*AppParameter, error) {
+	// Initialize result map
+	result := make(map[string]*AppParameter, len(keys))
+
+	// Check which keys are in Redis first (if available)
+	redisKeys := make([]string, 0, len(keys))
+	redisKeyToOriginal := make(map[string]string, len(keys))
+
+	for _, key := range keys {
+		redisKey := AppParamKeyPrefix + string(key)
+		redisKeys = append(redisKeys, redisKey)
+		redisKeyToOriginal[redisKey] = string(key)
+	}
+
+	// Try to get values from Redis in a single batch operation
+	if apm.cache != nil && len(redisKeys) > 0 {
+		values, err := apm.cache.MGet(ctx, redisKeys...).Result()
+		if err == nil {
+			for i, value := range values {
+				if value != nil {
+					// Found in Redis
+					originalKey := redisKeyToOriginal[redisKeys[i]]
+					result[originalKey] = &AppParameter{
+						Key:   originalKey,
+						Value: value.(string),
+					}
+				}
+			}
+		}
+	}
+
+	// Get remaining keys from database
+	missingKeys := make([]string, 0)
+	for _, key := range keys {
+		if _, exists := result[string(key)]; !exists {
+			missingKeys = append(missingKeys, string(key))
+		}
+	}
+
+	if len(missingKeys) > 0 {
+		// Build the query with multiple placeholders
+		placeholders := make([]string, len(missingKeys))
+		args := make([]interface{}, len(missingKeys))
+
+		for i, key := range missingKeys {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = key
+		}
+
+		query := fmt.Sprintf(
+			"SELECT id, key, value, value_type, description, created_at, updated_at "+
+				"FROM app_parameters WHERE key IN (%s)",
+			strings.Join(placeholders, ","),
+		)
+
+		rows, err := apm.db.GetPool().Query(ctx, query, args...)
+		if err != nil {
+			return result, fmt.Errorf("failed to query parameters: %w", err)
+		}
+		defer rows.Close()
+
+		// Process rows and update Redis cache
+		for rows.Next() {
+			var param AppParameter
+			err := rows.Scan(
+				&param.ID, &param.Key, &param.Value,
+				&param.CreatedAt, &param.UpdatedAt,
+			)
+			if err != nil {
+				apm.log.Error("Failed to scan parameter row", map[string]interface{}{
+					"error": err.Error(),
+				})
+				continue
+			}
+
+			// Add to result
+			result[param.Key] = &param
+
+			// Update Redis if available
+			if apm.cache != nil {
+				redisKey := AppParamKeyPrefix + param.Key
+				if err := apm.cache.Set(ctx, redisKey, param.Value, AppParamTTL).Err(); err != nil {
+					apm.log.Error("Failed to cache parameter in Redis", map[string]interface{}{
+						"key":   param.Key,
+						"error": err.Error(),
+					})
+				}
+			}
+		}
+
+		if err := rows.Err(); err != nil {
+			apm.log.Error("Error iterating parameter rows", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}
 	}
 
-	return &param, nil
+	return result, nil
 }
 
 // GetAllParameters retrieves all parameters
 func (apm *AppParameterManager) GetAllParameters(ctx context.Context) ([]AppParameter, error) {
 	var params []AppParameter
-	query := `SELECT id, key, value, value_type, description, created_at, updated_at 
+	query := `SELECT id, key, value, created_at, updated_at 
               FROM app_parameters ORDER BY key`
 
 	rows, err := apm.db.GetPool().Query(ctx, query)
@@ -128,8 +204,8 @@ func (apm *AppParameterManager) GetAllParameters(ctx context.Context) ([]AppPara
 	for rows.Next() {
 		var param AppParameter
 		err := rows.Scan(
-			&param.ID, &param.Key, &param.Value, &param.ValueType,
-			&param.Description, &param.CreatedAt, &param.UpdatedAt)
+			&param.ID, &param.Key, &param.Value,
+			&param.CreatedAt, &param.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan parameter: %w", err)
 		}
@@ -144,18 +220,7 @@ func (apm *AppParameterManager) GetAllParameters(ctx context.Context) ([]AppPara
 }
 
 // SetParameter creates or updates a parameter
-func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value, valueType, description string) (*AppParameter, error) {
-	// Validate value type
-	if !isValidValueType(valueType) {
-		return nil, fmt.Errorf("invalid value type: %s", valueType)
-	}
-
-	// Validate value based on type
-	if err := validateValue(value, valueType); err != nil {
-		return nil, err
-	}
-
-	// Check if parameter exists
+func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value string) (*AppParameter, error) {
 	var exists bool
 	query := `SELECT EXISTS(SELECT 1 FROM app_parameters WHERE key = $1)`
 	err := apm.db.QueryRow(ctx, query, key).Scan(&exists)
@@ -167,36 +232,31 @@ func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value, va
 	now := time.Now().UTC()
 
 	if exists {
-		// Update existing parameter
 		query = `UPDATE app_parameters 
-                SET value = $1, value_type = $2, description = $3, updated_at = $4
-                WHERE key = $5
-                RETURNING id, key, value, value_type, description, created_at, updated_at`
+                SET value = $1, updated_at = $2
+                WHERE key = $3
+                RETURNING id, key, value, created_at, updated_at`
 		err = apm.db.QueryRow(ctx, query,
-			value, valueType, description, now, key).Scan(
-			&param.ID, &param.Key, &param.Value, &param.ValueType,
-			&param.Description, &param.CreatedAt, &param.UpdatedAt)
+			value, now, key).Scan(
+			&param.ID, &param.Key, &param.Value, &param.CreatedAt, &param.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to update parameter: %w", err)
 		}
 	} else {
-		// Create new parameter
-		query = `INSERT INTO app_parameters (key, value, value_type, description, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
-                RETURNING id, key, value, value_type, description, created_at, updated_at`
+		query = `INSERT INTO app_parameters (key, value, created_at, updated_at)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id, key, value, created_at, updated_at`
 		err = apm.db.QueryRow(ctx, query,
-			key, value, valueType, description, now, now).Scan(
-			&param.ID, &param.Key, &param.Value, &param.ValueType,
-			&param.Description, &param.CreatedAt, &param.UpdatedAt)
+			key, value, now, now).Scan(
+			&param.ID, &param.Key, &param.Value,
+			&param.CreatedAt, &param.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create parameter: %w", err)
 		}
 	}
 
-	// Update Redis if available - only store the value
 	if apm.cache != nil {
 		redisKey := AppParamKeyPrefix + key
-		// Only store the value string in Redis
 		if err := apm.cache.Set(ctx, redisKey, param.Value, AppParamTTL).Err(); err != nil {
 			apm.log.Error("Failed to cache parameter in Redis", map[string]interface{}{
 				"key":   key,
@@ -204,7 +264,6 @@ func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value, va
 			})
 		}
 	}
-
 	return &param, nil
 }
 
@@ -252,142 +311,4 @@ func (apm *AppParameterManager) ParameterExists(ctx context.Context, key string)
 	}
 
 	return exists, nil
-}
-
-// GetFloat retrieves a parameter as float64
-// Returns (value, found, error) where found indicates if the parameter exists
-func (apm *AppParameterManager) GetFloat(ctx context.Context, key string) (float64, bool, error) {
-	param, err := apm.getParameter(ctx, key)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, false, nil
-		}
-		return 0, false, err
-	}
-
-	val, err := strconv.ParseFloat(param.Value, 64)
-	if err != nil {
-		return 0, true, fmt.Errorf("failed to parse float value: %w", err)
-	}
-
-	return val, true, nil
-}
-
-// GetInt retrieves a parameter as int
-// Returns (value, found, error) where found indicates if the parameter exists
-func (apm *AppParameterManager) GetInt(ctx context.Context, key string) (int, bool, error) {
-	param, err := apm.getParameter(ctx, key)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return 0, false, nil
-		}
-		return 0, false, err
-	}
-
-	val, err := strconv.Atoi(param.Value)
-	if err != nil {
-		return 0, true, fmt.Errorf("failed to parse int value: %w", err)
-	}
-
-	return val, true, nil
-}
-
-// GetBool retrieves a parameter as bool
-// Returns (value, found, error) where found indicates if the parameter exists
-func (apm *AppParameterManager) GetBool(ctx context.Context, key string) (bool, bool, error) {
-	param, err := apm.getParameter(ctx, key)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return false, false, nil
-		}
-		return false, false, err
-	}
-
-	if param.ValueType != "bool" {
-		return false, true, fmt.Errorf("parameter %s is not a bool", key)
-	}
-
-	val, err := strconv.ParseBool(param.Value)
-	if err != nil {
-		return false, true, fmt.Errorf("failed to parse bool value: %w", err)
-	}
-
-	return val, true, nil
-}
-
-// GetString retrieves a parameter as string
-// Returns (value, found, error) where found indicates if the parameter exists
-func (apm *AppParameterManager) GetString(ctx context.Context, key string) (string, bool, error) {
-	param, err := apm.getParameter(ctx, key)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-
-	if param.ValueType != "string" {
-		return "", true, fmt.Errorf("parameter %s is not a string", key)
-	}
-
-	return param.Value, true, nil
-}
-
-// GetJSON retrieves a parameter as JSON and unmarshals it into the provided interface
-// Returns (found, error) where found indicates if the parameter exists
-func (apm *AppParameterManager) GetJSON(ctx context.Context, key string, result interface{}) (bool, error) {
-	param, err := apm.getParameter(ctx, key)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
-		return false, err
-	}
-
-	if param.ValueType != "json" {
-		return true, fmt.Errorf("parameter %s is not JSON", key)
-	}
-
-	return true, json.Unmarshal([]byte(param.Value), result)
-}
-
-// Helper functions
-
-// isValidValueType checks if the provided value type is valid
-func isValidValueType(valueType string) bool {
-	validTypes := map[string]bool{
-		"float":  true,
-		"int":    true,
-		"bool":   true,
-		"string": true,
-		"json":   true,
-	}
-	return validTypes[valueType]
-}
-
-// validateValue validates a value based on its type
-func validateValue(value, valueType string) error {
-	switch valueType {
-	case "float":
-		_, err := strconv.ParseFloat(value, 64)
-		if err != nil {
-			return fmt.Errorf("invalid float value: %s", value)
-		}
-	case "int":
-		_, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid int value: %s", value)
-		}
-	case "bool":
-		_, err := strconv.ParseBool(value)
-		if err != nil {
-			return fmt.Errorf("invalid bool value: %s", value)
-		}
-	case "json":
-		var js json.RawMessage
-		if err := json.Unmarshal([]byte(value), &js); err != nil {
-			return fmt.Errorf("invalid JSON value: %s", value)
-		}
-	}
-	return nil
 }

@@ -42,6 +42,32 @@ CREATE TABLE app_parameters (
 
 CREATE INDEX IF NOT EXISTS idx_app_parameters_key ON app_parameters(key);
 
+
+CREATE TABLE positions (
+    id                  SERIAL PRIMARY KEY,
+    instrument_token    INTEGER NOT NULL,        -- Instrument token from the exchange
+    trading_symbol      VARCHAR(100) NOT NULL,   -- Trading symbol (e.g., "RELIANCE-EQ")
+    exchange           VARCHAR(50) NOT NULL,     -- Exchange (e.g., "NSE", "BSE")
+    product            VARCHAR(20) NOT NULL,     -- Product type (e.g., "NRML", "MIS", "CNC")
+    buy_value          NUMERIC(18, 4) NOT NULL,  -- Total buy value
+    buy_quantity       INTEGER NOT NULL,         -- Total buy quantity
+    sell_value         NUMERIC(18, 4) NOT NULL,  -- Total sell value
+    sell_quantity      INTEGER NOT NULL,         -- Total sell quantity
+    multiplier         NUMERIC(10, 2) NOT NULL,  -- Contract multiplier (for derivatives)
+    average_price      NUMERIC(12, 2) NOT NULL,  -- Average price of the position
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- When the position was created
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- When the position was last updated
+    paper_trading      BOOLEAN DEFAULT FALSE,    -- Whether this is a paper trade
+    
+    -- Add indexes for common query patterns
+    CONSTRAINT unique_position UNIQUE (trading_symbol, exchange, product, paper_trading)
+);
+
+-- Create index on frequently queried columns
+CREATE INDEX idx_positions_trading_symbol ON positions(trading_symbol);
+CREATE INDEX idx_positions_instrument_token ON positions(instrument_token);
+CREATE INDEX idx_positions_paper_trading ON positions(paper_trading);
+
 -- Create NIFTY ticks table
 CREATE TABLE nifty_ticks (
     id BIGSERIAL,
@@ -148,34 +174,6 @@ CREATE TABLE strategies (
     creator_id        VARCHAR(64)                   -- User who created the strategy
 );
 
-CREATE TABLE positions (
-    id                  SERIAL PRIMARY KEY,
-    position_id         VARCHAR(64),           -- Unique identifier for the position
-    trading_symbol      VARCHAR(32) NOT NULL,
-    exchange            VARCHAR(16) NOT NULL,
-    product             VARCHAR(8),            -- NRML, MIS, CNC
-    quantity            INT,                   -- Current position quantity (+ for long, - for short)
-    average_price       NUMERIC(12,2),         -- Average price of the position
-    last_price          NUMERIC(12,2),         -- Latest market price
-    pnl                 NUMERIC(12,2),         -- Current P&L
-    realized_pnl        NUMERIC(12,2),         -- Realized P&L
-    unrealized_pnl      NUMERIC(12,2),         -- Unrealized P&L
-    multiplier          NUMERIC(10,2),         -- Contract multiplier (for derivatives)
-    buy_quantity        INT,                   -- Total buy quantity
-    sell_quantity       INT,                   -- Total sell quantity
-    buy_price           NUMERIC(12,2),         -- Average buy price
-    sell_price          NUMERIC(12,2),         -- Average sell price
-    buy_value           NUMERIC(16,2),         -- Total buy value
-    sell_value          NUMERIC(16,2),         -- Total sell value
-    position_type       VARCHAR(8),            -- 'net', 'day'
-    strategy            VARCHAR(64),           -- Strategy name (e.g., 'iron_condor', 'straddle', etc.)
-    user_id             VARCHAR(64),           -- User ID
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(), -- When the position was last updated
-    paper_trading       BOOLEAN DEFAULT FALSE,  -- Whether this is a paper trade
-    kite_response       JSONB,                 -- Raw Zerodha response for audit/debug
-    strategy_id         INTEGER REFERENCES strategies(id), -- Reference to strategy table
-    UNIQUE(position_id)
-);
 
 
 -- Create strategy_pnl_timeseries table for tracking strategy P&L over time

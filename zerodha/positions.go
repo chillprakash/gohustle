@@ -21,10 +21,19 @@ import (
 )
 
 type positions struct {
-	ID              int64  `json:"id" db:"id"`
-	InstrumentToken uint32 `json:"instrument_token" db:"instrument_token"`
-	Quantity        int    `json:"quantity" db:"quantity"`
-	TradingSymbol   string `json:"trading_symbol" db:"trading_symbol"`
+	ID              int64     `json:"id" db:"id"`
+	InstrumentToken uint32    `json:"instrument_token" db:"instrument_token"`
+	TradingSymbol   string    `json:"trading_symbol" db:"trading_symbol"`
+	Exchange        string    `json:"exchange" db:"exchange"`
+	Product         string    `json:"product" db:"product"`
+	BuyValue        float64   `json:"buy_value" db:"buy_value"`
+	BuyQuantity     int       `json:"buy_quantity" db:"buy_quantity"`
+	SellValue       float64   `json:"sell_value" db:"sell_value"`
+	SellQuantity    int       `json:"sell_quantity" db:"sell_quantity"`
+	Multiplier      float64   `json:"multiplier" db:"multiplier"`
+	AveragePrice    float64   `json:"average_price" db:"average_price"`
+	CreatedAt       time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // Redis key format constants

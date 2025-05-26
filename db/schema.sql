@@ -43,7 +43,7 @@ CREATE TABLE app_parameters (
 CREATE INDEX IF NOT EXISTS idx_app_parameters_key ON app_parameters(key);
 
 
-CREATE TABLE positions (
+CREATE TABLE real_positions (
     id                  SERIAL PRIMARY KEY,
     instrument_token    INTEGER NOT NULL,        -- Instrument token from the exchange
     trading_symbol      VARCHAR(100) NOT NULL,   -- Trading symbol (e.g., "RELIANCE-EQ")
@@ -57,16 +57,21 @@ CREATE TABLE positions (
     average_price      NUMERIC(12, 2) NOT NULL,  -- Average price of the position
     created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- When the position was created
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),  -- When the position was last updated
-    paper_trading      BOOLEAN DEFAULT FALSE,    -- Whether this is a paper trade
     
     -- Add indexes for common query patterns
-    CONSTRAINT unique_position UNIQUE (trading_symbol, exchange, product, paper_trading)
+    CONSTRAINT unique_position UNIQUE (trading_symbol, exchange, product)
 );
 
 -- Create index on frequently queried columns
-CREATE INDEX idx_positions_trading_symbol ON positions(trading_symbol);
-CREATE INDEX idx_positions_instrument_token ON positions(instrument_token);
-CREATE INDEX idx_positions_paper_trading ON positions(paper_trading);
+CREATE INDEX idx_positions_trading_symbol ON real_positions(trading_symbol);
+CREATE INDEX idx_positions_instrument_token ON real_positions(instrument_token);
+
+-- Create paper_positions with the same structure as real_positions
+CREATE TABLE paper_positions (LIKE real_positions INCLUDING ALL);
+
+-- Create indexes separately since INCLUDING ALL doesn't copy them
+CREATE INDEX idx_paper_positions_trading_symbol ON paper_positions(trading_symbol);
+CREATE INDEX idx_paper_positions_instrument_token ON paper_positions(instrument_token);
 
 -- Create NIFTY ticks table
 CREATE TABLE nifty_ticks (

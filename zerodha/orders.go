@@ -296,14 +296,13 @@ func storeOrdersToDB(ctx context.Context, orders []Order) ([]string, error) {
 func processCreateOrder(req PlaceOrderRequest, indexMeta *cache.InstrumentData) (*[]OrderResponse, error) {
 	var orderResponses []OrderResponse
 	var orders []Order
+	side := SideBuy
+	if req.OrderType == OrderTypeCreateSell {
+		side = SideSell
+	}
 
 	// Handle real trading
 	if !req.PaperTrading {
-		side := SideBuy
-		if req.OrderType == OrderTypeCreateSell {
-			side = SideSell
-		}
-
 		// Place order with Zerodha
 		orderResponse, err := placeOrderAtZerodha(indexMeta, side, req.Quantity)
 		if err != nil {
@@ -344,7 +343,7 @@ func processCreateOrder(req PlaceOrderRequest, indexMeta *cache.InstrumentData) 
 		orders = []Order{*order}
 
 		positionManager := GetPositionManager()
-		positionManager.CreatePaperPositions(context.Background())
+		positionManager.CreatePaperPositions(context.Background(), order, indexMeta, side)
 	}
 
 	// Store orders in DB

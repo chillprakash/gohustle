@@ -143,10 +143,19 @@ func GetPositionManager() *PositionManager {
 	return positionInstance
 }
 
-func (pm *PositionManager) CreatePaperPositions(ctx context.Context) error {
+func (pm *PositionManager) CreatePaperPositions(ctx context.Context, order *Order, indexMeta *cache.InstrumentData, side Side) error {
 	if pm == nil || pm.positionsRedis == nil {
 		return fmt.Errorf("position manager or redis client not initialized")
 	}
+
+	return nil
+}
+
+func storePaperPositionsToDB(ctx context.Context, positions []positions) error {
+	if len(positions) == 0 {
+		return nil
+	}
+
 	return nil
 }
 

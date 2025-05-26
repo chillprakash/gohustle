@@ -20,6 +20,13 @@ import (
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
+type positions struct {
+	ID              int64  `json:"id" db:"id"`
+	InstrumentToken uint32 `json:"instrument_token" db:"instrument_token"`
+	Quantity        int    `json:"quantity" db:"quantity"`
+	TradingSymbol   string `json:"trading_symbol" db:"trading_symbol"`
+}
+
 // Redis key format constants
 const (
 	// PositionKeyFormat is the format for position keys in Redis
@@ -125,6 +132,13 @@ func GetPositionManager() *PositionManager {
 		log.Info("Position manager initialized", map[string]interface{}{})
 	})
 	return positionInstance
+}
+
+func (pm *PositionManager) CreatePaperPositions(ctx context.Context) error {
+	if pm == nil || pm.positionsRedis == nil {
+		return fmt.Errorf("position manager or redis client not initialized")
+	}
+	return nil
 }
 
 func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.Context) (map[string]CachedRedisPostitionsAndQuantity, error) {

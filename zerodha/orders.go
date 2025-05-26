@@ -130,7 +130,7 @@ type OrderResponse struct {
 	Message  string          `json:"message,omitempty"`
 }
 
-func placeSingleOrder(indexMeta cache.InstrumentData, side Side,
+func placeSingleOrder(indexMeta *cache.InstrumentData, side Side,
 	orderType appparameters.AppParameterTypes, productType appparameters.AppParameterTypes, quantity int) (*OrderResponse, error) {
 
 	orderParams := kiteconnect.OrderParams{
@@ -165,7 +165,7 @@ func placeSingleOrder(indexMeta cache.InstrumentData, side Side,
 	}, nil
 }
 
-func placeOrderAtZerodha(indexMeta cache.InstrumentData, side Side, quantity int) (*[]OrderResponse, error) {
+func placeOrderAtZerodha(indexMeta *cache.InstrumentData, side Side, quantity int) (*[]OrderResponse, error) {
 	var orderResponses []OrderResponse
 	orderManager := GetOrderManager()
 	if orderManager == nil {
@@ -227,7 +227,7 @@ func placeOrderAtZerodha(indexMeta cache.InstrumentData, side Side, quantity int
 	return &orderResponses, nil
 }
 
-func createNormalOrder(req PlaceOrderRequest, indexMeta cache.InstrumentData) (*Order, error) {
+func createNormalOrder(req PlaceOrderRequest, indexMeta *cache.InstrumentData) (*Order, error) {
 	order := &Order{
 		OrderType:       string(req.OrderType),
 		InstrumentToken: indexMeta.InstrumentToken,
@@ -293,67 +293,77 @@ func storeOrdersToDB(ctx context.Context, orders []Order) ([]string, error) {
 	return orderIDs, nil
 }
 
-func processCreateOrder(req PlaceOrderRequest, indexMeta *models.IndexMeta) (*[]OrderResponse, error) {
+func processCreateOrder(req PlaceOrderRequest, indexMeta *cache.InstrumentData) (*[]OrderResponse, error) {
 	var orderResponses []OrderResponse
-	orders := make([]Order, 0)
+	var orders []Order
+
+	// Handle real trading
 	if !req.PaperTrading {
-		if req.OrderType == OrderTypeCreateBuy {
-			orderResponse, err := placeOrderAtZerodha(indexMeta, SideBuy, req.Quantity)
-			if err != nil {
-				log.Error("Failed to place order at Zerodha", map[string]interface{}{
-					"error": err.Error(),
-				})
-				return nil, err
-			}
-			orderResponses = append(orderResponses, *orderResponse...)
-		} else {
-			orderResponse, err := placeOrderAtZerodha(indexMeta, SideSell, req.Quantity)
-			if err != nil {
-				log.Error("Failed to place order at Zerodha", map[string]interface{}{
-					"error": err.Error(),
-				})
-				return nil, err
-			}
-			orderResponses = append(orderResponses, *orderResponse...)
+		side := SideBuy
+		if req.OrderType == OrderTypeCreateSell {
+			side = SideSell
 		}
-		for _, order := range orderResponses {
+
+		// Place order with Zerodha
+		orderResponse, err := placeOrderAtZerodha(indexMeta, side, req.Quantity)
+		if err != nil {
+			log.Error("Failed to place order at Zerodha", map[string]interface{}{
+				"error":  err.Error(),
+				"side":   side,
+				"symbol": indexMeta.TradingSymbol,
+			})
+			return nil, fmt.Errorf("failed to place %s order: %w", side, err)
+		}
+		orderResponses = *orderResponse
+
+		// Prepare orders for DB storage
+		orders = make([]Order, 0, len(orderResponses))
+		for _, resp := range orderResponses {
 			orders = append(orders, Order{
-				ExternalOrderID:    order.OrderID,
+				ExternalOrderID:    resp.OrderID,
 				OrderType:          string(req.OrderType),
 				InstrumentToken:    indexMeta.InstrumentToken,
 				TradingSymbol:      indexMeta.TradingSymbol,
 				Quantity:           req.Quantity,
-				PaperTrading:       req.PaperTrading,
+				PaperTrading:       false,
 				CreatedAt:          time.Now(),
-				PayloadToBroker:    order.Payload,
-				ResponseFromBroker: order.Response,
+				PayloadToBroker:    resp.Payload,
+				ResponseFromBroker: resp.Response,
 			})
 		}
 	} else {
+		// Handle paper trading
 		order, err := createNormalOrder(req, indexMeta)
 		if err != nil {
-			log.Error("Failed to create normal order", map[string]interface{}{
-				"error": err.Error(),
+			log.Error("Failed to create paper order", map[string]interface{}{
+				"error":  err.Error(),
+				"symbol": indexMeta.TradingSymbol,
 			})
-			return nil, err
+			return nil, fmt.Errorf("failed to create paper order: %w", err)
 		}
-		orders = append(orders, *order)
-	}
-	_, err := storeOrdersToDB(context.Background(), orders)
-	if err != nil {
-		log.Error("Failed to store paper trading orders", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, fmt.Errorf("failed to store paper trading orders: %w", err)
+		orders = []Order{*order}
+
+		positionManager := GetPositionManager()
+		positionManager.CreatePaperPositions(context.Background())
 	}
 
-	// Create a clean response without sensitive/verbose fields
+	// Store orders in DB
+	if _, err := storeOrdersToDB(context.Background(), orders); err != nil {
+		log.Error("Failed to store orders", map[string]interface{}{
+			"error":  err.Error(),
+			"paper":  req.PaperTrading,
+			"symbol": indexMeta.TradingSymbol,
+		})
+		return nil, fmt.Errorf("failed to store orders: %w", err)
+	}
+
+	// Prepare clean response
 	cleanResponses := make([]OrderResponse, 0, len(orderResponses))
-	for _, order := range orderResponses {
+	for _, resp := range orderResponses {
 		cleanResponses = append(cleanResponses, OrderResponse{
-			OrderID: order.OrderID,
-			Status:  order.Status,
-			Message: order.Message,
+			OrderID: resp.OrderID,
+			Status:  resp.Status,
+			Message: resp.Message,
 		})
 	}
 
@@ -381,11 +391,11 @@ func PlaceOrder(req PlaceOrderRequest) (*[]OrderResponse, error) {
 	}
 
 	if req.OrderType == OrderTypeCreateBuy || req.OrderType == OrderTypeCreateSell {
-		processCreateOrder(req, indexMeta)
+		processCreateOrder(req, &indexMeta)
 	}
 
 	if req.OrderType == OrderTypeModifyAway || req.OrderType == OrderTypeModifyCloser {
-		processModifyOrder(req, indexMeta)
+		processModifyOrder(req, &indexMeta)
 	}
 	return nil, nil
 }

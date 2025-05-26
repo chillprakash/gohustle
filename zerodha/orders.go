@@ -399,7 +399,7 @@ func PlaceOrder(req PlaceOrderRequest) (*[]OrderResponse, error) {
 	return nil, nil
 }
 
-func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *models.IndexMeta) (*OrderResponse, error) {
+func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *cache.InstrumentData) (*OrderResponse, error) {
 	positionsManager := GetPositionManager()
 	positions, err := positionsManager.GetOpenPositionTokensVsQuanityFromRedis(context.Background())
 	if err != nil {
@@ -411,9 +411,9 @@ func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *models.I
 
 	for _, position := range positions {
 		if position.InstrumentToken == utils.Uint32ToString(indexMeta.InstrumentToken) {
-			existingQuantity := position.Quantity
+			// existingQuantity := position.Quantity
 			if placeOrderRequest.OrderType == OrderTypeModifyAway {
-				strikeToMove, err := calculateStrikeToMove(placeOrderRequest, indexMeta, existingQuantity)
+
 				if err != nil {
 					log.Error("Failed to calculate strike to move", map[string]interface{}{
 						"error": err.Error(),
@@ -427,25 +427,5 @@ func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *models.I
 			}
 		}
 	}
-
-}
-
-func calculateStrikeToMove(placeOrderRequest PlaceOrderRequest, indexMeta *models.IndexMeta) (int, error) {
-	if placeOrderRequest.OrderType == OrderTypeModifyAway {
-		if placeOrderRequest.Side == SideBuy {
-			return indexMeta.Strike + placeOrderRequest.Quantity, nil
-		}
-		if placeOrderRequest.Side == SideSell {
-			return indexMeta.Strike - placeOrderRequest.Quantity, nil
-		}
-	}
-	if placeOrderRequest.OrderType == OrderTypeModifyCloser {
-		if placeOrderRequest.Side == SideBuy {
-			return indexMeta.Strike + placeOrderRequest.Quantity, nil
-		}
-		if placeOrderRequest.Side == SideSell {
-			return indexMeta.Strike - placeOrderRequest.Quantity, nil
-		}
-	}
-	return 0, nil
+	return nil, nil
 }

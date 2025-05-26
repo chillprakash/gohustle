@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"gohustle/appparameters"
 	"gohustle/cache"
 	"gohustle/core"
 	"gohustle/db"
@@ -745,18 +746,15 @@ func (s *APIServer) handleExitAllPositions(w http.ResponseWriter, r *http.Reques
 
 // handleGetPnLParams returns the current P&L parameters
 func (s *APIServer) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
-	// Get PnL manager
-	pnlManager := zerodha.GetPnLManager()
-
 	// Get parameters with proper error handling
-	exitPnL, _, err := pnlManager.AppParamManager().GetFloat(r.Context(), "exit_pnl")
+	exitPnL, err := appparameters.GetAppParameterManager().GetParameter(r.Context(), appparameters.AppParamExitPNL)
 	if err != nil {
 		s.log.Error("Failed to get exit_pnl parameter", map[string]interface{}{"error": err.Error()})
 		sendErrorResponse(w, "Failed to retrieve exit P&L parameter", http.StatusInternalServerError)
 		return
 	}
 
-	targetPnL, _, err := pnlManager.AppParamManager().GetFloat(r.Context(), "target_pnl")
+	targetPnL, err := appparameters.GetAppParameterManager().GetParameter(r.Context(), appparameters.AppParamTargetPNL)
 	if err != nil {
 		s.log.Error("Failed to get target_pnl parameter", map[string]interface{}{"error": err.Error()})
 		sendErrorResponse(w, "Failed to retrieve target P&L parameter", http.StatusInternalServerError)
@@ -766,8 +764,8 @@ func (s *APIServer) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, PnLParamsResponse{
 		Success: true,
 		Data: PnLParams{
-			ExitPnL:   exitPnL,
-			TargetPnL: targetPnL,
+			ExitPnL:   utils.StringToFloat64(exitPnL.Value),
+			TargetPnL: utils.StringToFloat64(targetPnL.Value),
 		},
 	})
 }
@@ -787,34 +785,33 @@ func (s *APIServer) handleUpdatePnLParams(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Get PnL manager
-	pnlManager := zerodha.GetPnLManager()
-
 	// Update exit_pnl if provided
 	if req.ExitPnL != nil {
-		if err := pnlManager.SetExitPnL(r.Context(), *req.ExitPnL); err != nil {
-			sendErrorResponse(w, fmt.Sprintf("Failed to update exit P&L: %v", err), http.StatusInternalServerError)
-			return
-		}
+		appparameters.GetAppParameterManager().SetParameter(r.Context(), appparameters.AppParamExitPNL, fmt.Sprintf("%f", *req.ExitPnL))
 	}
 
 	// Update target_pnl if provided
 	if req.TargetPnL != nil {
-		if err := pnlManager.SetTargetPnL(r.Context(), *req.TargetPnL); err != nil {
-			sendErrorResponse(w, fmt.Sprintf("Failed to update target P&L: %v", err), http.StatusInternalServerError)
-			return
-		}
+		appparameters.GetAppParameterManager().SetParameter(r.Context(), appparameters.AppParamTargetPNL, fmt.Sprintf("%f", *req.TargetPnL))
 	}
 
 	// Get updated parameters
-	exitPnL, _, _ := pnlManager.AppParamManager().GetFloat(r.Context(), "exit_pnl")
-	targetPnL, _, _ := pnlManager.AppParamManager().GetFloat(r.Context(), "target_pnl")
+	exitPnL, err := appparameters.GetAppParameterManager().GetParameter(r.Context(), appparameters.AppParamExitPNL)
+	if err != nil {
+		sendErrorResponse(w, fmt.Sprintf("Failed to get exit P&L: %v", err), http.StatusInternalServerError)
+		return
+	}
+	targetPnL, err := appparameters.GetAppParameterManager().GetParameter(r.Context(), appparameters.AppParamTargetPNL)
+	if err != nil {
+		sendErrorResponse(w, fmt.Sprintf("Failed to get target P&L: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	sendJSONResponse(w, PnLParamsResponse{
 		Success: true,
 		Data: PnLParams{
-			ExitPnL:   exitPnL,
-			TargetPnL: targetPnL,
+			ExitPnL:   utils.StringToFloat64(exitPnL.Value),
+			TargetPnL: utils.StringToFloat64(targetPnL.Value),
 		},
 	})
 }

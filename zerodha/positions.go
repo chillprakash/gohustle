@@ -16,6 +16,7 @@ import (
 	"gohustle/logger"
 	"gohustle/utils"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
@@ -147,16 +148,128 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, order *Orde
 	if pm == nil || pm.positionsRedis == nil {
 		return fmt.Errorf("position manager or redis client not initialized")
 	}
+	orderManager := GetOrderManager()
+	productType := orderManager.orderAppParameters.ProductType
 
+	cacheMeta, err := cache.GetCacheMetaInstance()
+	if err != nil {
+		return err
+	}
+	ltpData, err := cacheMeta.GetLTPforInstrumentToken(ctx, utils.Uint32ToString(indexMeta.InstrumentToken))
+	if err != nil {
+		return err
+	}
+
+	position := positions{
+		InstrumentToken: indexMeta.InstrumentToken,
+		TradingSymbol:   indexMeta.TradingSymbol,
+		Exchange:        indexMeta.Exchange,
+		Product:         string(productType),
+		Multiplier:      1,
+		AveragePrice:    ltpData.LTP,
+	}
+
+	if side == SideBuy {
+		position.BuyQuantity = order.Quantity
+		position.BuyValue = float64(order.Quantity) * ltpData.LTP
+
+	} else {
+		position.SellQuantity = order.Quantity
+		position.SellValue = float64(order.Quantity) * ltpData.LTP
+	}
+
+	storePositionsToDB(ctx, []positions{position}, true)
 	return nil
 }
 
-func storePaperPositionsToDB(ctx context.Context, positions []positions) error {
+// storePositionsToDB stores positions in the appropriate table based on paperTrading flag
+func storePositionsToDB(ctx context.Context, positions []positions, paperTrading bool) ([]int64, error) {
 	if len(positions) == 0 {
-		return nil
+		return []int64{}, nil
 	}
 
-	return nil
+	timescaleDB := db.GetTimescaleDB()
+	if timescaleDB == nil {
+		return nil, fmt.Errorf("failed to get database instance")
+	}
+
+	// Determine the target table
+	tableName := "real_positions"
+	if paperTrading {
+		tableName = "paper_positions"
+	}
+
+	positionIDs := make([]int64, 0, len(positions))
+
+	// Use WithTx for automatic transaction management
+	err := timescaleDB.WithTx(ctx, func(tx pgx.Tx) error {
+		// Use COPY command for bulk insert
+		_, err := tx.CopyFrom(
+			ctx,
+			pgx.Identifier{tableName},
+			[]string{
+				"instrument_token", "trading_symbol", "exchange", "product",
+				"buy_value", "buy_quantity", "sell_value", "sell_quantity",
+				"multiplier", "average_price", "created_at", "updated_at",
+			},
+			pgx.CopyFromSlice(len(positions), func(i int) ([]interface{}, error) {
+				pos := positions[i]
+				now := time.Now()
+				return []interface{}{
+					pos.InstrumentToken,
+					pos.TradingSymbol,
+					pos.Exchange,
+					pos.Product,
+					pos.BuyValue,
+					pos.BuyQuantity,
+					pos.SellValue,
+					pos.SellQuantity,
+					pos.Multiplier,
+					pos.AveragePrice,
+					now, // created_at
+					now, // updated_at
+				}, nil
+			}),
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert positions into %s: %w", tableName, err)
+		}
+
+		// Get the inserted IDs
+		if len(positions) > 0 {
+			rows, err := tx.Query(ctx,
+				fmt.Sprintf("SELECT id FROM %s WHERE trading_symbol = $1 AND exchange = $2 AND product = $3 ORDER BY created_at DESC LIMIT $4", tableName),
+				positions[0].TradingSymbol,
+				positions[0].Exchange,
+				positions[0].Product,
+				len(positions),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to fetch inserted position IDs: %w", err)
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					return fmt.Errorf("failed to scan position ID: %w", err)
+				}
+				positionIDs = append(positionIDs, id)
+			}
+
+			if err = rows.Err(); err != nil {
+				return fmt.Errorf("error iterating position IDs: %w", err)
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("transaction failed: %w", err)
+	}
+
+	return positionIDs, nil
 }
 
 func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.Context) (map[string]CachedRedisPostitionsAndQuantity, error) {

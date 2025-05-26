@@ -220,7 +220,7 @@ func (apm *AppParameterManager) GetAllParameters(ctx context.Context) ([]AppPara
 }
 
 // SetParameter creates or updates a parameter
-func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value string) (*AppParameter, error) {
+func (apm *AppParameterManager) SetParameter(ctx context.Context, key AppParameterTypes, value string) (*AppParameter, error) {
 	var exists bool
 	query := `SELECT EXISTS(SELECT 1 FROM app_parameters WHERE key = $1)`
 	err := apm.db.QueryRow(ctx, query, key).Scan(&exists)
@@ -256,7 +256,7 @@ func (apm *AppParameterManager) SetParameter(ctx context.Context, key, value str
 	}
 
 	if apm.cache != nil {
-		redisKey := AppParamKeyPrefix + key
+		redisKey := AppParamKeyPrefix + string(key)
 		if err := apm.cache.Set(ctx, redisKey, param.Value, AppParamTTL).Err(); err != nil {
 			apm.log.Error("Failed to cache parameter in Redis", map[string]interface{}{
 				"key":   key,

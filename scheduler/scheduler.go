@@ -178,26 +178,6 @@ func InitializePositionPolling(ctx context.Context) {
 	scheduler.Start(ctx)
 }
 
-// InitializeOrderPolling sets up order polling task
-func InitializeOrderPolling(ctx context.Context) {
-	scheduler := GetScheduler()
-	orderManager := zerodha.GetOrderManager()
-
-	task := &Task{
-		Name:     "OrderPolling",
-		Interval: time.Second, // Poll orders at the same frequency as positions
-		Execute: func(ctx context.Context) error {
-			if !isMarketOpen() {
-				return nil
-			}
-			return orderManager.PollOrdersAndUpdateInRedis(ctx)
-		},
-	}
-
-	scheduler.AddTask(task)
-	scheduler.Start(ctx)
-}
-
 // InitializePnLCalculation sets up periodic P&L calculation
 func InitializePnLCalculation(ctx context.Context) {
 	scheduler := GetScheduler()

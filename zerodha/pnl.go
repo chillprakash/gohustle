@@ -10,6 +10,7 @@ import (
 	"gohustle/cache"
 	"gohustle/db"
 	"gohustle/logger"
+	"gohustle/utils"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -319,32 +320,22 @@ func (pm *PnLManager) SchedulePnLCalculation(ctx context.Context, intervalSecond
 	})
 }
 
-// Note: High-frequency P&L tracking has been replaced by strategy-level P&L tracking
-
-// SetExitPnL sets the exit P&L percentage
-func (pm *PnLManager) SetExitPnL(ctx context.Context, pnl float64) error {
-	_, err := pm.appParamManager.SetParameter(ctx, "exit_pnl", fmt.Sprintf("%.2f", pnl), "float", "Exit P&L percentage")
-	if err != nil {
-		return fmt.Errorf("failed to set exit P&L: %w", err)
-	}
-	return nil
-}
-
 func (pm *PnLManager) GetExitPnL(ctx context.Context) (float64, bool, error) {
-	return pm.appParamManager.GetFloat(ctx, "exit_pnl")
+	param, err := pm.appParamManager.GetParameter(ctx, appparameters.AppParamExitPNL)
+	if err != nil {
+		return 0, false, err
+	}
+	value := utils.StringToFloat64(param.Value)
+	return value, true, nil
 }
 
 func (pm *PnLManager) GetTargetPnL(ctx context.Context) (float64, bool, error) {
-	return pm.appParamManager.GetFloat(ctx, "target_pnl")
-}
-
-// SetTargetPnL sets the target P&L percentage
-func (pm *PnLManager) SetTargetPnL(ctx context.Context, pnl float64) error {
-	_, err := pm.appParamManager.SetParameter(ctx, "target_pnl", fmt.Sprintf("%.2f", pnl), "float", "Target P&L percentage")
+	param, err := pm.appParamManager.GetParameter(ctx, appparameters.AppParamTargetPNL)
 	if err != nil {
-		return fmt.Errorf("failed to set target P&L: %w", err)
+		return 0, false, err
 	}
-	return nil
+	value := utils.StringToFloat64(param.Value)
+	return value, true, nil
 }
 
 // CalculateAndStorePositionPnL calculates and stores P&L for all positions

@@ -19,15 +19,16 @@ import (
 
 // Order represents a trading order in the system
 type Order struct {
-	ID              int64           `json:"id" db:"id"`
-	ExternalOrderID string          `json:"external_order_id" db:"external_order_id"`
-	OrderType       string          `json:"order_type" db:"order_type"`
-	InstrumentToken uint32          `json:"instrument_token" db:"instrument_token"`
-	TradingSymbol   string          `json:"trading_symbol" db:"trading_symbol"`
-	Quantity        int             `json:"quantity" db:"quantity"`
-	PaperTrading    bool            `json:"paper_trading" db:"paper_trading"`
-	CreatedAt       time.Time       `json:"created_at" db:"created_at"`
-	PayloadToBroker json.RawMessage `json:"payload_to_broker" db:"payload_to_broker"`
+	ID                 int64           `json:"id" db:"id"`
+	ExternalOrderID    string          `json:"external_order_id" db:"external_order_id"`
+	OrderType          string          `json:"order_type" db:"order_type"`
+	InstrumentToken    uint32          `json:"instrument_token" db:"instrument_token"`
+	TradingSymbol      string          `json:"trading_symbol" db:"trading_symbol"`
+	Quantity           int             `json:"quantity" db:"quantity"`
+	PaperTrading       bool            `json:"paper_trading" db:"paper_trading"`
+	CreatedAt          time.Time       `json:"created_at" db:"created_at"`
+	PayloadToBroker    json.RawMessage `json:"payload_to_broker" db:"payload_to_broker"`
+	ResponseFromBroker json.RawMessage `json:"response_from_broker" db:"response_from_broker"`
 }
 
 // TableName specifies the database table name for GORM
@@ -122,21 +123,23 @@ func GetOrderManager() *OrderManager {
 // OrderResponse represents a simplified response for order placement
 // (expand as needed for your UI)
 type OrderResponse struct {
-	OrderID string `json:"order_id"`
-	Status  string `json:"status"`
-	Message string `json:"message,omitempty"`
+	OrderID  string          `json:"order_id"`
+	Status   string          `json:"status"`
+	Payload  json.RawMessage `json:"payload,omitempty"`
+	Response json.RawMessage `json:"response,omitempty"`
+	Message  string          `json:"message,omitempty"`
 }
 
-func placeSingleOrder(order *Order, indexMeta cache.InstrumentData, side Side,
-	orderType string, productType string) (*OrderResponse, error) {
+func placeSingleOrder(indexMeta cache.InstrumentData, side Side,
+	orderType appparameters.AppParameterTypes, productType appparameters.AppParameterTypes, quantity int) (*OrderResponse, error) {
 
 	orderParams := kiteconnect.OrderParams{
 		Exchange:        indexMeta.Exchange,
-		Tradingsymbol:   order.TradingSymbol,
-		Product:         productType,
-		OrderType:       orderType,
+		Tradingsymbol:   indexMeta.TradingSymbol,
+		Product:         string(productType),
+		OrderType:       string(orderType),
 		TransactionType: string(side),
-		Quantity:        order.Quantity,
+		Quantity:        quantity,
 	}
 
 	orderResponse, err := GetOrderManager().kite.Kite.PlaceOrder("regular", orderParams)
@@ -144,62 +147,84 @@ func placeSingleOrder(order *Order, indexMeta cache.InstrumentData, side Side,
 		return nil, fmt.Errorf("failed to place order: %w", err)
 	}
 
+	payload, err := json.Marshal(orderParams)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal order params: %w", err)
+	}
+
+	response, err := json.Marshal(orderResponse)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal order response: %w", err)
+	}
+
 	return &OrderResponse{
-		OrderID: orderResponse.OrderID,
-		Status:  "success",
+		OrderID:  orderResponse.OrderID,
+		Status:   "success",
+		Payload:  payload,
+		Response: response,
 	}, nil
 }
 
-func placeOrderAtZerodha(order *Order, indexMeta cache.InstrumentData, side Side) (*OrderResponse, error) {
+func placeOrderAtZerodha(indexMeta cache.InstrumentData, side Side, quantity int) (*[]OrderResponse, error) {
+	var orderResponses []OrderResponse
 	orderManager := GetOrderManager()
 	if orderManager == nil {
 		return nil, fmt.Errorf("order manager not initialized")
 	}
+
 	appParameterManager := appparameters.GetAppParameterManager()
 	if appParameterManager == nil {
 		return nil, fmt.Errorf("app parameter manager not initialized")
 	}
+
 	orderType := orderManager.orderAppParameters.OrderType
 	productType := orderManager.orderAppParameters.ProductType
+	freezeLimit := indexMeta.Name.GetUnitsPerLot()
 
-	if limit := indexMeta.Name.GetUnitsPerLot(); order.Quantity < limit {
-		orderParams := kiteconnect.OrderParams{
-			Exchange:        indexMeta.Exchange,
-			Tradingsymbol:   order.TradingSymbol,
-			Product:         string(productType),
-			OrderType:       string(orderType),
-			TransactionType: string(side),
-			Quantity:        order.Quantity,
-		}
-		orderResponse, err := orderManager.kite.Kite.PlaceOrder("regular", orderParams)
+	// For quantities within limit, place a single order
+	if quantity <= freezeLimit {
+		orderResponse, err := placeSingleOrder(indexMeta, side, orderType, productType, quantity)
 		if err != nil {
-			return nil, fmt.Errorf("failed to place order: %w", err)
+			return nil, err
 		}
-		return &OrderResponse{
-			OrderID: orderResponse.OrderID,
-			Status:  "success",
-		}, nil
-	} else if order.Quantity > limit {
-		icebergParams := populateIcebergParams(order, indexMeta, side, limit)
-		orderParams := kiteconnect.OrderParams{
-			Exchange:        indexMeta.Exchange,
-			Tradingsymbol:   order.TradingSymbol,
-			Product:         string(productType),
-			OrderType:       string(orderType),
-			TransactionType: string(side),
-			IcebergQty:      icebergParams.IcebergQty,
-			IcebergLegs:     icebergParams.IcebergLegs,
-		}
-		orderResponse, err := orderManager.kite.Kite.PlaceOrder("iceberg", orderParams)
-		if err != nil {
-			return nil, fmt.Errorf("failed to place order: %w", err)
-		}
-		return &OrderResponse{
-			OrderID: orderResponse.OrderID,
-			Status:  "success",
-		}, nil
+		orderResponses = append(orderResponses, *orderResponse)
+		return &orderResponses, nil
 	}
-	return nil, fmt.Errorf("order quantity exceeds freeze limit")
+	remainingQty := quantity
+
+	// Calculate number of full lots and remaining quantity
+	fullLots := remainingQty / freezeLimit
+	remainingQty = remainingQty % freezeLimit
+
+	// Place full lot orders
+	for i := 0; i < fullLots; i++ {
+		resp, err := placeSingleOrder(indexMeta, side, orderType, productType, freezeLimit)
+
+		if err != nil {
+			orderManager.log.Error("Failed to place partial order", map[string]interface{}{
+				"error":    err.Error(),
+				"quantity": freezeLimit,
+			})
+			continue
+		}
+		orderResponses = append(orderResponses, *resp)
+	}
+
+	// Place remaining quantity if any
+	if remainingQty > 0 {
+		resp, err := placeSingleOrder(indexMeta, side, orderType, productType, remainingQty)
+
+		if err == nil {
+			orderResponses = append(orderResponses, *resp)
+		} else {
+			orderManager.log.Error("Failed to place remaining order", map[string]interface{}{
+				"error":    err.Error(),
+				"quantity": remainingQty,
+			})
+		}
+	}
+
+	return &orderResponses, nil
 }
 
 func createNormalOrder(req PlaceOrderRequest, indexMeta cache.InstrumentData) (*Order, error) {
@@ -268,12 +293,78 @@ func storeOrdersToDB(ctx context.Context, orders []Order) ([]string, error) {
 	return orderIDs, nil
 }
 
+func processCreateOrder(req PlaceOrderRequest, indexMeta *models.IndexMeta) (*[]OrderResponse, error) {
+	var orderResponses []OrderResponse
+	orders := make([]Order, 0)
+	if !req.PaperTrading {
+		if req.OrderType == OrderTypeCreateBuy {
+			orderResponse, err := placeOrderAtZerodha(indexMeta, SideBuy, req.Quantity)
+			if err != nil {
+				log.Error("Failed to place order at Zerodha", map[string]interface{}{
+					"error": err.Error(),
+				})
+				return nil, err
+			}
+			orderResponses = append(orderResponses, *orderResponse...)
+		} else {
+			orderResponse, err := placeOrderAtZerodha(indexMeta, SideSell, req.Quantity)
+			if err != nil {
+				log.Error("Failed to place order at Zerodha", map[string]interface{}{
+					"error": err.Error(),
+				})
+				return nil, err
+			}
+			orderResponses = append(orderResponses, *orderResponse...)
+		}
+		for _, order := range orderResponses {
+			orders = append(orders, Order{
+				ExternalOrderID:    order.OrderID,
+				OrderType:          string(req.OrderType),
+				InstrumentToken:    indexMeta.InstrumentToken,
+				TradingSymbol:      indexMeta.TradingSymbol,
+				Quantity:           req.Quantity,
+				PaperTrading:       req.PaperTrading,
+				CreatedAt:          time.Now(),
+				PayloadToBroker:    order.Payload,
+				ResponseFromBroker: order.Response,
+			})
+		}
+	} else {
+		order, err := createNormalOrder(req, indexMeta)
+		if err != nil {
+			log.Error("Failed to create normal order", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return nil, err
+		}
+		orders = append(orders, *order)
+	}
+	_, err := storeOrdersToDB(context.Background(), orders)
+	if err != nil {
+		log.Error("Failed to store paper trading orders", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to store paper trading orders: %w", err)
+	}
+
+	// Create a clean response without sensitive/verbose fields
+	cleanResponses := make([]OrderResponse, 0, len(orderResponses))
+	for _, order := range orderResponses {
+		cleanResponses = append(cleanResponses, OrderResponse{
+			OrderID: order.OrderID,
+			Status:  order.Status,
+			Message: order.Message,
+		})
+	}
+
+	return &cleanResponses, nil
+}
+
 // PlaceOrder places a regular order using the Kite Connect API
 // Automatically handles iceberg orders if quantity exceeds exchange limits
-func PlaceOrder(req PlaceOrderRequest) (*OrderResponse, error) {
+func PlaceOrder(req PlaceOrderRequest) (*[]OrderResponse, error) {
 	log := logger.L()
 	cacheMeta, err := cache.GetCacheMetaInstance()
-	var orders []Order
 	if err != nil {
 		log.Error("Failed to get cache meta", map[string]interface{}{
 			"error": err.Error(),
@@ -290,35 +381,7 @@ func PlaceOrder(req PlaceOrderRequest) (*OrderResponse, error) {
 	}
 
 	if req.OrderType == OrderTypeCreateBuy || req.OrderType == OrderTypeCreateSell {
-		order, err := createNormalOrder(req, indexMeta)
-		if err != nil {
-			log.Error("Failed to create order", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, err
-		}
-
-		orders = append(orders, *order)
-		orderIDs, err := storeOrdersToDB(context.Background(), orders)
-		if err != nil {
-			log.Error("Failed to store paper trading orders", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, fmt.Errorf("failed to store paper trading orders: %w", err)
-		}
-
-		if !req.PaperTrading {
-			if req.OrderType == OrderTypeCreateBuy {
-				placeOrderAtZerodha(order, indexMeta, SideBuy)
-			} else {
-				placeOrderAtZerodha(order, indexMeta, SideSell)
-			}
-		}
-
-		return &OrderResponse{
-			OrderID: orderIDs[0],
-			Status:  "success",
-		}, nil
+		processCreateOrder(req, indexMeta)
 	}
 
 	if req.OrderType == OrderTypeModifyAway || req.OrderType == OrderTypeModifyCloser {

@@ -1444,7 +1444,7 @@ func convertMetadataToInstrumentData(metadata string, token string) (InstrumentD
 	return inst, nil
 }
 
-func (c *CacheMeta) GetInstrumentTokenForStrike(ctx context.Context, strike float64, instrumentType, expiry string) (string, error) {
+func (c *CacheMeta) GetInstrumentTokenForStrike(ctx context.Context, strike float64, instrumentType InstrumentType, expiry string) (string, error) {
 	// Format the strike as an integer string without decimal
 	strikeStr := utils.RemoveDecimal(fmt.Sprintf("%v", strike))
 

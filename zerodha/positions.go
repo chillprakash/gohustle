@@ -47,9 +47,10 @@ const (
 )
 
 type PositionManager struct {
-	kite           *KiteConnect
-	log            *logger.Logger
-	positionsRedis *redis.Client
+	kite              *KiteConnect
+	log               *logger.Logger
+	positionsRedis    *redis.Client
+	cacheMetaInstance *cache.CacheMeta
 }
 
 type PositionSummary struct {
@@ -116,6 +117,7 @@ func GetPositionManager() *PositionManager {
 		log := logger.L()
 		kite := GetKiteConnect()
 		redisCache, err := cache.GetRedisCache()
+		cacheMetaInstance, err := cache.GetCacheMetaInstance()
 		if err != nil {
 			log.Error("Failed to get Redis cache", map[string]interface{}{
 				"error": err.Error(),
@@ -128,9 +130,10 @@ func GetPositionManager() *PositionManager {
 		}
 
 		positionInstance = &PositionManager{
-			log:            log,
-			kite:           kite,
-			positionsRedis: redisCache.GetPositionsDB2(),
+			log:               log,
+			kite:              kite,
+			positionsRedis:    redisCache.GetPositionsDB2(),
+			cacheMetaInstance: cacheMetaInstance,
 		}
 		log.Info("Position manager initialized", map[string]interface{}{})
 	})
@@ -663,24 +666,20 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 			continue
 		}
 
-		// Get option type
-		optionType := getOptionType(dbPos.TradingSymbol)
-
-		instrumentToken, _ := cacheMeta.GetTokenBySymbol(ctx, dbPos.TradingSymbol)
-		ltpStruct, _ := cacheMeta.GetLTPforInstrumentTokensList(ctx, []string{instrumentToken})
-		tokenMeta, _ := cacheMeta.GetMetadataOfToken(ctx, instrumentToken)
+		ltpStruct, _ := cacheMeta.GetLTPforInstrumentToken(ctx, utils.Uint32ToString(dbPos.InstrumentToken))
+		tokenMeta, _ := cacheMeta.GetMetadataOfToken(ctx, utils.Uint32ToString(dbPos.InstrumentToken))
 
 		// Create a kiteconnect.Position from the db.PositionRecord for move calculation
 		pseudoPos := kiteconnect.Position{
 			Tradingsymbol:   dbPos.TradingSymbol,
 			Exchange:        dbPos.Exchange,
-			InstrumentToken: utils.StringToUint32(instrumentToken),
+			InstrumentToken: dbPos.InstrumentToken,
 			Product:         dbPos.Product,
-			Quantity:        dbPos.Quantity,
+			Quantity:        dbPos.BuyQuantity - dbPos.SellQuantity,
 			AveragePrice:    dbPos.AveragePrice,
-			LastPrice:       ltpStruct[0].LTP,
+			LastPrice:       ltpStruct.LTP,
 			ClosePrice:      0,
-			PnL:             dbPos.PnL,
+			PnL:             0,
 			M2M:             0,
 			Multiplier:      dbPos.Multiplier,
 			BuyQuantity:     dbPos.BuyQuantity,
@@ -695,21 +694,20 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 			TradingSymbol:   dbPos.TradingSymbol,
 			Strike:          utils.StringToFloat64(tokenMeta.StrikePrice),
 			Expiry:          tokenMeta.Expiry,
-			OptionType:      optionType,
-			Quantity:        int64(dbPos.Quantity),
+			OptionType:      string(tokenMeta.InstrumentType),
+			Quantity:        int64(dbPos.BuyQuantity - dbPos.SellQuantity),
 			AveragePrice:    dbPos.AveragePrice,
 			BuyPrice:        dbPos.BuyPrice,
 			SellPrice:       dbPos.SellPrice,
-			LTP:             ltpStruct[0].LTP,
-			Diff:            ltpStruct[0].LTP - dbPos.AveragePrice,
-			Value:           math.Abs(float64(dbPos.Quantity) * dbPos.AveragePrice),
-			PaperTrading:    dbPos.PaperTrading,
+			LTP:             ltpStruct.LTP,
+			Diff:            ltpStruct.LTP - dbPos.AveragePrice,
+			Value:           math.Abs(float64(dbPos.BuyQuantity-dbPos.SellQuantity) * dbPos.AveragePrice),
 			InstrumentToken: tokenMeta.Token,
-			Moves:           pm.calculateMoves(ctx, pseudoPos, utils.StringToFloat64(tokenMeta.StrikePrice), tokenMeta.Expiry),
+			Moves:           pm.calculateMoves(ctx, pseudoPos, tokenMeta),
 		}
 
 		// Calculate position value (original capital deployed)
-		quantity := float64(dbPos.Quantity)
+		quantity := float64(dbPos.BuyQuantity - dbPos.SellQuantity)
 		positionValue := math.Abs(quantity * dbPos.AveragePrice)
 
 		// Calculate position values based on option premium perspective
@@ -747,11 +745,11 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 			"position_value": positionValue,
 			"pending_value":  pendingValue,
 			"pnl":            pnl,
-			"position_type":  optionType,
+			"position_type":  tokenMeta.InstrumentType,
 		})
 
 		// Update summary based on option type
-		if optionType == "CE" {
+		if tokenMeta.InstrumentType == "CE" {
 			analysis.Summary.TotalCallValue += positionValue
 			analysis.Summary.TotalCallPending += pendingValue
 		} else {
@@ -760,12 +758,11 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 		}
 
 		// Separate open and closed positions
-		if dbPos.Quantity != 0 {
+		if quantity != 0 {
 			analysis.OpenPositions = append(analysis.OpenPositions, detailedPos)
 		} else {
 			analysis.ClosedPositions = append(analysis.ClosedPositions, detailedPos)
 		}
-
 	}
 
 	// Calculate totals
@@ -830,97 +827,82 @@ func (pm *PositionManager) getInstrumentTokenForStrike(ctx context.Context, stri
 	return ""
 }
 
-func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.Position, strike float64, expiryDate string) MoveSuggestions {
+// calculateMoves calculates potential position adjustment moves
+func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.Position, tokenMeta cache.InstrumentData) MoveSuggestions {
 	moves := MoveSuggestions{
-		Away:   make([]MoveStep, 0),
-		Closer: make([]MoveStep, 0),
+		Away:   make([]MoveStep, 0, 3), // Pre-allocate based on expected max moves
+		Closer: make([]MoveStep, 0, 3),
 	}
-	cacheMetaInstance, err := cache.GetCacheMetaInstance()
-	if err != nil {
-		pm.log.Error("Failed to get cache meta instance for move", map[string]interface{}{
-			"error": err.Error(),
-		})
+
+	if pm.cacheMetaInstance == nil {
+		pm.log.Error("Failed to get cache meta instance for move calculation",
+			map[string]interface{}{"error": "cache meta instance not initialized"})
 		return moves
 	}
-	// Calculate steps for position adjustment
+
 	steps := []string{"1/4", "1/2", "1"}
+	strikeGap := float64(tokenMeta.Name.StrikeGap)
+	strike := utils.StringToFloat64(tokenMeta.StrikePrice)
+	optionType := tokenMeta.InstrumentType
 
-	// Set strike gap based on index name or trading symbol
-	strikeGap := 50.0
-	if strings.Contains(pos.Tradingsymbol, "BANKNIFTY") || strings.Contains(pos.Tradingsymbol, "SENSEX") {
-		strikeGap = 100.0
-	} else {
-		// Try to get index name from token
-		indexName, err := pm.kite.GetIndexNameFromToken(ctx, fmt.Sprintf("%d", pos.InstrumentToken))
-		if err == nil && (indexName == "BANKNIFTY" || indexName == "SENSEX") {
-			strikeGap = 100.0
-		}
-	}
+	// Process moves in parallel
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 
-	// Get option type from trading symbol
-	optionType := getOptionType(pos.Tradingsymbol)
-
-	// Away moves (2 strikes)
+	// Process away moves (2 strikes)
 	for i := 1; i <= 2; i++ {
-		var newStrike float64
-		if optionType == "CE" {
-			newStrike = strike + (strikeGap * float64(i))
-		} else {
-			newStrike = strike - (strikeGap * float64(i))
-		}
-
-		// Get the instrument token for this strike using our new helper function
-		tokenStr, err := cacheMetaInstance.GetInstrumentTokenForStrike(ctx, newStrike, optionType, expiryDate)
-		if err != nil {
-			pm.log.Error("Failed to get instrument token for strike", map[string]interface{}{
-				"strike":      newStrike,
-				"option_type": optionType,
-				"expiry":      expiryDate,
-				"error":       err.Error(),
-			})
-			return moves
-		}
-		premium := getPremium(tokenStr)
-
-		moves.Away = append(moves.Away, MoveStep{
-			Strike:          newStrike,
-			Premium:         premium,
-			Steps:           steps,
-			InstrumentToken: tokenStr,
-		})
+		wg.Add(1)
+		go func(step int) {
+			defer wg.Done()
+			newStrike := strike + (float64(step) * strikeGap)
+			pm.processMove(ctx, &moves, &mu, newStrike, optionType, tokenMeta.Expiry, steps, true)
+		}(i)
 	}
 
-	// Closer moves (2 strikes)
+	// Process closer moves (2 strikes)
 	for i := 1; i <= 2; i++ {
-		var newStrike float64
-		if optionType == "CE" {
-			newStrike = strike - (strikeGap * float64(i))
-		} else {
-			newStrike = strike + (strikeGap * float64(i))
-		}
-
-		// Get the instrument token for this strike using our new helper function
-		tokenStr, err := cacheMetaInstance.GetInstrumentTokenForStrike(ctx, newStrike, optionType, expiryDate)
-		if err != nil {
-			pm.log.Error("Failed to get instrument token for strike", map[string]interface{}{
-				"strike":      newStrike,
-				"option_type": optionType,
-				"expiry":      expiryDate,
-				"error":       err.Error(),
-			})
-			return moves
-		}
-		premium := getPremium(tokenStr)
-
-		moves.Closer = append(moves.Closer, MoveStep{
-			Strike:          newStrike,
-			Premium:         premium,
-			Steps:           steps,
-			InstrumentToken: tokenStr,
-		})
+		wg.Add(1)
+		go func(step int) {
+			defer wg.Done()
+			newStrike := strike - (float64(step) * strikeGap)
+			pm.processMove(ctx, &moves, &mu, newStrike, optionType, tokenMeta.Expiry, steps, false)
+		}(i)
 	}
 
+	wg.Wait()
 	return moves
+}
+
+// processMove handles the processing of a single move
+func (pm *PositionManager) processMove(ctx context.Context, moves *MoveSuggestions, mu *sync.Mutex,
+	strike float64, optionType cache.InstrumentType, expiry string, steps []string, isAway bool) {
+
+	tokenStr, err := pm.cacheMetaInstance.GetInstrumentTokenForStrike(ctx, strike, optionType, expiry)
+	if err != nil {
+		pm.log.Debug("No instrument token found for strike",
+			map[string]interface{}{
+				"strike":      strike,
+				"option_type": optionType,
+				"expiry":      expiry,
+				"error":       err.Error(),
+			})
+		return
+	}
+
+	move := MoveStep{
+		Strike:          strike,
+		Steps:           steps,
+		InstrumentToken: tokenStr,
+		Premium:         getPremium(tokenStr),
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if isAway {
+		moves.Away = append(moves.Away, move)
+	} else {
+		moves.Closer = append(moves.Closer, move)
+	}
 }
 
 func getPremium(tokenStr string) float64 {

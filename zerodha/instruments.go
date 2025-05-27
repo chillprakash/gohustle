@@ -1511,22 +1511,3 @@ func (k *KiteConnect) PrintStrikeCache() {
 		})
 	}
 }
-
-func (k *KiteConnect) GetIndexNameFromToken(ctx context.Context, instrumentToken string) (string, error) {
-	cache := cache.GetInMemoryCacheInstance()
-
-	// Get index name from cache
-	instrumentNameKey := fmt.Sprintf("instrument_name_key:%s", instrumentToken)
-	indexName, exists := cache.Get(instrumentNameKey)
-	if !exists {
-		return "", fmt.Errorf("no index found for instrument token: %s", instrumentToken)
-	}
-
-	// Type assert the interface{} to string
-	indexNameStr, ok := indexName.(string)
-	if !ok {
-		return "", fmt.Errorf("invalid cache value type for instrument token: %s", instrumentToken)
-	}
-
-	return indexNameStr, nil
-}

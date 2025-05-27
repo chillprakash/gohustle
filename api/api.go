@@ -822,13 +822,6 @@ func (s *APIServer) handleGetPnL(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, "PnL manager not initialized", http.StatusInternalServerError)
 		return
 	}
-
-	// Get query parameters
-	strategy := r.URL.Query().Get("strategy")
-	paperOnly := r.URL.Query().Get("paper_only") == "true"
-	realOnly := r.URL.Query().Get("real_only") == "true"
-
-	// Calculate P&L
 	pnlSummary, err := pnlManager.CalculatePnL(r.Context())
 	if err != nil {
 		s.log.Error("Failed to calculate P&L", map[string]interface{}{
@@ -837,93 +830,11 @@ func (s *APIServer) handleGetPnL(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, "Failed to calculate P&L", http.StatusInternalServerError)
 		return
 	}
-
-	// Filter by strategy if specified
-	if strategy != "" {
-		// Create a filtered summary
-		filteredSummary := &zerodha.PnLSummary{
-			PositionPnL:      make(map[string]float64),
-			PaperPositionPnL: make(map[string]float64),
-			StrategyPnL:      make(map[string]zerodha.StrategyPnLSummary),
-			PaperStrategyPnL: make(map[string]zerodha.StrategyPnLSummary),
-			UpdatedAt:        pnlSummary.UpdatedAt,
-		}
-
-		// Filter real trading strategies
-		if !paperOnly {
-			if strategySummary, exists := pnlSummary.StrategyPnL[strategy]; exists {
-				filteredSummary.StrategyPnL[strategy] = strategySummary
-				filteredSummary.TotalRealizedPnL += strategySummary.RealizedPnL
-				filteredSummary.TotalUnrealizedPnL += strategySummary.UnrealizedPnL
-
-				// Add positions to position P&L map
-				for _, pos := range strategySummary.Positions {
-					filteredSummary.PositionPnL[pos.TradingSymbol] = pos.TotalPnL
-				}
-			}
-		}
-
-		// Filter paper trading strategies
-		if !realOnly {
-			if strategySummary, exists := pnlSummary.PaperStrategyPnL[strategy]; exists {
-				filteredSummary.PaperStrategyPnL[strategy] = strategySummary
-
-				// Add positions to paper position P&L map
-				for _, pos := range strategySummary.Positions {
-					filteredSummary.PaperPositionPnL[pos.TradingSymbol] = pos.TotalPnL
-				}
-			}
-		}
-
-		// Update total P&L
-		filteredSummary.TotalPnL = filteredSummary.TotalRealizedPnL + filteredSummary.TotalUnrealizedPnL
-
-		// Use filtered summary instead of full summary
-		pnlSummary = filteredSummary
-	} else if paperOnly {
-		// Return only paper trading P&L
-		filteredSummary := &zerodha.PnLSummary{
-			PaperPositionPnL: pnlSummary.PaperPositionPnL,
-			PaperStrategyPnL: pnlSummary.PaperStrategyPnL,
-			UpdatedAt:        pnlSummary.UpdatedAt,
-		}
-		pnlSummary = filteredSummary
-	} else if realOnly {
-		// Return only real trading P&L
-		filteredSummary := &zerodha.PnLSummary{
-			TotalRealizedPnL:   pnlSummary.TotalRealizedPnL,
-			TotalUnrealizedPnL: pnlSummary.TotalUnrealizedPnL,
-			TotalPnL:           pnlSummary.TotalPnL,
-			PositionPnL:        pnlSummary.PositionPnL,
-			StrategyPnL:        pnlSummary.StrategyPnL,
-			UpdatedAt:          pnlSummary.UpdatedAt,
-		}
-		pnlSummary = filteredSummary
-	}
-
 	resp := Response{
 		Success: true,
 		Data:    pnlSummary,
 	}
-
 	sendJSONResponse(w, resp)
-}
-
-// Helper function to convert Redis Z member to float64
-func convertRedisZMemberToFloat64(member interface{}) float64 {
-	switch v := member.(type) {
-	case float64:
-		return v
-	case string:
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f
-		}
-	case int64:
-		return float64(v)
-	case int:
-		return float64(v)
-	}
-	return 0
 }
 
 // handleGetTimeSeriesMetrics handles requests for time series metrics

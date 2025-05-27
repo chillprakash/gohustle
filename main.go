@@ -68,9 +68,6 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 
 	scheduler.InitializePositionPolling(ctx)
 
-	// // Initialize strategy P&L tracking
-	scheduler.InitializeStrategyPnLTracking(ctx)
-
 	// scheduler.InitializeIndexOptionChainPolling(ctx)
 
 	// // Initialize tick data archiving (hourly) and consolidation (outside market hours)

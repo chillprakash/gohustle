@@ -80,10 +80,9 @@ const (
 )
 
 type OrderManager struct {
-	log                *logger.Logger
-	kite               *KiteConnect
-	cacheMeta          *cache.CacheMeta
-	orderAppParameters appparameters.OrderAppParameters
+	log       *logger.Logger
+	kite      *KiteConnect
+	cacheMeta *cache.CacheMeta
 }
 
 var (
@@ -110,10 +109,9 @@ func GetOrderManager() *OrderManager {
 		}
 
 		orderManagerInstance = &OrderManager{
-			log:                log,
-			kite:               kite,
-			cacheMeta:          cacheMeta,
-			orderAppParameters: appparameters.GetAppParameterManager().GetOrderAppParameters(),
+			log:       log,
+			kite:      kite,
+			cacheMeta: cacheMeta,
 		}
 		log.Info("Order manager initialized", map[string]interface{}{})
 	})
@@ -177,8 +175,8 @@ func placeOrderAtZerodha(indexMeta *cache.InstrumentData, side Side, quantity in
 		return nil, fmt.Errorf("app parameter manager not initialized")
 	}
 
-	orderType := orderManager.orderAppParameters.OrderType
-	productType := orderManager.orderAppParameters.ProductType
+	orderType := appParameterManager.GetOrderAppParameters().OrderType
+	productType := appParameterManager.GetOrderAppParameters().ProductType
 	freezeLimit := indexMeta.Name.GetUnitsPerLot()
 
 	// For quantities within limit, place a single order

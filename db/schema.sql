@@ -21,6 +21,7 @@ CREATE TABLE orders (
     paper_trading BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     payload_to_broker JSONB,
+    response_from_broker JSONB,
     
     -- Add indexes for common query patterns
     CONSTRAINT uq_external_order_id UNIQUE (external_order_id)
@@ -183,23 +184,19 @@ CREATE TABLE strategies (
 
 -- Create strategy_pnl_timeseries table for tracking strategy P&L over time
 CREATE TABLE strategy_pnl_timeseries (
-    id BIGSERIAL,
+    id Bigserial,
     strategy_id INTEGER NOT NULL,        -- Strategy ID
-    strategy_name TEXT NOT NULL,         -- Strategy name for easier querying
     total_pnl DOUBLE PRECISION NOT NULL, -- Total P&L for the strategy
-    paper_trading BOOLEAN NOT NULL,      -- Whether this is paper trading or real
-    timestamp TIMESTAMPTZ NOT NULL,      -- Timestamp of the P&L snapshot
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     
     -- Primary key must include the partitioning column for TimescaleDB
-    PRIMARY KEY (id, timestamp)
+    PRIMARY KEY (id, created_at)
 );
-
 -- Convert to TimescaleDB hypertable
-SELECT create_hypertable('strategy_pnl_timeseries', 'timestamp');
+SELECT create_hypertable('strategy_pnl_timeseries', 'created_at');
 
 -- Create indexes for faster queries
-CREATE INDEX idx_strategy_pnl_strategy_id ON strategy_pnl_timeseries (strategy_id, timestamp DESC);
-CREATE INDEX idx_strategy_pnl_paper_trading ON strategy_pnl_timeseries (paper_trading, timestamp DESC);
+CREATE INDEX idx_strategy_pnl_strategy_id ON strategy_pnl_timeseries (strategy_id, created_at DESC);
 
 -- Add compression policy (compress data older than 1 day)
 SELECT add_compression_policy('strategy_pnl_timeseries', INTERVAL '1 day');
@@ -210,16 +207,14 @@ SELECT add_retention_policy('strategy_pnl_timeseries', INTERVAL '90 days');
 -- Create continuous aggregate for hourly data
 CREATE MATERIALIZED VIEW strategy_pnl_hourly WITH (timescaledb.continuous) AS
 SELECT
-    time_bucket('1 hour', timestamp) AS bucket,
+    time_bucket('1 hour', created_at) AS bucket,
     strategy_id,
-    strategy_name,
-    paper_trading,
     AVG(total_pnl) AS avg_pnl,
     MIN(total_pnl) AS min_pnl,
     MAX(total_pnl) AS max_pnl,
-    LAST(total_pnl, timestamp) AS last_pnl
+    LAST(total_pnl, created_at) AS last_pnl
 FROM strategy_pnl_timeseries
-GROUP BY bucket, strategy_id, strategy_name, paper_trading;
+GROUP BY bucket, strategy_id;
 
 -- Create tick_archive_jobs table for tracking tick data archiving processes
 CREATE TABLE tick_archive_jobs (

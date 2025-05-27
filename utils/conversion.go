@@ -38,6 +38,10 @@ func Uint32SliceToStringSlice(slice []uint32) []string {
 	return result
 }
 
+func Uint64ToString(val uint64) string {
+	return strconv.FormatUint(val, 10)
+}
+
 func StringToFloat64(s string) float64 {
 	val, err := strconv.ParseFloat(s, 64)
 	if err != nil {

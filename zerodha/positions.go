@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"gohustle/appparameters"
 	"gohustle/cache"
 	"gohustle/db"
 	"gohustle/logger"
@@ -148,8 +149,8 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, order *Orde
 	if pm == nil || pm.positionsRedis == nil {
 		return fmt.Errorf("position manager or redis client not initialized")
 	}
-	orderManager := GetOrderManager()
-	productType := orderManager.orderAppParameters.ProductType
+
+	productType := appparameters.GetAppParameterManager().GetOrderAppParameters().ProductType
 
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
@@ -180,6 +181,71 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, order *Orde
 
 	storePositionsToDB(ctx, []positions{position}, true)
 	return nil
+}
+
+func (pm *PositionManager) ListPositionsFromDB(ctx context.Context, paperTrading bool) ([]positions, error) {
+	if pm == nil {
+		return nil, fmt.Errorf("position manager not initialized")
+	}
+
+	// Get database instance
+	db := db.GetTimescaleDB()
+	if db == nil {
+		return nil, fmt.Errorf("database connection not available")
+	}
+
+	// Determine the table name based on paper trading flag
+	tableName := "real_positions"
+	if paperTrading {
+		tableName = "paper_positions"
+	}
+
+	// Build the query
+	query := fmt.Sprintf(`
+		SELECT 
+			instrument_token, trading_symbol, exchange, product,
+			buy_quantity, buy_value, sell_quantity, sell_value,
+			multiplier, average_price, created_at, updated_at
+		FROM %s
+		WHERE (buy_quantity > 0 OR sell_quantity > 0)
+	`, tableName)
+
+	// Execute the query
+	rows, err := db.Query(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query positions: %w", err)
+	}
+	defer rows.Close()
+
+	// Process results
+	var result []positions
+	for rows.Next() {
+		var pos positions
+		err := rows.Scan(
+			&pos.InstrumentToken,
+			&pos.TradingSymbol,
+			&pos.Exchange,
+			&pos.Product,
+			&pos.BuyQuantity,
+			&pos.BuyValue,
+			&pos.SellQuantity,
+			&pos.SellValue,
+			&pos.Multiplier,
+			&pos.AveragePrice,
+			&pos.CreatedAt,
+			&pos.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan position: %w", err)
+		}
+		result = append(result, pos)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating position rows: %w", err)
+	}
+
+	return result, nil
 }
 
 // storePositionsToDB stores positions in the appropriate table based on paperTrading flag

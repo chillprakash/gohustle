@@ -138,6 +138,37 @@ func (t *TimescaleDB) QueryRow(ctx context.Context, query string, args ...interf
 	return t.pool.QueryRow(ctx, query, args...)
 }
 
+// Query executes a query that returns multiple rows
+func (t *TimescaleDB) Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error) {
+	if t == nil || t.pool == nil {
+		return nil, fmt.Errorf("database connection not initialized")
+	}
+
+	// Add query logging if needed
+	if t.log != nil {
+		t.log.Debug("Executing query",
+			map[string]interface{}{
+				"query": sql,
+				"args":  args,
+			})
+	}
+
+	// Execute the query using the connection pool
+	rows, err := t.pool.Query(ctx, sql, args...)
+	if err != nil {
+		if t.log != nil {
+			t.log.Error("Query execution failed",
+				map[string]interface{}{
+					"sql":   sql,
+					"error": err.Error(),
+				})
+		}
+		return nil, fmt.Errorf("query execution failed: %w", err)
+	}
+
+	return rows, nil
+}
+
 // Exec executes a query that doesn't return rows
 func (t *TimescaleDB) Exec(ctx context.Context, query string, args ...interface{}) (CommandTag, error) {
 	return t.pool.Exec(ctx, query, args...)
@@ -218,34 +249,6 @@ type OrderRecord struct {
 	PlacedAt      time.Time   `db:"placed_at"`
 	KiteResponse  interface{} `db:"kite_response"`
 	PaperTrading  bool        `db:"paper_trading"`
-}
-
-// PositionRecord represents a record in the positions table
-type PositionRecord struct {
-	ID            int64       `db:"id"`
-	PositionID    *string     `db:"position_id"`
-	TradingSymbol string      `db:"trading_symbol"`
-	Exchange      string      `db:"exchange"`
-	Product       string      `db:"product"`
-	Quantity      int         `db:"quantity"`
-	AveragePrice  float64     `db:"average_price"`
-	LastPrice     float64     `db:"last_price"`
-	PnL           float64     `db:"pnl"`
-	RealizedPnL   float64     `db:"realized_pnl"`
-	UnrealizedPnL float64     `db:"unrealized_pnl"`
-	Multiplier    float64     `db:"multiplier"`
-	BuyQuantity   int         `db:"buy_quantity"`
-	SellQuantity  int         `db:"sell_quantity"`
-	BuyPrice      float64     `db:"buy_price"`
-	SellPrice     float64     `db:"sell_price"`
-	BuyValue      float64     `db:"buy_value"`
-	SellValue     float64     `db:"sell_value"`
-	PositionType  string      `db:"position_type"`
-	StrategyID    *int        `db:"strategy_id"`
-	UserID        string      `db:"user_id"`
-	UpdatedAt     time.Time   `db:"updated_at"`
-	PaperTrading  bool        `db:"paper_trading"`
-	KiteResponse  interface{} `db:"kite_response"`
 }
 
 // ListOrders fetches all order records from the orders table

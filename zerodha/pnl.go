@@ -12,15 +12,15 @@ import (
 	"gohustle/logger"
 	"gohustle/utils"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 )
 
-
-type pnl struct{
-	ID int64 `json:"id"`
-	StrategyID int64 `json:"strategy_id"`
-	TotalPNL float64 `json:"total_pnl"`
-	CreatedAt time.Time `json:"created_at"`
+type pnl struct {
+	ID         int64     `json:"id"`
+	StrategyID int64     `json:"strategy_id"`
+	TotalPNL   float64   `json:"total_pnl"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // PnLManager handles P&L calculations for positions
@@ -216,16 +216,84 @@ func (pm *PnLManager) CalculateAndStorePositionPnL(ctx context.Context) error {
 
 	}
 
-	if err := timescaleDB.BatchInsertPositionPnLTimeseries(ctx, positionPnLs); err != nil {
-		pm.log.Error("Failed to batch insert position P&L timeseries", map[string]interface{}{
+	realPositionsPNLRecord := &pnl{
+		StrategyID: 0,
+		TotalPNL:   calculationSummary.RealPositionsPNL,
+		CreatedAt:  time.Now(),
+	}
+
+	paperPositionsPNLRecord := &pnl{
+		StrategyID: 1,
+		TotalPNL:   calculationSummary.PaperPositionsPNL,
+		CreatedAt:  time.Now(),
+	}
+
+	pnls := []*pnl{
+		realPositionsPNLRecord,
+		paperPositionsPNLRecord,
+	}
+
+	if err := storePNLToDB(ctx, pnls); err != nil {
+		pm.log.Error("Failed to store P&L", map[string]interface{}{
 			"error": err.Error(),
-			"count": len(positionPnLs),
 		})
-		return fmt.Errorf("failed to insert position P&L timeseries: %w", err)
+		return fmt.Errorf("failed to store P&L: %w", err)
 	}
 
 	return nil
 }
 
-func storePNLToDB(ctx context.Context) error {
-	
+func storePNLToDB(ctx context.Context, pnls []*pnl) error {
+	if len(pnls) == 0 {
+		return nil
+	}
+
+	timescaleDB := db.GetTimescaleDB()
+	if timescaleDB == nil {
+		return fmt.Errorf("failed to get database instance")
+	}
+
+	query := `
+		INSERT INTO strategy_pnl_timeseries (
+			strategy_id, 
+			total_pnl,
+			created_at
+		) VALUES ($1, $2, $3)
+	`
+
+	// Use WithTx for automatic transaction management
+	err := timescaleDB.WithTx(ctx, func(tx pgx.Tx) error {
+		batch := &pgx.Batch{}
+
+		for _, pnl := range pnls {
+			if pnl == nil {
+				continue
+			}
+			batch.Queue(query, pnl.StrategyID, pnl.TotalPNL, pnl.CreatedAt)
+		}
+
+		if batch.Len() == 0 {
+			return nil
+		}
+
+		results := tx.SendBatch(ctx, batch)
+		defer results.Close()
+
+		// Check for any errors in the batch
+		for i := 0; i < batch.Len(); i++ {
+			_, err := results.Exec()
+			if err != nil {
+				return fmt.Errorf("error in batch insert at position %d: %w", i, err)
+			}
+		}
+
+		return results.Close()
+	})
+
+	if err != nil {
+		log.Printf("Failed to store batch P&L records: %v", err)
+		return fmt.Errorf("failed to store P&L records: %w", err)
+	}
+
+	return nil
+}

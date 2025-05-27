@@ -1482,7 +1482,8 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 
 		// Cache instrument name
 		instrumentNameKey := fmt.Sprintf("%s%s", InstrumentMetadataPrefix, inst.Token)
-		pipe.Set(ctx, instrumentNameKey, inst.Name, LongCacheExpiry)
+		indexNameValue := inst.Name.NameInOptions
+		pipe.Set(ctx, instrumentNameKey, indexNameValue, LongCacheExpiry)
 
 		// If this is an option (CE or PE), cache additional metadata
 		if inst.InstrumentType == "CE" || inst.InstrumentType == "PE" {
@@ -1495,7 +1496,8 @@ func (c *CacheMeta) SyncInstrumentMetadata(ctx context.Context, instruments []In
 
 				// Cache strike price
 				strikeKey := fmt.Sprintf("%s%s", InstrumentMetadataPrefix, inst.Token)
-				value := fmt.Sprintf("%s:%s:%s:%s:%s:%s", inst.Name.NameInOptions, strikeStr, inst.InstrumentType, inst.Expiry, inst.TradingSymbol, inst.Exchange)
+				indexValue := inst.Name.NameInOptions
+				value := fmt.Sprintf("%s:%s:%s:%s:%s:%s", indexValue, strikeStr, inst.InstrumentType, inst.Expiry, inst.TradingSymbol, inst.Exchange)
 				pipe.Set(ctx, strikeKey, value, LongCacheExpiry)
 
 				tokenKey := fmt.Sprintf("%s%s", InstrumentTokenPrefix, inst.Token)

@@ -50,8 +50,10 @@ CREATE TABLE real_positions (
     trading_symbol      VARCHAR(100) NOT NULL,   -- Trading symbol (e.g., "RELIANCE-EQ")
     exchange           VARCHAR(50) NOT NULL,     -- Exchange (e.g., "NSE", "BSE")
     product            VARCHAR(20) NOT NULL,     -- Product type (e.g., "NRML", "MIS", "CNC")
+    buy_price          NUMERIC(12, 2) NOT NULL,  -- Buy price
     buy_value          NUMERIC(18, 4) NOT NULL,  -- Total buy value
     buy_quantity       INTEGER NOT NULL,         -- Total buy quantity
+    sell_price         NUMERIC(12, 2) NOT NULL,  -- Sell price
     sell_value         NUMERIC(18, 4) NOT NULL,  -- Total sell value
     sell_quantity      INTEGER NOT NULL,         -- Total sell quantity
     multiplier         NUMERIC(10, 2) NOT NULL,  -- Contract multiplier (for derivatives)

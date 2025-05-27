@@ -27,8 +27,10 @@ type positions struct {
 	TradingSymbol   string    `json:"trading_symbol" db:"trading_symbol"`
 	Exchange        string    `json:"exchange" db:"exchange"`
 	Product         string    `json:"product" db:"product"`
+	BuyPrice        float64   `json:"buy_price" db:"buy_price"`
 	BuyValue        float64   `json:"buy_value" db:"buy_value"`
 	BuyQuantity     int       `json:"buy_quantity" db:"buy_quantity"`
+	SellPrice       float64   `json:"sell_price" db:"sell_price"`
 	SellValue       float64   `json:"sell_value" db:"sell_value"`
 	SellQuantity    int       `json:"sell_quantity" db:"sell_quantity"`
 	Multiplier      float64   `json:"multiplier" db:"multiplier"`
@@ -451,7 +453,7 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 	}
 }
 
-// storePositionsInDB stores positions in the database
+// storeZerodhaPositionsInDB stores positions in the database
 func (pm *PositionManager) storeZerodhaPositionsInDB(ctx context.Context, kitePositions []kiteconnect.Position) error {
 	timescaleDB := db.GetTimescaleDB()
 	if timescaleDB == nil {
@@ -465,7 +467,7 @@ func (pm *PositionManager) storeZerodhaPositionsInDB(ctx context.Context, kitePo
 
 	var isDBUpdateNeeded bool
 
-	// First, get all existing positions to check for duplicates
+	// Get existing positions from DB
 	existingPositionsInDB, err := pm.ListPositionsFromDB(ctx, false)
 	if err != nil {
 		pm.log.Error("Failed to list existing positions", map[string]interface{}{
@@ -474,61 +476,81 @@ func (pm *PositionManager) storeZerodhaPositionsInDB(ctx context.Context, kitePo
 		return fmt.Errorf("failed to list existing positions: %w", err)
 	}
 
-	existingPositionsInDBBySymbol := make(map[string]positions)
-	for _, pos := range existingPositionsInDB {
-		existingPositionsInDBBySymbol[pos.TradingSymbol] = pos
+	// Create maps for thread-safe operations
+	existingPositionsBySymbol := make(map[string]positions)
+	for i := range existingPositionsInDB {
+		existingPositionsBySymbol[existingPositionsInDB[i].TradingSymbol] = existingPositionsInDB[i]
 	}
 
-	for _, pos := range kitePositions {
-		tradingSymbol := pos.Tradingsymbol
-		if existingPos, ok := existingPositionsInDBBySymbol[tradingSymbol]; ok {
-			if pos.BuyQuantity > 0 || pos.SellQuantity > 0 {
-				if existingPos.BuyQuantity != pos.BuyQuantity {
-					isDBUpdateNeeded = true
-					pm.log.Info("Updating existing position", map[string]interface{}{
-						"symbol":       tradingSymbol,
-						"old_quantity": existingPos.BuyQuantity,
-						"new_quantity": pos.BuyQuantity,
-					})
-					existingPos.BuyQuantity = pos.BuyQuantity
-					existingPos.BuyValue = pos.BuyValue
-				}
+	// Create a new slice for positions that need to be updated
+	var positionsToUpdate []positions
 
-				if existingPos.SellQuantity != pos.SellQuantity {
-					isDBUpdateNeeded = true
-					pm.log.Info("Updating existing position", map[string]interface{}{
-						"symbol":       tradingSymbol,
-						"old_quantity": existingPos.SellQuantity,
-						"new_quantity": pos.SellQuantity,
-					})
-					existingPos.SellQuantity = pos.SellQuantity
-					existingPos.SellValue = pos.SellValue
-				}
-				existingPos.AveragePrice = pos.AveragePrice
-				existingPos.UpdatedAt = time.Now()
+	// Process each position from Kite
+	for _, kpos := range kitePositions {
+		tradingSymbol := kpos.Tradingsymbol
+		existingPos, exists := existingPositionsBySymbol[tradingSymbol]
+
+		if exists {
+			// Check if quantities have changed
+			if existingPos.BuyQuantity != kpos.BuyQuantity ||
+				existingPos.SellQuantity != kpos.SellQuantity {
+
+				isDBUpdateNeeded = true
+				// Create a new position with updated values
+				updatedPos := existingPos
+				updatedPos.BuyQuantity = kpos.BuyQuantity
+				updatedPos.BuyValue = kpos.BuyValue
+				updatedPos.SellQuantity = kpos.SellQuantity
+				updatedPos.SellValue = kpos.SellValue
+				updatedPos.AveragePrice = kpos.AveragePrice
+				updatedPos.UpdatedAt = time.Now()
+
+				positionsToUpdate = append(positionsToUpdate, updatedPos)
+
+				pm.log.Info("Updating position", map[string]interface{}{
+					"symbol":        tradingSymbol,
+					"buy_quantity":  kpos.BuyQuantity,
+					"sell_quantity": kpos.SellQuantity,
+				})
 			}
 		} else {
-			isDBUpdateNeeded = true
 			// New position
-			existingPositionsInDB = append(existingPositionsInDB, positions{
-				TradingSymbol:   pos.Tradingsymbol,
-				Exchange:        pos.Exchange,
-				InstrumentToken: pos.InstrumentToken,
-				Product:         pos.Product,
-				BuyQuantity:     pos.BuyQuantity,
-				BuyValue:        pos.BuyValue,
-				SellQuantity:    pos.SellQuantity,
-				SellValue:       pos.SellValue,
-				Multiplier:      pos.Multiplier,
-				AveragePrice:    pos.AveragePrice,
+			isDBUpdateNeeded = true
+			newPos := positions{
+				TradingSymbol:   tradingSymbol,
+				Exchange:        kpos.Exchange,
+				Product:         kpos.Product,
+				InstrumentToken: kpos.InstrumentToken,
+				BuyQuantity:     kpos.BuyQuantity,
+				BuyValue:        kpos.BuyValue,
+				SellQuantity:    kpos.SellQuantity,
+				SellValue:       kpos.SellValue,
+				Multiplier:      kpos.Multiplier,
+				AveragePrice:    kpos.AveragePrice,
 				CreatedAt:       time.Now(),
 				UpdatedAt:       time.Now(),
+			}
+			positionsToUpdate = append(positionsToUpdate, newPos)
+
+			pm.log.Info("Creating new position", map[string]interface{}{
+				"symbol":        tradingSymbol,
+				"buy_quantity":  kpos.BuyQuantity,
+				"sell_quantity": kpos.SellQuantity,
 			})
 		}
 	}
-	if isDBUpdateNeeded {
-		storePositionsToDB(ctx, existingPositionsInDB, false)
+
+	// Only update DB if there are changes
+	if isDBUpdateNeeded && len(positionsToUpdate) > 0 {
+		_, err := storePositionsToDB(ctx, positionsToUpdate, false)
+		if err != nil {
+			pm.log.Error("Failed to store positions", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return fmt.Errorf("failed to store positions: %w", err)
+		}
 	}
+
 	return nil
 }
 
@@ -612,7 +634,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 	}
 
 	// Fetch all positions from database
-	dbPositions, err := timescaleDB.ListPositions(ctx)
+	dbPositions, err := pm.ListPositionsFromDB(ctx, false)
 	if err != nil {
 		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
 			"error": err.Error(),
@@ -629,19 +651,6 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 		// Skip non-option positions
 		if !isOptionPosition(dbPos.TradingSymbol) {
 			continue
-		}
-
-		// Apply position filter
-		switch filterType {
-		case PositionFilterPaper:
-			if !dbPos.PaperTrading {
-				continue
-			}
-		case PositionFilterReal:
-			if dbPos.PaperTrading {
-				continue
-			}
-			// PositionFilterAll or any other value - include all positions
 		}
 
 		// Get option type

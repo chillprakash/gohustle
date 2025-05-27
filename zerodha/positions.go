@@ -40,10 +40,10 @@ type positions struct {
 }
 
 const (
-	RealTradingPositionKeyFormat  = "position:real_trading:%s:%s:%s"  // category, tradingsymbol, product
-	PaperTradingPositionKeyFormat = "position:paper_trading:%s:%s:%s" // category, tradingsymbol, product
-	PositionTokenKeyFormat        = "position:token:%d"               // instrumentToken
-	PostionsJSONKeyFormat         = "positionsdump:%s"                // paper or real
+	RealTradingPositionKeyFormat  = "position:real_trading:all_positions"  // category, tradingsymbol, product
+	PaperTradingPositionKeyFormat = "position:paper_trading:all_positions" // category, tradingsymbol, product
+	PositionTokenKeyFormat        = "position:token:%d"                    // instrumentToken
+	PostionsJSONKeyFormat         = "positionsdump:%s"                     // paper or real
 )
 
 type PositionManager struct {
@@ -403,13 +403,6 @@ func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.C
 	return cachePositionsMap, nil
 }
 
-func absInt(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
-}
-
 // PollPositionsAndUpdateInRedis periodically polls positions and updates Redis and database
 func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) error {
 	positions, err := pm.kite.Kite.GetPositions()
@@ -604,7 +597,7 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 
 	// Join all position values with commas and store in Redis
 	positionAllKeyFormatValue := strings.Join(positionValues, ",")
-	err := pm.positionsRedis.Set(ctx, PaperTradingPositionKeyFormat, positionAllKeyFormatValue, 0).Err()
+	err := pm.positionsRedis.Set(ctx, RealTradingPositionKeyFormat, positionAllKeyFormatValue, 0).Err()
 	if err != nil {
 		pm.log.Error("Failed to store all positions in Redis", map[string]interface{}{
 			"error": err.Error(),

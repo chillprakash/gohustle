@@ -101,7 +101,7 @@ func isMarketOpen() bool {
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, ist)
 
 	openTime := today.Add(9 * time.Hour)                  // 9:00 AM IST
-	closeTime := today.Add(15*time.Hour + 35*time.Minute) // 3:35 PM IST
+	closeTime := today.Add(17*time.Hour + 35*time.Minute) // 3:35 PM IST
 
 	// Check if it's a weekday (Monday = 1, Sunday = 7)
 	if now.Weekday() == time.Saturday || now.Weekday() == time.Sunday {

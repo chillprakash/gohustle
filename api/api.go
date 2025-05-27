@@ -105,19 +105,20 @@ func (s *APIServer) mapToPlaceOrderRequest(request *http.Request) (*zerodha.Plac
 func (s *APIServer) handlePlaceOrder(w http.ResponseWriter, request *http.Request) {
 	orderReq, err := s.mapToPlaceOrderRequest(request)
 	if err != nil {
+		s.log.Error("Failed to parse order request", map[string]interface{}{"error": err.Error()})
 		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
+	s.log.Info("Order placement request", map[string]interface{}{"order": orderReq})
 	resp, err := zerodha.PlaceOrder(*orderReq)
 	if err != nil {
 		s.log.Error("Order placement failed", map[string]interface{}{"error": err.Error()})
 		sendErrorResponse(w, "Order placement failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	logger.L().Info("Order placed successfully", map[string]interface{}{"order": resp})
 	// Return the response to the client
 	sendJSONResponse(w, resp)
-
 }
 
 // PnLParams represents P&L parameters

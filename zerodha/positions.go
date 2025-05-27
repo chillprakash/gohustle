@@ -144,7 +144,6 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, order *Orde
 	if pm == nil || pm.positionsRedis == nil {
 		return fmt.Errorf("position manager or redis client not initialized")
 	}
-
 	productType := appparameters.GetAppParameterManager().GetOrderAppParameters().ProductType
 
 	cacheMeta, err := cache.GetCacheMetaInstance()
@@ -270,22 +269,24 @@ func storePositionsToDB(ctx context.Context, positions []positions, paperTrading
 	err := timescaleDB.WithTx(ctx, func(tx pgx.Tx) error {
 		// Prepare the upsert query
 		query := fmt.Sprintf(`
-			INSERT INTO %s (
-				instrument_token, trading_symbol, exchange, product,
-				buy_quantity, buy_value, sell_quantity, sell_value,
-				buy_price, sell_price,
-				multiplier, average_price, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-			ON CONFLICT (trading_symbol, exchange, product) 
-			DO UPDATE SET 
-				buy_quantity = EXCLUDED.buy_quantity,
-				buy_value = EXCLUDED.buy_value,
-				sell_quantity = EXCLUDED.sell_quantity,
-				sell_value = EXCLUDED.sell_value,
-				multiplier = EXCLUDED.multiplier,
-				average_price = EXCLUDED.average_price,
-				updated_at = EXCLUDED.updated_at
-			RETURNING id`, tableName)
+    INSERT INTO %s (
+        instrument_token, trading_symbol, exchange, product,
+        buy_quantity, buy_value, sell_quantity, sell_value,
+        buy_price, sell_price,
+        multiplier, average_price, created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    ON CONFLICT (trading_symbol, exchange, product) 
+    DO UPDATE SET 
+        buy_quantity = EXCLUDED.buy_quantity,
+        sell_quantity = EXCLUDED.sell_quantity,
+        buy_value = EXCLUDED.buy_value,
+        sell_value = EXCLUDED.sell_value,
+        buy_price = EXCLUDED.buy_price,
+        sell_price = EXCLUDED.sell_price,
+        multiplier = EXCLUDED.multiplier,
+        average_price = EXCLUDED.average_price,
+        updated_at = EXCLUDED.updated_at
+    RETURNING id`, tableName)
 
 		// Prepare the statement
 		stmt, err := tx.Prepare(ctx, "upsert-position", query)
@@ -770,7 +771,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 	analysis.Summary.TotalPendingValue = analysis.Summary.TotalCallPending + analysis.Summary.TotalPutPending
 
 	// Log position counts
-	pm.log.Info("Position analysis complete", map[string]interface{}{
+	pm.log.Debug("Position analysis complete", map[string]interface{}{
 		"open_positions":   len(analysis.OpenPositions),
 		"closed_positions": len(analysis.ClosedPositions),
 	})

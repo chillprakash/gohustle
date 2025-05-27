@@ -388,16 +388,16 @@ func PlaceOrder(req PlaceOrderRequest) (*[]OrderResponse, error) {
 	}
 
 	if req.OrderType == OrderTypeCreateBuy || req.OrderType == OrderTypeCreateSell {
-		processCreateOrder(req, &indexMeta)
+		return processCreateOrder(req, &indexMeta)
 	}
 
 	if req.OrderType == OrderTypeModifyAway || req.OrderType == OrderTypeModifyCloser {
-		processModifyOrder(req, &indexMeta)
+		return processModifyOrder(req, &indexMeta)
 	}
 	return nil, nil
 }
 
-func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *cache.InstrumentData) (*OrderResponse, error) {
+func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *cache.InstrumentData) (*[]OrderResponse, error) {
 	positionsManager := GetPositionManager()
 	positions, err := positionsManager.GetOpenPositionTokensVsQuanityFromRedis(context.Background())
 	if err != nil {

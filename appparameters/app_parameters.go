@@ -139,7 +139,7 @@ func (apm *AppParameterManager) GetParameters(ctx context.Context, keys []AppPar
 		}
 
 		query := fmt.Sprintf(
-			"SELECT id, key, value, value_type, description, created_at, updated_at "+
+			"SELECT id, key, value, created_at, updated_at "+
 				"FROM app_parameters WHERE key IN (%s)",
 			strings.Join(placeholders, ","),
 		)

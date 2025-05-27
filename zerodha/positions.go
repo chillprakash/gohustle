@@ -197,6 +197,7 @@ func (pm *PositionManager) ListPositionsFromDB(ctx context.Context, paperTrading
 		SELECT 
 			instrument_token, trading_symbol, exchange, product,
 			buy_quantity, buy_value, sell_quantity, sell_value,
+			buy_price, sell_price,
 			multiplier, average_price, created_at, updated_at
 		FROM %s
 		WHERE (buy_quantity > 0 OR sell_quantity > 0)
@@ -222,6 +223,8 @@ func (pm *PositionManager) ListPositionsFromDB(ctx context.Context, paperTrading
 			&pos.BuyValue,
 			&pos.SellQuantity,
 			&pos.SellValue,
+			&pos.BuyPrice,
+			&pos.SellPrice,
 			&pos.Multiplier,
 			&pos.AveragePrice,
 			&pos.CreatedAt,
@@ -267,8 +270,9 @@ func storePositionsToDB(ctx context.Context, positions []positions, paperTrading
 			INSERT INTO %s (
 				instrument_token, trading_symbol, exchange, product,
 				buy_quantity, buy_value, sell_quantity, sell_value,
+				buy_price, sell_price,
 				multiplier, average_price, created_at, updated_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			ON CONFLICT (trading_symbol, exchange, product) 
 			DO UPDATE SET 
 				buy_quantity = EXCLUDED.buy_quantity,
@@ -300,6 +304,8 @@ func storePositionsToDB(ctx context.Context, positions []positions, paperTrading
 				pos.BuyValue,
 				pos.SellQuantity,
 				pos.SellValue,
+				pos.BuyPrice,
+				pos.SellPrice,
 				pos.Multiplier,
 				pos.AveragePrice,
 				now, // created_at (used only for new records)
@@ -503,6 +509,8 @@ func (pm *PositionManager) storeZerodhaPositionsInDB(ctx context.Context, kitePo
 				updatedPos.SellQuantity = kpos.SellQuantity
 				updatedPos.SellValue = kpos.SellValue
 				updatedPos.AveragePrice = kpos.AveragePrice
+				updatedPos.BuyPrice = kpos.BuyPrice
+				updatedPos.SellPrice = kpos.SellPrice
 				updatedPos.UpdatedAt = time.Now()
 
 				positionsToUpdate = append(positionsToUpdate, updatedPos)
@@ -527,6 +535,8 @@ func (pm *PositionManager) storeZerodhaPositionsInDB(ctx context.Context, kitePo
 				SellValue:       kpos.SellValue,
 				Multiplier:      kpos.Multiplier,
 				AveragePrice:    kpos.AveragePrice,
+				BuyPrice:        kpos.BuyPrice,
+				SellPrice:       kpos.SellPrice,
 				CreatedAt:       time.Now(),
 				UpdatedAt:       time.Now(),
 			}

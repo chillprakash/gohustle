@@ -99,7 +99,7 @@ func (s *APIServer) handlePlaceOrder(w http.ResponseWriter, request *http.Reques
 	}
 	logger.L().Info("Order placed successfully", map[string]interface{}{"order": resp})
 	// Return the response to the client
-	sendJSONResponse(w, resp)
+	sendJSONResponse(w, *resp)
 }
 
 // PnLParams represents P&L parameters

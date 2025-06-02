@@ -38,8 +38,8 @@ type AppParameter struct {
 }
 
 type OrderAppParameters struct {
-	ProductType AppParameterTypes `json:"product_type"` //CNC, MIS, NRML
-	OrderType   AppParameterTypes `json:"order_type"`   //LIMIT, MARKET
+	ProductType AppParameterTypes `json:"order_product_type"` //CNC, MIS, NRML
+	OrderType   AppParameterTypes `json:"order_type"`         //LIMIT, MARKET
 }
 
 // AppParameterManager handles operations on app parameters
@@ -56,12 +56,33 @@ var (
 
 func GetAppParameterManager() *AppParameterManager {
 	appParamOnce.Do(func() {
-		redisCache, _ := cache.GetRedisCache()
+		// Initialize logger first
+		log := logger.L()
+		// Initialize Redis cache with error handling
+		redisCache, err := cache.GetRedisCache()
+		if err != nil {
+			log.Error("Failed to initialize Redis cache", map[string]interface{}{
+				"error": err.Error(),
+			})
+			// Don't set instance if Redis fails
+			return
+		}
+
+		// Get TimescaleDB instance
+		tsDB := db.GetTimescaleDB()
+		if tsDB == nil {
+			log.Error("Failed to get TimescaleDB instance")
+			return
+		}
+
+		// Initialize the instance
 		appParamInstance = &AppParameterManager{
-			db:    db.GetTimescaleDB(),
-			log:   logger.L(),
+			db:    tsDB,
+			log:   log,
 			cache: redisCache.GetCacheDB1(),
 		}
+
+		log.Info("AppParameterManager initialized successfully")
 	})
 
 	return appParamInstance

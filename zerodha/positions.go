@@ -47,10 +47,11 @@ const (
 )
 
 type PositionManager struct {
-	kite              *KiteConnect
-	log               *logger.Logger
-	positionsRedis    *redis.Client
-	cacheMetaInstance *cache.CacheMeta
+	kite                *KiteConnect
+	log                 *logger.Logger
+	positionsRedis      *redis.Client
+	cacheMetaInstance   *cache.CacheMeta
+	appParameterManager *appparameters.AppParameterManager
 }
 
 type PositionSummary struct {
@@ -117,6 +118,17 @@ func GetPositionManager() *PositionManager {
 		log := logger.L()
 		kite := GetKiteConnect()
 		redisCache, err := cache.GetRedisCache()
+		if err != nil {
+			log.Error("Failed to get Redis cache", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return
+		}
+		appParameterManager := appparameters.GetAppParameterManager()
+		if appParameterManager == nil {
+			log.Error("Failed to get AppParameterManager instance", map[string]interface{}{})
+			return
+		}
 		cacheMetaInstance, err := cache.GetCacheMetaInstance()
 		if err != nil {
 			log.Error("Failed to get Redis cache", map[string]interface{}{
@@ -130,50 +142,61 @@ func GetPositionManager() *PositionManager {
 		}
 
 		positionInstance = &PositionManager{
-			log:               log,
-			kite:              kite,
-			positionsRedis:    redisCache.GetPositionsDB2(),
-			cacheMetaInstance: cacheMetaInstance,
+			log:                 log,
+			kite:                kite,
+			positionsRedis:      redisCache.GetPositionsDB2(),
+			cacheMetaInstance:   cacheMetaInstance,
+			appParameterManager: appParameterManager,
 		}
 		log.Info("Position manager initialized", map[string]interface{}{})
 	})
 	return positionInstance
 }
 
-func (pm *PositionManager) CreatePaperPositions(ctx context.Context, order *Order, indexMeta *cache.InstrumentData, side Side) error {
+func (pm *PositionManager) CreatePaperPositions(ctx context.Context, orders []Order, indexMeta *cache.InstrumentData, side Side) error {
 	if pm == nil || pm.positionsRedis == nil {
 		return fmt.Errorf("position manager or redis client not initialized")
 	}
-	productType := appparameters.GetAppParameterManager().GetOrderAppParameters().ProductType
+	productType := pm.appParameterManager.GetOrderAppParameters().ProductType
 
-	cacheMeta, err := cache.GetCacheMetaInstance()
-	if err != nil {
-		return err
-	}
-	ltpData, err := cacheMeta.GetLTPforInstrumentToken(ctx, utils.Uint32ToString(indexMeta.InstrumentToken))
+	ltpData, err := pm.cacheMetaInstance.GetLTPforInstrumentToken(ctx, utils.Uint32ToString(indexMeta.InstrumentToken))
 	if err != nil {
 		return err
 	}
 
-	position := positions{
-		InstrumentToken: indexMeta.InstrumentToken,
-		TradingSymbol:   indexMeta.TradingSymbol,
-		Exchange:        indexMeta.Exchange,
-		Product:         string(productType),
-		Multiplier:      1,
-		AveragePrice:    ltpData.LTP,
+	pm.log.Info("Creating paper positions", map[string]interface{}{
+		"orders": orders,
+		"index":  indexMeta,
+		"side":   side,
+	})
+	positionsList := []positions{}
+	for _, order := range orders {
+
+		position := positions{
+			InstrumentToken: indexMeta.InstrumentToken,
+			TradingSymbol:   indexMeta.TradingSymbol,
+			Exchange:        indexMeta.Exchange,
+			Product:         string(productType),
+			Multiplier:      1,
+			AveragePrice:    ltpData.LTP,
+		}
+
+		if side == SideBuy {
+			position.BuyQuantity = order.Quantity
+			position.BuyValue = float64(order.Quantity) * ltpData.LTP
+
+		} else {
+			position.SellQuantity = order.Quantity
+			position.SellValue = float64(order.Quantity) * ltpData.LTP
+		}
+
+		pm.log.Info("Creating paper positions", map[string]interface{}{
+			"position": position,
+		})
+		positionsList = append(positionsList, position)
 	}
 
-	if side == SideBuy {
-		position.BuyQuantity = order.Quantity
-		position.BuyValue = float64(order.Quantity) * ltpData.LTP
-
-	} else {
-		position.SellQuantity = order.Quantity
-		position.SellValue = float64(order.Quantity) * ltpData.LTP
-	}
-
-	storePositionsToDB(ctx, []positions{position}, true)
+	storePositionsToDB(ctx, positionsList, true)
 	return nil
 }
 
@@ -251,6 +274,12 @@ func storePositionsToDB(ctx context.Context, positions []positions, paperTrading
 	if len(positions) == 0 {
 		return []int64{}, nil
 	}
+
+	log := logger.L()
+	log.Info("Storing positions to DB", map[string]interface{}{
+		"positions": positions,
+		"paper":     paperTrading,
+	})
 
 	timescaleDB := db.GetTimescaleDB()
 	if timescaleDB == nil {

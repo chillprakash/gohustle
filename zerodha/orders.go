@@ -406,12 +406,11 @@ func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *cache.In
 		})
 		return nil, err
 	}
-
+	//Modify can happen only with existing positions as base.
 	for _, position := range positions {
 		if position.InstrumentToken == utils.Uint32ToString(indexMeta.InstrumentToken) {
 			// existingQuantity := position.Quantity
 			if placeOrderRequest.OrderType == OrderTypeModifyAway {
-
 				if err != nil {
 					log.Error("Failed to calculate strike to move", map[string]interface{}{
 						"error": err.Error(),

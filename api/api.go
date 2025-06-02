@@ -762,6 +762,12 @@ func (s *APIServer) handleGetPnLParams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check if parameters exist
+	if exitPnL == nil || targetPnL == nil {
+		sendErrorResponse(w, "P&L parameters not found", http.StatusNotFound)
+		return
+	}
+
 	sendJSONResponse(w, PnLParamsResponse{
 		Success: true,
 		Data: PnLParams{

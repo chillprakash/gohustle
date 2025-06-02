@@ -1030,7 +1030,7 @@ func (c *CacheMeta) SyncInstrumentExpiryStrikesWithSymbols(ctx context.Context, 
 	for name, expiryMap := range instrumentMap {
 		for expiry, strikeMap := range expiryMap {
 			// Create key
-			key := fmt.Sprintf("%s_%s", name, expiry)
+			key := fmt.Sprintf("%s_%s", name.NameInOptions, expiry)
 
 			// Create formatted values
 			formattedValues := make([]string, 0, len(strikeMap))

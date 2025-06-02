@@ -22,7 +22,7 @@ type TelegramNotifier struct {
 func NewTelegramNotifier(cfg *config.TelegramConfig) *TelegramNotifier {
 	return &TelegramNotifier{
 		config: cfg,
-		log:    logger.GetLogger(),
+		log:    logger.L(),
 	}
 }
 

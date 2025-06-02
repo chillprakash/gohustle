@@ -19,7 +19,7 @@ type LoginResponse struct {
 // handleLogin handles user login
 func (s *APIServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var creds auth.Credentials
-	if err := decodeJSONBody(w, r, &creds); err != nil {
+	if err := decodeJSONBody(r, &creds); err != nil {
 		sendErrorResponse(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -95,7 +95,7 @@ func (s *APIServer) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 // Helper function to decode JSON body
-func decodeJSONBody(w http.ResponseWriter, r *http.Request, v interface{}) error {
+func decodeJSONBody(r *http.Request, v interface{}) error {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
 		return err
 	}

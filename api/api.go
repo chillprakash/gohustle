@@ -68,25 +68,6 @@ func GetAPIServer() *APIServer {
 	return instance
 }
 
-func (s *APIServer) handleGetOrders(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	orders, err := db.GetTimescaleDB().ListOrders(ctx)
-	if err != nil {
-		s.log.Error("Failed to fetch orders", map[string]interface{}{"error": err.Error()})
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "Failed to fetch orders",
-		})
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"orders":  orders,
-	})
-}
-
 // mapToPlaceOrderRequest converts an HTTP request to a PlaceOrderAPIRequest
 func (s *APIServer) mapToPlaceOrderRequest(request *http.Request) (*zerodha.PlaceOrderRequest, error) {
 	body, err := io.ReadAll(request.Body)

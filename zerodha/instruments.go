@@ -1078,10 +1078,6 @@ func (k *KiteConnect) GetInstrumentDetailsByToken(ctx context.Context, instrumen
 	return "", "", fmt.Errorf("instrument token not found: %s", instrumentToken)
 }
 
-func generateTargetFileName(expiry time.Time, index string) string {
-	return fmt.Sprintf("%s_%s", index, expiry.Format("20060102"))
-}
-
 // normalizeIndexName converts various index name formats to a standard format
 // to avoid duplicate entries in the expiry map
 func normalizeIndexName(indexName string) string {
@@ -1305,45 +1301,6 @@ func countOptions(m *InstrumentExpiryMap) map[string]map[string]int {
 		}
 	}
 	return counts
-}
-
-// Helper function to format sample data
-func formatSampleData(m *InstrumentExpiryMap) map[string]map[string]interface{} {
-	sample := make(map[string]map[string]interface{})
-
-	for inst, expiryMap := range m.Data {
-		sample[inst] = make(map[string]interface{})
-
-		for expiry, options := range expiryMap {
-			dateKey := expiry.Format("2006-01-02")
-			sample[inst][dateKey] = map[string]interface{}{
-				"calls_count":  len(options.Calls),
-				"puts_count":   len(options.Puts),
-				"sample_calls": formatOptionSample(options.Calls, 3),
-				"sample_puts":  formatOptionSample(options.Puts, 3),
-			}
-		}
-	}
-	return sample
-}
-
-func formatOptionSample(options []OptionTokenPair, limit int) []map[string]string {
-	if len(options) == 0 {
-		return nil
-	}
-
-	if limit > len(options) {
-		limit = len(options)
-	}
-
-	sample := make([]map[string]string, limit)
-	for i := 0; i < limit; i++ {
-		sample[i] = map[string]string{
-			"symbol": options[i].Symbol,
-			"token":  options[i].InstrumentToken,
-		}
-	}
-	return sample
 }
 
 func (k *KiteConnect) GetUpcomingExpiryTokens(ctx context.Context, indices []string) ([]string, error) {

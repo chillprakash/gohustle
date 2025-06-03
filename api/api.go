@@ -636,7 +636,7 @@ func (s *APIServer) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 
 	// Get filter from query parameter, default to "all"
 	filterParam := r.URL.Query().Get("filter")
-	filterType := zerodha.PositionFilterAll
+	var filterType zerodha.PositionFilterType
 
 	// Validate filter parameter
 	switch filterParam {
@@ -644,8 +644,6 @@ func (s *APIServer) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 		filterType = zerodha.PositionFilterPaper
 	case "real":
 		filterType = zerodha.PositionFilterReal
-	case "", "all":
-		// Default to all positions
 	default:
 		sendErrorResponse(w, "Invalid filter parameter. Must be 'all', 'paper', or 'real'.", http.StatusBadRequest)
 		return

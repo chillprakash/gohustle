@@ -640,8 +640,6 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 type PositionFilterType string
 
 const (
-	// PositionFilterAll returns all positions (default)
-	PositionFilterAll PositionFilterType = "all"
 	// PositionFilterPaper returns only paper trading positions
 	PositionFilterPaper PositionFilterType = "paper"
 	// PositionFilterReal returns only real trading positions

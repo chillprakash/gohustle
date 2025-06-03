@@ -669,8 +669,13 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 		return nil, fmt.Errorf("failed to get cache meta instance: %w", err)
 	}
 
+	var isPaper bool
+	if filterType == PositionFilterPaper {
+		isPaper = true
+	}
+
 	// Fetch all positions from database
-	dbPositions, err := pm.ListPositionsFromDB(ctx, false)
+	dbPositions, err := pm.ListPositionsFromDB(ctx, isPaper)
 	if err != nil {
 		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
 			"error": err.Error(),
@@ -678,7 +683,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 		return nil, fmt.Errorf("failed to get positions from database: %w", err)
 	}
 
-	pm.log.Debug("Fetched positions from database", map[string]interface{}{
+	pm.log.Info("Fetched positions from database", map[string]interface{}{
 		"count": len(dbPositions),
 	})
 

@@ -2,8 +2,10 @@ package utils
 
 import (
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // StringToUint32 converts a string to uint32, handling potential errors
@@ -84,4 +86,16 @@ func InterfaceSliceToUint32Slice(interfaces []interface{}) ([]uint32, error) {
 		}
 	}
 	return values, nil
+}
+
+func GenerateRandomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[rand.Intn(len(charset))]
+	}
+	return "p" + string(b)
+
 }

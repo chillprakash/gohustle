@@ -90,6 +90,16 @@ func (s *APIServer) handlePlaceOrder(w http.ResponseWriter, request *http.Reques
 		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Validate modify away/closer orders have either quantity or percentage
+	if orderReq.OrderType == zerodha.OrderTypeModifyAway || orderReq.OrderType == zerodha.OrderTypeModifyCloser {
+		if orderReq.Quantity == 0 && orderReq.Percentage == 0 {
+			errMsg := "modify order requires either quantity or percentage to be specified"
+			s.log.Error("Invalid modify order request", map[string]interface{}{"error": errMsg})
+			sendErrorResponse(w, errMsg, http.StatusBadRequest)
+			return
+		}
+	}
 	s.log.Info("Order placement request", map[string]interface{}{"order": orderReq})
 	resp, err := zerodha.PlaceOrder(*orderReq)
 	if err != nil {
@@ -99,7 +109,7 @@ func (s *APIServer) handlePlaceOrder(w http.ResponseWriter, request *http.Reques
 	}
 	logger.L().Info("Order placed successfully", map[string]interface{}{"order": resp})
 	// Return the response to the client
-	sendJSONResponse(w, *resp)
+	sendJSONResponse(w, resp)
 }
 
 // PnLParams represents P&L parameters

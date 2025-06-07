@@ -20,6 +20,20 @@ const (
 )
 
 type AppParameterTypes string
+type ProductType string
+type OrderType string
+
+// Define constants for ProductType
+const (
+	ProductMIS  ProductType = "MIS"
+	ProductNRML ProductType = "NRML"
+)
+
+// Define constants for OrderType
+const (
+	OrderTypeMARKET OrderType = "MARKET"
+	OrderTypeLIMIT  OrderType = "LIMIT"
+)
 
 const (
 	AppParamOrderProductType AppParameterTypes = "order_product_type" //CNC, MIS, NRML
@@ -38,8 +52,8 @@ type AppParameter struct {
 }
 
 type OrderAppParameters struct {
-	ProductType AppParameterTypes `json:"order_product_type"` //CNC, MIS, NRML
-	OrderType   AppParameterTypes `json:"order_type"`         //LIMIT, MARKET
+	ProductType ProductType `json:"order_product_type"` //CNC, MIS, NRML
+	OrderType   OrderType   `json:"order_type"`         //LIMIT, MARKET
 }
 
 // AppParameterManager handles operations on app parameters
@@ -94,8 +108,8 @@ func (apm *AppParameterManager) GetOrderAppParameters() OrderAppParameters {
 		AppParamOrderType,
 	})
 	return OrderAppParameters{
-		ProductType: AppParameterTypes(params[string(AppParamOrderProductType)].Value),
-		OrderType:   AppParameterTypes(params[string(AppParamOrderType)].Value),
+		ProductType: ProductType(params[string(AppParamOrderProductType)].Value),
+		OrderType:   OrderType(params[string(AppParamOrderType)].Value),
 	}
 
 }

@@ -590,21 +590,59 @@ func (pm *PositionManager) storeZerodhaPositionsInDB(ctx context.Context, kitePo
 	return nil
 }
 
-// storePositionsInRedis stores a list of positions in Redis
+// storePositionsInRedis stores a list of positions in Redis, removing any stale positions
 func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions []kiteconnect.Position) error {
-	// Build comma-separated list of instrument tokens and quantities
-	positionValues := make([]string, 0, len(positions))
-
-	// Process each position
+	// Filter out positions with zero quantity (closed positions)
+	activePositions := make([]kiteconnect.Position, 0, len(positions))
 	for _, pos := range positions {
-		// Add to the comma-separated list
-		positionValues = append(positionValues, fmt.Sprintf("%d_%d", pos.InstrumentToken, pos.Quantity))
+		if pos.Quantity != 0 {
+			activePositions = append(activePositions, pos)
+		}
+	}
 
-		// Store full position details
-		key := fmt.Sprintf(PostionsJSONKeyFormat, pos.Tradingsymbol)
+	// Get existing position data from RealTradingPositionKeyFormat
+	existingPositionsStr, err := pm.positionsRedis.Get(ctx, RealTradingPositionKeyFormat).Result()
+	if err != nil && err != redis.Nil {
+		pm.log.Error("Failed to get existing positions", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Continue with storing new positions even if we can't get existing keys
+	}
+
+	// Parse existing positions into a map for tracking
+	existingTokens := make(map[uint32]bool)
+	if existingPositionsStr != "" {
+		// Parse the comma-separated list of instrument_token_quantity
+		existingPositionValues := strings.Split(existingPositionsStr, ",")
+		for _, posValue := range existingPositionValues {
+			parts := strings.Split(posValue, "_")
+			if len(parts) == 2 {
+				tokenStr := parts[0]
+				token, err := strconv.ParseUint(tokenStr, 10, 32)
+				if err == nil {
+					existingTokens[uint32(token)] = true
+				}
+			}
+		}
+	}
+
+	// Process each active position
+	positionValues := make([]string, 0, len(activePositions))
+	for _, pos := range activePositions {
+		// Create a simplified position object with only relevant fields
+		relevantPos := map[string]interface{}{
+			"instrument_token": pos.InstrumentToken,
+			"tradingsymbol":    pos.Tradingsymbol,
+			"quantity":         pos.Quantity,
+			"average_price":    pos.AveragePrice,
+			"last_price":       pos.LastPrice,
+			"pnl":              pos.PnL,
+			"product":          pos.Product,
+			"exchange":         pos.Exchange,
+		}
 
 		// Convert position to JSON
-		posJSON, err := json.Marshal(pos)
+		posJSON, err := json.Marshal(relevantPos)
 		if err != nil {
 			pm.log.Error("Failed to marshal position", map[string]interface{}{
 				"symbol": pos.Tradingsymbol,
@@ -613,7 +651,10 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 			continue
 		}
 
-		// Store full position in Redis
+		// Create key for this position
+		key := fmt.Sprintf("position:%s:%d", pos.Tradingsymbol, pos.InstrumentToken)
+
+		// Store position in Redis
 		err = pm.positionsRedis.HSet(ctx, "positions", key, string(posJSON)).Err()
 		if err != nil {
 			pm.log.Error("Failed to store position in Redis", map[string]interface{}{
@@ -622,13 +663,60 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 			})
 			continue
 		}
+
+		// Mark this token as processed (not stale)
+		existingTokens[uint32(pos.InstrumentToken)] = false
+
+		// Add to the position values list for the consolidated key
+		positionValues = append(positionValues, fmt.Sprintf("%d_%d", pos.InstrumentToken, pos.Quantity))
 	}
 
-	// Join all position values with commas and store in Redis
+	// Remove stale positions from the hash
+	for token, isStale := range existingTokens {
+		if isStale {
+			// This token exists in the old list but not in the new positions
+			// We should find and remove any positions with this token
+			pattern := fmt.Sprintf("position:*:%d", token)
+			keys, err := pm.positionsRedis.Keys(ctx, pattern).Result()
+			if err != nil {
+				pm.log.Error("Failed to find stale positions", map[string]interface{}{
+					"token": token,
+					"error": err.Error(),
+				})
+				continue
+			}
+
+			for _, key := range keys {
+				// Extract just the key name without the hash name
+				keyParts := strings.Split(key, ":")
+				if len(keyParts) >= 3 {
+					posKey := key
+					err := pm.positionsRedis.HDel(ctx, "positions", posKey).Err()
+					if err != nil {
+						pm.log.Error("Failed to remove stale position", map[string]interface{}{
+							"key":   posKey,
+							"error": err.Error(),
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// Store the consolidated list of positions
 	positionAllKeyFormatValue := strings.Join(positionValues, ",")
-	err := pm.positionsRedis.Set(ctx, RealTradingPositionKeyFormat, positionAllKeyFormatValue, 0).Err()
+	err = pm.positionsRedis.Set(ctx, RealTradingPositionKeyFormat, positionAllKeyFormatValue, 0).Err()
 	if err != nil {
 		pm.log.Error("Failed to store all positions in Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return err
+	}
+
+	// Store a timestamp of when positions were last updated
+	err = pm.positionsRedis.Set(ctx, "positions:last_updated", time.Now().Unix(), 0).Err()
+	if err != nil {
+		pm.log.Error("Failed to update positions timestamp", map[string]interface{}{
 			"error": err.Error(),
 		})
 	}
@@ -681,7 +769,7 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 		return nil, fmt.Errorf("failed to get positions from database: %w", err)
 	}
 
-	pm.log.Info("Fetched positions from database", map[string]interface{}{
+	pm.log.Debug("Fetched positions from database", map[string]interface{}{
 		"count": len(dbPositions),
 	})
 

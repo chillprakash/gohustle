@@ -1,1 +1,8 @@
-api/orders
+Vue 3 with Composition API
+TypeScript for type safety
+Vite for fast development
+Pinia for state management
+Vuetify or Quasar for UI components
+Chart.js or ApexCharts for data visualization
+Axios for HTTP requests
+Socket.io-client for WebSocket connections

@@ -14,7 +14,6 @@ import (
 	"gohustle/zerodha"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 )
@@ -299,19 +298,4 @@ func isContextCanceledError(err error) bool {
 	}
 	// Check if the error wraps context.Canceled
 	return err != nil && err.Error() == context.Canceled.Error()
-}
-
-// Helper function to convert string tokens to uint32
-func convertTokensToUint32(tokens []string) ([]uint32, error) {
-	result := make([]uint32, 0, len(tokens))
-
-	for _, token := range tokens {
-		val, err := strconv.ParseUint(token, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("invalid token %s: %w", token, err)
-		}
-		result = append(result, uint32(val))
-	}
-
-	return result, nil
 }

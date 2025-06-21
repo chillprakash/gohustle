@@ -18,9 +18,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"gohustle/cache"
 	"gohustle/config"
-	"gohustle/db"
 	"gohustle/logger"
 	"gohustle/token"
 
@@ -44,12 +45,12 @@ type KiteConnect struct {
 	tokens  []uint32
 
 	// Dependencies
-	log    *logger.Logger
-	config *config.Config
+	log         *logger.Logger
+	config      *config.Config
+	redisClient *redis.Client // Redis client for token storage
 
 	// Synchronization
-	mu  sync.RWMutex
-	ctx context.Context
+	mu sync.RWMutex
 }
 
 var (
@@ -86,16 +87,24 @@ func initializeKiteConnect() *KiteConnect {
 	log := logger.L()
 	cfg := config.GetConfig()
 
-	kc := &KiteConnect{
-		Kite:    kiteconnect.New(cfg.Kite.APIKey),
-		Tickers: make([]*kiteticker.Ticker, MaxConnections),
+	// Initialize Redis cache
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		log.Error("Failed to initialize Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
 
-		log:    log,
-		config: cfg,
+	kc := &KiteConnect{
+		Kite:        kiteconnect.New(cfg.Kite.APIKey),
+		Tickers:     make([]*kiteticker.Ticker, MaxConnections),
+		redisClient: redisCache.GetTokenDB0(),
+		log:         log,
+		config:      cfg,
 	}
 
 	// Get valid token and set it
-	token, err := kc.GetValidToken(context.Background())
+	token, err := kc.GetValidToken()
 	if err != nil {
 		log.Error("Failed to get valid token", map[string]interface{}{
 			"error": err.Error(),
@@ -118,29 +127,38 @@ func initializeKiteConnect() *KiteConnect {
 // Token Management Methods
 
 // GetValidToken retrieves a valid token or generates a new one
-func (k *KiteConnect) GetValidToken(ctx context.Context) (string, error) {
-	if k.IsTokenValid(ctx) {
-		token, err := k.getStoredToken(ctx)
+func (k *KiteConnect) GetValidToken() (string, error) {
+	if k.IsTokenValid() {
+		token, err := k.getStoredToken()
 		if err == nil && token != "" {
-			k.log.Info("Found valid token in TimescaleDB", map[string]interface{}{
+			k.log.Info("Found valid token in Redis", map[string]interface{}{
 				"token_length": len(token),
 			})
 			return token, nil
 		}
 	}
 	k.log.Info("No valid token found, refreshing token", map[string]interface{}{})
-	return k.RefreshToken(ctx)
+	return k.RefreshToken()
 }
 
 // IsTokenValid checks if the stored token is valid
-func (k *KiteConnect) IsTokenValid(ctx context.Context) bool {
+func (k *KiteConnect) IsTokenValid() bool {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 
-	cred, err := db.GetTimescaleDB().GetCredential(k.getTokenKey())
-	if err != nil || cred == "" {
-		k.log.Info("No credential found or error retrieving", map[string]interface{}{
-			"error": err,
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	cred, err := k.redisClient.Get(ctx, k.getTokenKey()).Result()
+	if err == redis.Nil {
+		k.log.Info("No token found in Redis", map[string]interface{}{
+			"key": k.getTokenKey(),
+		})
+		return false
+	} else if err != nil {
+		k.log.Error("Error retrieving token from Redis", map[string]interface{}{
+			"error": err.Error(),
+			"key":   k.getTokenKey(),
 		})
 		return false
 	}
@@ -156,7 +174,7 @@ func (k *KiteConnect) IsTokenValid(ctx context.Context) bool {
 	now := time.Now()
 
 	// Check if token has expired
-	if !now.Before(tokenData.ExpiresAt) {
+	if now.After(tokenData.ExpiresAt) {
 		k.log.Info("Token has expired", map[string]interface{}{
 			"expires_at": tokenData.ExpiresAt,
 			"now":        now,
@@ -180,23 +198,25 @@ func (k *KiteConnect) IsTokenValid(ctx context.Context) bool {
 	return true
 }
 
-// StoreToken saves the token with expiry
-func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error {
-	k.log.Info("Starting token storage", map[string]interface{}{
+// storeToken saves the token with expiry in Redis
+func (k *KiteConnect) storeToken(ctx context.Context, accessToken string) error {
+
+	key := k.getTokenKey()
+	k.log.Info("Starting token storage in Redis", map[string]interface{}{
 		"token_length": len(accessToken),
-		"key":          k.getTokenKey(),
+		"key":          key,
 	})
 
 	now := time.Now()
 
-	// Create TokenData
+	// Create token data
 	tokenData := token.TokenData{
 		AccessToken: accessToken,
 		ExpiresAt:   now.Add(TokenValidity),
 		CreatedAt:   now,
 	}
 
-	// Marshal TokenData to store as value
+	// Marshal to JSON
 	tokenBytes, err := json.Marshal(tokenData)
 	if err != nil {
 		k.log.Error("Failed to marshal token data", map[string]interface{}{
@@ -205,67 +225,42 @@ func (k *KiteConnect) StoreToken(ctx context.Context, accessToken string) error 
 		return fmt.Errorf("failed to marshal token data: %w", err)
 	}
 
-	k.log.Info("Storing token in SQLite", map[string]interface{}{
-		"token_length": len(accessToken),
-		"key":          k.getTokenKey(),
-		"expires_at":   tokenData.ExpiresAt,
-		"created_at":   tokenData.CreatedAt,
-	})
+	// Store in Redis with TTL slightly longer than token validity
+	ttl := TokenValidity + 1*time.Hour // Add buffer to ensure token isn't evicted before expiry
 
-	// Store the marshaled TokenData as a string in SQLite
-	err = db.GetTimescaleDB().StoreCredential(k.getTokenKey(), string(tokenBytes))
+	// Use the provided context or create one with timeout if none provided
+	redisCtx := ctx
+	if ctx == nil || ctx.Done() == nil {
+		var cancel context.CancelFunc
+		redisCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+	}
+
+	start := time.Now()
+	err = k.redisClient.Set(redisCtx, key, string(tokenBytes), ttl).Err()
+	duration := time.Since(start)
+
 	if err != nil {
-		k.log.Error("Failed to store token in SQLite", map[string]interface{}{
-			"error": err.Error(),
-			"key":   k.getTokenKey(),
+		k.log.Error("Failed to store token in Redis", map[string]interface{}{
+			"error":    err.Error(),
+			"key":      key,
+			"duration": duration.String(),
 		})
-		return fmt.Errorf("failed to store token in SQLite: %w", err)
+		return fmt.Errorf("failed to store token in Redis: %w", err)
 	}
 
-	k.log.Info("Successfully stored token in SQLite", map[string]interface{}{
+	k.log.Info("Successfully stored token in Redis", map[string]interface{}{
 		"token_length": len(accessToken),
-		"key":          k.getTokenKey(),
 		"expires_at":   tokenData.ExpiresAt,
-		"created_at":   tokenData.CreatedAt,
-	})
-
-	// Verify the stored token
-	storedCred, err := db.GetTimescaleDB().GetCredential(k.getTokenKey())
-	if err != nil {
-		k.log.Error("Failed to verify stored token", map[string]interface{}{
-			"error": err.Error(),
-			"key":   k.getTokenKey(),
-		})
-		return fmt.Errorf("failed to verify stored token: %w", err)
-	}
-
-	if storedCred == "" {
-		k.log.Error("Stored token not found during verification", map[string]interface{}{
-			"key": k.getTokenKey(),
-		})
-		return fmt.Errorf("stored token not found during verification")
-	}
-
-	var storedTokenData token.TokenData
-	if err := json.Unmarshal([]byte(storedCred), &storedTokenData); err != nil {
-		k.log.Error("Failed to unmarshal stored token data", map[string]interface{}{
-			"error": err.Error(),
-			"key":   k.getTokenKey(),
-		})
-		return fmt.Errorf("failed to unmarshal stored token data: %w", err)
-	}
-
-	k.log.Info("Verified stored token", map[string]interface{}{
-		"token_length": len(storedTokenData.AccessToken),
-		"key":          k.getTokenKey(),
-		"expires_at":   storedTokenData.ExpiresAt,
+		"key":          key,
+		"duration":     duration.String(),
 	})
 
 	return nil
 }
 
 // RefreshToken generates a new access token
-func (k *KiteConnect) RefreshToken(ctx context.Context) (string, error) {
+func (k *KiteConnect) RefreshToken() (string, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 
@@ -274,7 +269,7 @@ func (k *KiteConnect) RefreshToken(ctx context.Context) (string, error) {
 	k.performTwoFactorAuth(client, loginResult)
 	requestToken := k.getRequestToken(client)
 
-	accessToken, err := k.generateAccessToken(ctx, requestToken)
+	accessToken, err := k.generateAccessToken(context.Background(), requestToken)
 	if err != nil {
 		k.log.Error("Failed to generate access token", map[string]interface{}{
 			"error": err.Error(),
@@ -287,11 +282,7 @@ func (k *KiteConnect) RefreshToken(ctx context.Context) (string, error) {
 		"access_token": accessToken,
 	})
 
-	k.log.Info("Attempting to store token", map[string]interface{}{
-		"token_length": len(accessToken),
-	})
-
-	if err := k.StoreToken(ctx, accessToken); err != nil {
+	if err := k.storeToken(context.Background(), accessToken); err != nil {
 		k.log.Error("Failed to store refreshed token", map[string]interface{}{
 			"error": err.Error(),
 		})
@@ -416,15 +407,31 @@ func (k *KiteConnect) getTokenKey() string {
 	return TokenKeyPrefix + k.config.Kite.UserID
 }
 
-func (k *KiteConnect) getStoredToken(ctx context.Context) (string, error) {
-	cred, err := db.GetTimescaleDB().GetCredential(k.getTokenKey())
-	if err != nil || cred == "" {
-		return "", fmt.Errorf("no token found")
+func (k *KiteConnect) getStoredToken() (string, error) {
+	if k.redisClient == nil {
+		return "", fmt.Errorf("Redis client not initialized")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	cred, err := k.redisClient.Get(ctx, k.getTokenKey()).Result()
+	if err == redis.Nil {
+		return "", fmt.Errorf("no token found in Redis")
+	} else if err != nil {
+		k.log.Error("Failed to get token from Redis", map[string]interface{}{
+			"error": err.Error(),
+			"key":   k.getTokenKey(),
+		})
+		return "", fmt.Errorf("failed to get token from Redis: %w", err)
 	}
 
 	var tokenData token.TokenData
 	if err := json.Unmarshal([]byte(cred), &tokenData); err != nil {
-		return "", err
+		k.log.Error("Failed to unmarshal token data", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return "", fmt.Errorf("failed to unmarshal token data: %w", err)
 	}
 
 	return tokenData.AccessToken, nil

@@ -82,7 +82,7 @@ func GetKiteConnect() *KiteConnect {
 	return instance
 }
 
-// initializeKiteConnect creates a new KiteConnect instance with default configuration
+// initializeKiteConnect creates a new KiteConnect instance with default configuration and returns it. Intializes Redis and Kite Connector, Kite Websockets
 func initializeKiteConnect() *KiteConnect {
 	log := logger.L()
 	cfg := config.GetConfig()

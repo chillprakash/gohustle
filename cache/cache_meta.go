@@ -50,7 +50,7 @@ const (
 	LongCacheExpiry    = 7 * 24 * time.Hour
 
 	// Maximum number of expiries to process per index
-	MaxExpiriesToProcess = 1
+	MaxExpiriesToProcess = 5
 	LTPSuffix            = "_ltp"
 	OISuffix             = "_oi"
 	VolumeSuffix         = "_volume"

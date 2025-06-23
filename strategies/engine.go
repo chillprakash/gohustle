@@ -15,16 +15,16 @@ import (
 
 // StrategyEngine manages the execution of all trading strategies
 type StrategyEngine struct {
-	registry      *StrategyRegistry
-	orderManager  *zerodha.OrderManager
-	positionMgr   *zerodha.PositionManager
-	pnlManager    *zerodha.PnLManager
-	log           *logger.Logger
-	running       bool
-	wg            sync.WaitGroup
-	ctx           context.Context
-	cancel        context.CancelFunc
-	mu            sync.RWMutex
+	registry     *StrategyRegistry
+	orderManager *zerodha.OrderManager
+	positionMgr  *zerodha.PositionManager
+	pnlManager   *zerodha.PnLManager
+	log          *logger.Logger
+	running      bool
+	wg           sync.WaitGroup
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.RWMutex
 }
 
 var (
@@ -37,14 +37,14 @@ func GetStrategyEngine() *StrategyEngine {
 	engineOnce.Do(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		engineInstance = &StrategyEngine{
-			registry:      GetStrategyRegistry(),
-			orderManager:  zerodha.GetOrderManager(),
-			positionMgr:   zerodha.GetPositionManager(),
-			pnlManager:    zerodha.GetPnLManager(),
-			log:           logger.L(),
-			running:       false,
-			ctx:           ctx,
-			cancel:        cancel,
+			registry:     GetStrategyRegistry(),
+			orderManager: zerodha.GetOrderManager(),
+			positionMgr:  zerodha.GetPositionManager(),
+			pnlManager:   zerodha.GetPnLManager(),
+			log:          logger.L(),
+			running:      false,
+			ctx:          ctx,
+			cancel:       cancel,
 		}
 
 		// Register built-in strategies
@@ -202,23 +202,23 @@ func (e *StrategyEngine) processEntrySignals(strategy base.Strategy) {
 
 	// Example market data for NIFTY
 	marketData := base.MarketDataMap{
-		"symbol":          "NIFTY",
-		"exchange":        "NSE",
-		"last_price":      18500.0,
-		"open_interest":   1000000,
-		"volume":          5000000,
-		"bid_price":       18499.0,
-		"ask_price":       18501.0,
-		"timestamp":       time.Now(),
-		"iv":              20.0,
-		"delta":           0.0,
-		"theta":           0.0,
-		"gamma":           0.0,
-		"vega":            0.0,
-		"strike_price":    0.0,
-		"expiry_date":     time.Now().Add(30 * 24 * time.Hour),
-		"option_type":     "",
-		"underlying_ltp":  18500.0,
+		"symbol":         "NIFTY",
+		"exchange":       "NSE",
+		"last_price":     18500.0,
+		"open_interest":  1000000,
+		"volume":         5000000,
+		"bid_price":      18499.0,
+		"ask_price":      18501.0,
+		"timestamp":      time.Now(),
+		"iv":             20.0,
+		"delta":          0.0,
+		"theta":          0.0,
+		"gamma":          0.0,
+		"vega":           0.0,
+		"strike_price":   0.0,
+		"expiry_date":    time.Now().Add(30 * 24 * time.Hour),
+		"option_type":    "",
+		"underlying_ltp": 18500.0,
 	}
 
 	// Check for entry signals
@@ -317,7 +317,7 @@ func (e *StrategyEngine) executeSignal(strategy base.Strategy, signal *base.Sign
 		Validity:      "DAY",
 		Tag:           strategy.Name(), // Use strategy name as tag
 	}
-	
+
 	// Set side based on action
 	if signal.Action == "BUY" {
 		orderRequest.Side = zerodha.OrderSideBuy
@@ -346,7 +346,7 @@ func (e *StrategyEngine) executeSignal(strategy base.Strategy, signal *base.Sign
 
 	// Place the order
 	response, err := zerodha.PlaceOrder(orderRequest)
-	
+
 	// Extract order ID if successful
 	var orderID string
 	if response != nil {
@@ -375,14 +375,14 @@ func (e *StrategyEngine) executePositionAction(strategy base.Strategy, position 
 	if action.Action == "CLOSE" {
 		// Create order to close position
 		orderRequest := zerodha.PlaceOrderRequest{
-			Exchange:        position.Exchange,
-			TradingSymbol:   position.TradingSymbol,
-			OrderType:       zerodha.OrderTypeMarket,
-			Quantity:        position.Quantity,
-			Product:         zerodha.ProductTypeMIS, // Default to intraday
-			Validity:        "DAY",
-			Tag:             strategy.Name(), // Use strategy name as tag
-			Side:            zerodha.OrderSide(getOppositeTransactionType(position.PositionType)),
+			Exchange:      position.Exchange,
+			TradingSymbol: position.TradingSymbol,
+			OrderType:     zerodha.OrderTypeMarket,
+			Quantity:      position.Quantity,
+			Product:       zerodha.ProductTypeMIS, // Default to intraday
+			Validity:      "DAY",
+			Tag:           strategy.Name(), // Use strategy name as tag
+			Side:          zerodha.OrderSide(getOppositeTransactionType(position.PositionType)),
 		}
 
 		// Log the action
@@ -395,7 +395,7 @@ func (e *StrategyEngine) executePositionAction(strategy base.Strategy, position 
 
 		// Place the order
 		response, err := zerodha.PlaceOrder(orderRequest)
-		
+
 		// Extract order ID if successful
 		var orderID string
 		if response != nil {
@@ -423,14 +423,14 @@ func (e *StrategyEngine) executePositionAction(strategy base.Strategy, position 
 		}
 
 		orderRequest := zerodha.PlaceOrderRequest{
-			Exchange:        position.Exchange,
-			TradingSymbol:   position.TradingSymbol,
-			Side:            side,
-			OrderType:       zerodha.OrderTypeMarket,
-			Quantity:        abs(action.AdjustQuantity),
-			Product:         zerodha.ProductTypeMIS, // Default to intraday
-			Validity:        "DAY",
-			Tag:             strategy.Name(), // Use strategy name as tag
+			Exchange:      position.Exchange,
+			TradingSymbol: position.TradingSymbol,
+			Side:          side,
+			OrderType:     zerodha.OrderTypeMarket,
+			Quantity:      abs(action.AdjustQuantity),
+			Product:       zerodha.ProductTypeMIS, // Default to intraday
+			Validity:      "DAY",
+			Tag:           strategy.Name(), // Use strategy name as tag
 		}
 
 		// Log the action
@@ -444,7 +444,7 @@ func (e *StrategyEngine) executePositionAction(strategy base.Strategy, position 
 
 		// Place the order
 		response, err := zerodha.PlaceOrder(orderRequest)
-		
+
 		// Extract order ID if successful
 		var orderID string
 		if response != nil {
@@ -474,7 +474,7 @@ func (e *StrategyEngine) getPositionsForStrategy(strategyName string) ([]*db.Pos
 	if timescaleDB == nil {
 		return nil, fmt.Errorf("timescale DB is nil")
 	}
-	
+
 	// Get positions for this strategy
 	positions, err := timescaleDB.GetPositionsByStrategy(e.ctx, strategyName)
 	if err != nil {
@@ -488,7 +488,7 @@ func (e *StrategyEngine) getPositionsForStrategy(strategyName string) ([]*db.Pos
 		if pos.StrategyID == nil {
 			continue
 		}
-		
+
 		// Get strategy name from strategy ID
 		strategy, err := e.getStrategyNameByID(*pos.StrategyID)
 		if err != nil {
@@ -507,19 +507,19 @@ func (e *StrategyEngine) getStrategyNameByID(strategyID int) (string, error) {
 	if strategyID == 0 {
 		return "", fmt.Errorf("invalid strategy ID: 0")
 	}
-	
+
 	// Get the strategy from the database
 	timescaleDB := db.GetTimescaleDB()
 	if timescaleDB == nil {
 		return "", fmt.Errorf("timescale DB is nil")
 	}
-	
+
 	// Get the strategy by ID
 	strategy, err := timescaleDB.GetStrategyByID(context.Background(), strategyID)
 	if err != nil {
 		return "", fmt.Errorf("failed to get strategy by ID: %w", err)
 	}
-	
+
 	return strategy.Name, nil
 }
 
@@ -530,23 +530,23 @@ func (e *StrategyEngine) getMarketDataForSymbol(symbol, exchange string) base.Ma
 
 	// Example market data
 	return base.MarketDataMap{
-		"symbol":          symbol,
-		"exchange":        exchange,
-		"last_price":      18500.0, // Placeholder
-		"open_interest":   1000000,
-		"volume":          5000000,
-		"bid_price":       18499.0,
-		"ask_price":       18501.0,
-		"timestamp":       time.Now(),
-		"iv":              20.0,
-		"delta":           0.0,
-		"theta":           0.0,
-		"gamma":           0.0,
-		"vega":            0.0,
-		"strike_price":    0.0,
-		"expiry_date":     time.Now().Add(30 * 24 * time.Hour),
-		"option_type":     "",
-		"underlying_ltp":  18500.0,
+		"symbol":         symbol,
+		"exchange":       exchange,
+		"last_price":     18500.0, // Placeholder
+		"open_interest":  1000000,
+		"volume":         5000000,
+		"bid_price":      18499.0,
+		"ask_price":      18501.0,
+		"timestamp":      time.Now(),
+		"iv":             20.0,
+		"delta":          0.0,
+		"theta":          0.0,
+		"gamma":          0.0,
+		"vega":           0.0,
+		"strike_price":   0.0,
+		"expiry_date":    time.Now().Add(30 * 24 * time.Hour),
+		"option_type":    "",
+		"underlying_ltp": 18500.0,
 	}
 }
 

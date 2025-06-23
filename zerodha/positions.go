@@ -16,7 +16,6 @@ import (
 	"gohustle/logger"
 	"gohustle/utils"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
@@ -196,7 +195,7 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, orders []Or
 		positionsList = append(positionsList, position)
 	}
 
-	storePositionsToDB(ctx, positionsList, true)
+	storePositionsToRedis(ctx, positionsList, true)
 	return nil
 }
 
@@ -205,158 +204,182 @@ func (pm *PositionManager) ListPositionsFromDB(ctx context.Context, paperTrading
 		return nil, fmt.Errorf("position manager not initialized")
 	}
 
-	// Get database instance
-	db := db.GetTimescaleDB()
-	if db == nil {
-		return nil, fmt.Errorf("database connection not available")
-	}
+	var positionsList []positions
 
-	// Determine the table name based on paper trading flag
-	tableName := "real_positions"
+	// Determine the key based on paper trading flag
+	allPositionsKey := RealTradingPositionKeyFormat
 	if paperTrading {
-		tableName = "paper_positions"
+		allPositionsKey = PaperTradingPositionKeyFormat
 	}
 
-	// Build the query
-	query := fmt.Sprintf(`
-		SELECT 
-			instrument_token, trading_symbol, exchange, product,
-			buy_quantity, buy_value, sell_quantity, sell_value,
-			buy_price, sell_price,
-			multiplier, average_price, created_at, updated_at
-		FROM %s
-		WHERE (buy_quantity > 0 OR sell_quantity > 0)
-	`, tableName)
-
-	// Execute the query
-	rows, err := db.Query(ctx, query)
+	// Get all position keys
+	posKeys, err := pm.positionsRedis.SMembers(ctx, allPositionsKey).Result()
 	if err != nil {
-		return nil, fmt.Errorf("failed to query positions: %w", err)
+		return nil, fmt.Errorf("failed to get position keys: %w", err)
 	}
-	defer rows.Close()
+
+	// No positions found
+	if len(posKeys) == 0 {
+		return positionsList, nil
+	}
+
+	// Get all positions in a pipeline
+	pipe := pm.positionsRedis.Pipeline()
+	cmds := make([]*redis.MapStringStringCmd, len(posKeys))
+
+	for i, key := range posKeys {
+		cmds[i] = pipe.HGetAll(ctx, key)
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get positions: %w", err)
+	}
 
 	// Process results
-	var result []positions
-	for rows.Next() {
-		var pos positions
-		err := rows.Scan(
-			&pos.InstrumentToken,
-			&pos.TradingSymbol,
-			&pos.Exchange,
-			&pos.Product,
-			&pos.BuyQuantity,
-			&pos.BuyValue,
-			&pos.SellQuantity,
-			&pos.SellValue,
-			&pos.BuyPrice,
-			&pos.SellPrice,
-			&pos.Multiplier,
-			&pos.AveragePrice,
-			&pos.CreatedAt,
-			&pos.UpdatedAt,
-		)
+	for _, cmd := range cmds {
+		posMap, err := cmd.Result()
 		if err != nil {
-			return nil, fmt.Errorf("failed to scan position: %w", err)
+			pm.log.Error("Failed to get position", map[string]interface{}{
+				"error": err.Error(),
+			})
+			continue
 		}
-		result = append(result, pos)
+
+		// Skip empty results
+		if len(posMap) == 0 {
+			continue
+		}
+
+		// Parse position data
+		var pos positions
+
+		// Parse ID
+		if idStr, ok := posMap["id"]; ok {
+			pos.ID, _ = strconv.ParseInt(idStr, 10, 64)
+		}
+
+		// Parse instrument token
+		if tokenStr, ok := posMap["instrument_token"]; ok {
+			tokenUint64, _ := strconv.ParseUint(tokenStr, 10, 32)
+			pos.InstrumentToken = uint32(tokenUint64)
+		}
+
+		// Parse string fields
+		pos.TradingSymbol = posMap["trading_symbol"]
+		pos.Exchange = posMap["exchange"]
+		pos.Product = posMap["product"]
+
+		// Parse float fields
+		pos.BuyPrice, _ = strconv.ParseFloat(posMap["buy_price"], 64)
+		pos.BuyValue, _ = strconv.ParseFloat(posMap["buy_value"], 64)
+		pos.SellPrice, _ = strconv.ParseFloat(posMap["sell_price"], 64)
+		pos.SellValue, _ = strconv.ParseFloat(posMap["sell_value"], 64)
+		pos.AveragePrice, _ = strconv.ParseFloat(posMap["average_price"], 64)
+		pos.Multiplier, _ = strconv.ParseFloat(posMap["multiplier"], 64)
+
+		// Parse int fields
+		buyQty, _ := strconv.Atoi(posMap["buy_quantity"])
+		pos.BuyQuantity = buyQty
+		sellQty, _ := strconv.Atoi(posMap["sell_quantity"])
+		pos.SellQuantity = sellQty
+
+		// Parse time fields
+		if createdStr, ok := posMap["created_at"]; ok {
+			pos.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+		}
+		if updatedStr, ok := posMap["updated_at"]; ok {
+			pos.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
+		}
+
+		positionsList = append(positionsList, pos)
 	}
 
-	if err = rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating position rows: %w", err)
-	}
-
-	return result, nil
+	return positionsList, nil
 }
 
-// storePositionsToDB stores or updates positions in the appropriate table based on paperTrading flag
-// Uses upsert to handle both new and existing positions
-func storePositionsToDB(ctx context.Context, positions []positions, paperTrading bool) ([]int64, error) {
+// storePositionsToRedis stores or updates positions in Redis based on paperTrading flag
+// Uses Redis hash to store position data
+func storePositionsToRedis(ctx context.Context, positions []positions, paperTrading bool) ([]int64, error) {
 	if len(positions) == 0 {
 		return []int64{}, nil
 	}
 
 	log := logger.L()
-	log.Info("Storing positions to DB", map[string]interface{}{
-		"positions": positions,
-		"paper":     paperTrading,
+	log.Info("Storing positions to Redis", map[string]interface{}{
+		"positions_count": len(positions),
+		"paper":           paperTrading,
 	})
 
-	timescaleDB := db.GetTimescaleDB()
-	if timescaleDB == nil {
-		return nil, fmt.Errorf("failed to get database instance")
+	// Get Redis client
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
 	}
 
-	// Determine the target table
-	tableName := "real_positions"
+	// Determine the key prefix based on paper trading flag
+	keyPrefix := "position:real:"
+	allPositionsKey := RealTradingPositionKeyFormat
 	if paperTrading {
-		tableName = "paper_positions"
+		keyPrefix = "position:paper:"
+		allPositionsKey = PaperTradingPositionKeyFormat
 	}
 
 	var positionIDs []int64
+	pipe := redisCache.GetCacheDB1().Pipeline()
 
-	// Use WithTx for automatic transaction management
-	err := timescaleDB.WithTx(ctx, func(tx pgx.Tx) error {
-		// Prepare the upsert query
-		query := fmt.Sprintf(`
-    INSERT INTO %s (
-        instrument_token, trading_symbol, exchange, product,
-        buy_quantity, buy_value, sell_quantity, sell_value,
-        buy_price, sell_price,
-        multiplier, average_price, created_at, updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-    ON CONFLICT (trading_symbol, exchange, product) 
-    DO UPDATE SET 
-        buy_quantity = EXCLUDED.buy_quantity,
-        sell_quantity = EXCLUDED.sell_quantity,
-        buy_value = EXCLUDED.buy_value,
-        sell_value = EXCLUDED.sell_value,
-        buy_price = EXCLUDED.buy_price,
-        sell_price = EXCLUDED.sell_price,
-        multiplier = EXCLUDED.multiplier,
-        average_price = EXCLUDED.average_price,
-        updated_at = EXCLUDED.updated_at
-    RETURNING id`, tableName)
+	// Store each position
+	for _, pos := range positions {
+		now := time.Now()
 
-		// Prepare the statement
-		stmt, err := tx.Prepare(ctx, "upsert-position", query)
-		if err != nil {
-			return fmt.Errorf("failed to prepare statement: %w", err)
+		// Generate a unique ID if not present
+		if pos.ID == 0 {
+			// Use timestamp + instrument token as a simple ID generation mechanism
+			pos.ID = time.Now().UnixNano() + int64(pos.InstrumentToken)
 		}
 
-		// Process each position
-		for _, pos := range positions {
-			now := time.Now()
-			var id int64
+		// Create position key
+		posKey := fmt.Sprintf("%s%s:%s:%s", keyPrefix, pos.TradingSymbol, pos.Exchange, pos.Product)
 
-			err := tx.QueryRow(ctx, stmt.SQL,
-				pos.InstrumentToken,
-				pos.TradingSymbol,
-				pos.Exchange,
-				pos.Product,
-				pos.BuyQuantity,
-				pos.BuyValue,
-				pos.SellQuantity,
-				pos.SellValue,
-				pos.BuyPrice,
-				pos.SellPrice,
-				pos.Multiplier,
-				pos.AveragePrice,
-				now, // created_at (used only for new records)
-				now, // updated_at
-			).Scan(&id)
-
-			if err != nil {
-				return fmt.Errorf("failed to upsert position: %w", err)
-			}
-
-			positionIDs = append(positionIDs, id)
+		// Convert position to map for Redis hash
+		posMap := map[string]interface{}{
+			"id":               pos.ID,
+			"instrument_token": pos.InstrumentToken,
+			"trading_symbol":   pos.TradingSymbol,
+			"exchange":         pos.Exchange,
+			"product":          pos.Product,
+			"buy_price":        pos.BuyPrice,
+			"buy_value":        pos.BuyValue,
+			"buy_quantity":     pos.BuyQuantity,
+			"sell_price":       pos.SellPrice,
+			"sell_value":       pos.SellValue,
+			"sell_quantity":    pos.SellQuantity,
+			"multiplier":       pos.Multiplier,
+			"average_price":    pos.AveragePrice,
+			"created_at":       pos.CreatedAt.Format(time.RFC3339),
+			"updated_at":       now.Format(time.RFC3339),
 		}
 
-		return nil
-	})
+		// Store position in Redis hash
+		pipe.HSet(ctx, posKey, posMap)
 
+		// Set expiration (keep positions for 30 days)
+		pipe.Expire(ctx, posKey, 30*24*time.Hour)
+
+		// Add to all positions set
+		pipe.SAdd(ctx, allPositionsKey, posKey)
+
+		// Add to position token mapping
+		tokenKey := fmt.Sprintf(PositionTokenKeyFormat, pos.InstrumentToken)
+		pipe.Set(ctx, tokenKey, posKey, 30*24*time.Hour)
+
+		positionIDs = append(positionIDs, pos.ID)
+	}
+
+	// Execute pipeline
+	_, err = pipe.Exec(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("transaction failed: %w", err)
+		return nil, fmt.Errorf("failed to store positions in Redis: %w", err)
 	}
 
 	return positionIDs, nil
@@ -462,17 +485,6 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 		}
 	}()
 
-	// Store positions in database concurrently
-	go func() {
-		defer wg.Done()
-		if err := pm.storeZerodhaPositionsInDB(ctx, positions.Net); err != nil {
-			pm.log.Error("Failed to store positions in database", map[string]interface{}{
-				"error": err.Error(),
-			})
-			// Don't send this error to errChan as we want to continue even if DB update fails
-		}
-	}()
-
 	// Wait for both goroutines to finish
 	wg.Wait()
 
@@ -483,111 +495,6 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 	default:
 		return nil
 	}
-}
-
-// storeZerodhaPositionsInDB stores positions in the database
-func (pm *PositionManager) storeZerodhaPositionsInDB(ctx context.Context, kitePositions []kiteconnect.Position) error {
-	timescaleDB := db.GetTimescaleDB()
-	if timescaleDB == nil {
-		return fmt.Errorf("timescale DB is nil")
-	}
-
-	// Skip if no positions to process
-	if len(kitePositions) == 0 {
-		return nil
-	}
-
-	var isDBUpdateNeeded bool
-
-	// Get existing positions from DB
-	existingPositionsInDB, err := pm.ListPositionsFromDB(ctx, false)
-	if err != nil {
-		pm.log.Error("Failed to list existing positions", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return fmt.Errorf("failed to list existing positions: %w", err)
-	}
-
-	// Create maps for thread-safe operations
-	existingPositionsBySymbol := make(map[string]positions)
-	for i := range existingPositionsInDB {
-		existingPositionsBySymbol[existingPositionsInDB[i].TradingSymbol] = existingPositionsInDB[i]
-	}
-
-	// Create a new slice for positions that need to be updated
-	var positionsToUpdate []positions
-
-	// Process each position from Kite
-	for _, kpos := range kitePositions {
-		tradingSymbol := kpos.Tradingsymbol
-		existingPos, exists := existingPositionsBySymbol[tradingSymbol]
-
-		if exists {
-			// Check if quantities have changed
-			if existingPos.BuyQuantity != kpos.BuyQuantity ||
-				existingPos.SellQuantity != kpos.SellQuantity {
-
-				isDBUpdateNeeded = true
-				// Create a new position with updated values
-				updatedPos := existingPos
-				updatedPos.BuyQuantity = kpos.BuyQuantity
-				updatedPos.BuyValue = kpos.BuyValue
-				updatedPos.SellQuantity = kpos.SellQuantity
-				updatedPos.SellValue = kpos.SellValue
-				updatedPos.AveragePrice = kpos.AveragePrice
-				updatedPos.BuyPrice = kpos.BuyPrice
-				updatedPos.SellPrice = kpos.SellPrice
-				updatedPos.UpdatedAt = time.Now()
-
-				positionsToUpdate = append(positionsToUpdate, updatedPos)
-
-				pm.log.Info("Updating position", map[string]interface{}{
-					"symbol":        tradingSymbol,
-					"buy_quantity":  kpos.BuyQuantity,
-					"sell_quantity": kpos.SellQuantity,
-				})
-			}
-		} else {
-			// New position
-			isDBUpdateNeeded = true
-			newPos := positions{
-				TradingSymbol:   tradingSymbol,
-				Exchange:        kpos.Exchange,
-				Product:         kpos.Product,
-				InstrumentToken: kpos.InstrumentToken,
-				BuyQuantity:     kpos.BuyQuantity,
-				BuyValue:        kpos.BuyValue,
-				SellQuantity:    kpos.SellQuantity,
-				SellValue:       kpos.SellValue,
-				Multiplier:      kpos.Multiplier,
-				AveragePrice:    kpos.AveragePrice,
-				BuyPrice:        kpos.BuyPrice,
-				SellPrice:       kpos.SellPrice,
-				CreatedAt:       time.Now(),
-				UpdatedAt:       time.Now(),
-			}
-			positionsToUpdate = append(positionsToUpdate, newPos)
-
-			pm.log.Info("Creating new position", map[string]interface{}{
-				"symbol":        tradingSymbol,
-				"buy_quantity":  kpos.BuyQuantity,
-				"sell_quantity": kpos.SellQuantity,
-			})
-		}
-	}
-
-	// Only update DB if there are changes
-	if isDBUpdateNeeded && len(positionsToUpdate) > 0 {
-		_, err := storePositionsToDB(ctx, positionsToUpdate, false)
-		if err != nil {
-			pm.log.Error("Failed to store positions", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return fmt.Errorf("failed to store positions: %w", err)
-		}
-	}
-
-	return nil
 }
 
 // storePositionsInRedis stores a list of positions in Redis, removing any stale positions

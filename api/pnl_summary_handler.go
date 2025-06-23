@@ -2,9 +2,9 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"gohustle/logger"
-	"gohustle/zerodha"
 
 	"github.com/gorilla/mux"
 )
@@ -12,22 +12,18 @@ import (
 // HandleGetLatestPnLSummary returns the latest P&L summary for both real and paper trading
 func HandleGetLatestPnLSummary(w http.ResponseWriter, r *http.Request) {
 	log := logger.L()
-	ctx := r.Context()
+	log.Info("Returning dummy P&L summary")
 
-	// Get the latest P&L summary
-	summary, err := zerodha.GetPnLManager().CalculatePnL(ctx)
-	if err != nil {
-		log.Error("Failed to get latest P&L summary", map[string]interface{}{
-			"error": err.Error(),
-		})
-		sendErrorResponse(w, "Failed to get P&L summary", http.StatusInternalServerError)
-		return
-	}
-
+	// Return a dummy response
 	sendJSONResponse(w, Response{
 		Success: true,
-		Message: "Latest P&L summary retrieved successfully",
-		Data:    summary,
+		Message: "P&L summary endpoint is temporarily returning dummy data",
+		Data: map[string]interface{}{
+			"realized_pnl":   0.0,
+			"unrealized_pnl": 0.0,
+			"total_pnl":      0.0,
+			"last_updated":   time.Now().Format(time.RFC3339),
+		},
 	})
 }
 

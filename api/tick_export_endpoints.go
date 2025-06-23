@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
-	"gohustle/db"
 	"gohustle/filestore"
 	"gohustle/logger"
 )
@@ -32,15 +33,62 @@ func handleGetAvailableTickDates(w http.ResponseWriter, r *http.Request) {
 	// Get index_name from query parameters if provided
 	indexName := r.URL.Query().Get("index_name")
 
-	// Get available dates from database
-	dates, err := db.GetTimescaleDB().GetAvailableTickDates(r.Context(), indexName)
+	// Get available dates from parquet files
+	parquetDir := filestore.DefaultParquetDir
+	files, err := filepath.Glob(filepath.Join(parquetDir, "*.parquet"))
 	if err != nil {
-		logger.L().Error("Failed to get available tick dates", map[string]interface{}{
+		logger.L().Error("Failed to list parquet files", map[string]interface{}{
 			"error": err.Error(),
-			"index": indexName,
+			"path":  parquetDir,
 		})
 		sendErrorResponse(w, "Failed to get available tick dates", http.StatusInternalServerError)
 		return
+	}
+
+	// Extract dates from filenames
+	type DateInfo struct {
+		Date      string `json:"date"`
+		IndexName string `json:"index_name"`
+	}
+
+	dateMap := make(map[string]DateInfo)
+	for _, file := range files {
+		filename := filepath.Base(file)
+		// Expected format: INDEX_YYYY-MM-DD.parquet or INDEX_YYYY-MM-DD_to_YYYY-MM-DD.parquet
+		parts := strings.Split(filename, "_")
+		if len(parts) >= 2 {
+			fileIndexName := parts[0]
+
+			// Skip if index name filter is provided and doesn't match
+			if indexName != "" && fileIndexName != indexName {
+				continue
+			}
+
+			// Extract date from filename
+			var dateStr string
+			if len(parts) >= 3 && parts[1] == "to" {
+				// Range export format
+				dateStr = parts[0]
+			} else {
+				// Single date format
+				dateStr = parts[1]
+			}
+
+			// Remove .parquet extension if present
+			dateStr = strings.TrimSuffix(dateStr, ".parquet")
+
+			// Add to map to deduplicate
+			dateMap[dateStr] = DateInfo{
+				Date:      dateStr,
+				IndexName: fileIndexName,
+			}
+		}
+	}
+
+	// Convert map to slice
+	var dates []DateInfo
+	for _, info := range dateMap {
+		dates = append(dates, info)
 	}
 
 	// Return as JSON response
@@ -74,7 +122,7 @@ func handleExportTickData(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	// Handle CORS preflight
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -125,148 +173,52 @@ func handleExportTickData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create export file path
-	fileName := fmt.Sprintf("%s_%s_to_%s.parquet", 
-		req.IndexName, 
-		req.StartDate, 
+	fileName := fmt.Sprintf("%s_%s_to_%s.parquet",
+		req.IndexName,
+		req.StartDate,
 		req.EndDate,
 	)
 	filePath := filepath.Join(filestore.DefaultParquetDir, fileName)
 
-	// Get or create parquet writer
-	parquetStore := filestore.GetParquetStore()
-	writer, err := parquetStore.GetOrCreateWriter(filePath)
-	if err != nil {
-		logger.L().Error("Failed to create parquet writer", map[string]interface{}{
-			"error":      err.Error(),
-			"index":      req.IndexName,
-			"start_date": req.StartDate,
-			"end_date":   req.EndDate,
-			"file_path":  filePath,
-		})
-		sendErrorResponse(w, "Failed to create export file", http.StatusInternalServerError)
-		return
-	}
-
-	// Get tick data from database
-	rows, err := db.GetTimescaleDB().GetTickDataForExport(r.Context(), req.IndexName, startDate, endDate)
-	if err != nil {
-		logger.L().Error("Failed to get tick data", map[string]interface{}{
-			"error":      err.Error(),
-			"index":      req.IndexName,
-			"start_date": req.StartDate,
-			"end_date":   req.EndDate,
-		})
-		sendErrorResponse(w, "Failed to get tick data", http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	// Stream data from database to Parquet file
-	var tickCount int64
-	batchSize := 10000
-	batch := make([]filestore.TickRecord, 0, batchSize)
-
-	for rows.Next() {
-		var tick db.TickRecord
-		err := rows.Scan(
-			&tick.ID,
-			&tick.InstrumentToken,
-			&tick.ExchangeUnixTimestamp,
-			&tick.LastPrice,
-			&tick.OpenInterest,
-			&tick.VolumeTraded,
-			&tick.AverageTradePrice,
-			&tick.TickReceivedTime,
-			&tick.TickStoredInDbTime,
-		)
+	// Check if file already exists
+	if _, err := os.Stat(filePath); err == nil {
+		// File exists, return it directly
+		fileInfo, err := os.Stat(filePath)
 		if err != nil {
-			logger.L().Error("Failed to scan tick data", map[string]interface{}{
+			logger.L().Error("Failed to get file info", map[string]interface{}{
 				"error": err.Error(),
+				"file":  filePath,
 			})
-			continue
+			sendErrorResponse(w, "Failed to get file info", http.StatusInternalServerError)
+			return
 		}
 
-		// Convert to Parquet record
-		parquetTick := filestore.TickRecord{
-			ID:                int64(tick.ID),
-			InstrumentToken:   int64(tick.InstrumentToken),
-			ExchangeTimestamp: tick.ExchangeUnixTimestamp,
-			LastPrice:         tick.LastPrice,
-			OpenInterest:      int32(tick.OpenInterest),
-			VolumeTraded:      int32(tick.VolumeTraded),
-			AverageTradePrice: tick.AverageTradePrice,
-		}
-
-		batch = append(batch, parquetTick)
-		tickCount++
-
-		// Write batch when it reaches the batch size
-		if len(batch) >= batchSize {
-			if err := parquetStore.WriteBatch(req.IndexName, batch); err != nil {
-				logger.L().Error("Failed to write batch", map[string]interface{}{
-					"error":      err.Error(),
-					"batch_size": len(batch),
-				})
-			}
-			batch = batch[:0] // Clear batch
-		}
-
-		if tickCount%100000 == 0 {
-			logger.L().Info("Export progress", map[string]interface{}{
-				"index":       req.IndexName,
-				"ticks_so_far": tickCount,
-			})
-		}
-	}
-
-	// Write any remaining records
-	if len(batch) > 0 {
-		if err := parquetStore.WriteBatch(req.IndexName, batch); err != nil {
-			logger.L().Error("Failed to write final batch", map[string]interface{}{
-				"error":      err.Error(),
-				"batch_size": len(batch),
-			})
-		}
-	}
-
-	if err := rows.Err(); err != nil {
-		logger.L().Error("Error iterating tick data rows", map[string]interface{}{
-			"error": err.Error(),
+		// Return success with file info
+		sendJSONResponse(w, Response{
+			Success: true,
+			Message: "Tick data export file already exists",
+			Data: ExportTickDataResponse{
+				IndexName:     req.IndexName,
+				StartDate:     req.StartDate,
+				EndDate:       req.EndDate,
+				FilePath:      fileName, // Return relative path
+				FileSize:      fileInfo.Size(),
+				TicksExported: 0, // Unknown without reading the file
+			},
 		})
+		return
 	}
 
-	// Get file stats
-	stats, err := writer.GetStats()
-	if err != nil {
-		logger.L().Error("Failed to get file stats", map[string]interface{}{
-			"error": err.Error(),
-		})
-	}
-
-	// Return success response
-	response := ExportTickDataResponse{
-		IndexName:     req.IndexName,
-		StartDate:     req.StartDate,
-		EndDate:       req.EndDate,
-		TicksExported: tickCount,
-		FilePath:      filePath,
-		FileSize:      stats.CompressedSize,
-	}
-
-	logger.L().Info("Completed tick data export", map[string]interface{}{
-		"index":         req.IndexName,
-		"start_date":    req.StartDate,
-		"end_date":      req.EndDate,
-		"ticks_exported": tickCount,
-		"file_size_bytes": stats.CompressedSize,
-		"file_path":     filePath,
-	})
-
-	// Return success response
+	// Since we're not using TimescaleDB anymore, we need to inform the user
+	// that direct export from raw data is not available
 	sendJSONResponse(w, Response{
-		Success: true,
-		Message: "Tick data exported successfully",
-		Data:    response,
+		Success: false,
+		Message: "Direct export from raw tick data is no longer available. Please use the tick data collection system to generate Parquet files directly.",
+		Data: map[string]interface{}{
+			"index_name": req.IndexName,
+			"start_date": req.StartDate,
+			"end_date":   req.EndDate,
+		},
 	})
 }
 
@@ -283,7 +235,7 @@ func handleDeleteTickData(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	// Handle CORS preflight
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -300,10 +252,6 @@ func handleDeleteTickData(w http.ResponseWriter, r *http.Request) {
 	// Validate request
 	if req.IndexName == "" {
 		http.Error(w, "Index name is required", http.StatusBadRequest)
-		return
-	}
-	if req.IndexName != "NIFTY" && req.IndexName != "SENSEX" {
-		http.Error(w, "Invalid index name. Must be 'NIFTY' or 'SENSEX'", http.StatusBadRequest)
 		return
 	}
 	if req.StartDate == "" {
@@ -333,28 +281,53 @@ func handleDeleteTickData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete data from database
-	rowsDeleted, err := db.GetTimescaleDB().DeleteTickData(r.Context(), req.IndexName, startDate, endDate)
+	// Find matching parquet files
+	parquetDir := filestore.DefaultParquetDir
+	pattern := fmt.Sprintf("%s_*.parquet", req.IndexName)
+	files, err := filepath.Glob(filepath.Join(parquetDir, pattern))
 	if err != nil {
-		logger.L().Error("Failed to delete data", map[string]interface{}{
-			"error":      err.Error(),
-			"index":      req.IndexName,
-			"start_date": req.StartDate,
-			"end_date":   req.EndDate,
+		logger.L().Error("Failed to list parquet files", map[string]interface{}{
+			"error": err.Error(),
+			"path":  parquetDir,
 		})
-		sendErrorResponse(w, fmt.Sprintf("Failed to delete data: %s", err.Error()), http.StatusInternalServerError)
+		sendErrorResponse(w, "Failed to list parquet files", http.StatusInternalServerError)
 		return
+	}
+
+	// Filter files by date range
+	var filesToDelete []string
+	var deletedCount int
+
+	for _, file := range files {
+		filename := filepath.Base(file)
+		// Check if file matches date range
+		if strings.Contains(filename, req.StartDate) || strings.Contains(filename, req.EndDate) {
+			// Simple check - if filename contains either date, consider it for deletion
+			filesToDelete = append(filesToDelete, file)
+		}
+	}
+
+	// Delete matching files
+	for _, file := range filesToDelete {
+		if err := os.Remove(file); err != nil {
+			logger.L().Error("Failed to delete file", map[string]interface{}{
+				"error": err.Error(),
+				"file":  file,
+			})
+			continue
+		}
+		deletedCount++
 	}
 
 	// Return success response
 	sendJSONResponse(w, Response{
 		Success: true,
-		Message: "Tick data deleted successfully",
+		Message: "Tick data files deleted successfully",
 		Data: map[string]interface{}{
-			"rows_deleted": rowsDeleted,
-			"index":        req.IndexName,
-			"start_date":   req.StartDate,
-			"end_date":     req.EndDate,
+			"files_deleted": deletedCount,
+			"index":         req.IndexName,
+			"start_date":    req.StartDate,
+			"end_date":      req.EndDate,
 		},
 	})
 }
@@ -365,7 +338,7 @@ func handleListExportedFiles(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	// Handle CORS preflight
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)
@@ -409,8 +382,8 @@ func handleListExportedFiles(w http.ResponseWriter, r *http.Request) {
 
 // TickSamplesRequest represents a request to get tick samples
 type TickSamplesRequest struct {
-	FilePath    string `json:"file_path"`
-	NumSamples  int    `json:"num_samples"`
+	FilePath   string `json:"file_path"`
+	NumSamples int    `json:"num_samples"`
 }
 
 // handleGetTickSamples returns samples from a parquet file
@@ -419,7 +392,7 @@ func handleGetTickSamples(w http.ResponseWriter, r *http.Request) {
 		sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	
+
 	// Handle CORS preflight
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusOK)

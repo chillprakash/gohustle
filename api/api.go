@@ -9,22 +9,23 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"gohustle/appparameters"
 	"gohustle/cache"
 	"gohustle/core"
-	"gohustle/db"
 	"gohustle/filestore"
 	"gohustle/logger"
 	"gohustle/optionchain"
-	"gohustle/types"
 	"gohustle/utils"
 	"gohustle/zerodha"
 
 	"github.com/gorilla/mux"
+	"github.com/redis/go-redis/v9"
 )
 
 // APIServer represents the HTTP API server
@@ -813,190 +814,216 @@ func (s *APIServer) handleUpdatePnLParams(w http.ResponseWriter, r *http.Request
 }
 
 func (s *APIServer) handleGetPnL(w http.ResponseWriter, r *http.Request) {
-	pnlManager := zerodha.GetPnLManager()
-	if pnlManager == nil {
-		sendErrorResponse(w, "PnL manager not initialized", http.StatusInternalServerError)
-		return
-	}
-	pnlSummary, err := pnlManager.CalculatePnL(r.Context())
-	if err != nil {
-		s.log.Error("Failed to calculate P&L", map[string]interface{}{
-			"error": err.Error(),
-		})
-		sendErrorResponse(w, "Failed to calculate P&L", http.StatusInternalServerError)
-		return
-	}
+	// pnlManager := zerodha.GetPnLManager()
+	// if pnlManager == nil {
+	// 	sendErrorResponse(w, "PnL manager not initialized", http.StatusInternalServerError)
+	// 	return
+	// }
+	// pnlSummary, err := pnlManager.CalculatePnL(r.Context())
+	// if err != nil {
+	// 	s.log.Error("Failed to calculate P&L", map[string]interface{}{
+	// 		"error": err.Error(),
+	// 	})
+	// 	sendErrorResponse(w, "Failed to calculate P&L", http.StatusInternalServreErþror)
+	// 	return
+	// }
 	resp := Response{
 		Success: true,
-		Data:    pnlSummary,
+		Data:    nil,
 	}
 	sendJSONResponse(w, resp)
 }
 
 // handleGetTimeSeriesMetrics handles requests for time series metrics
 func (s *APIServer) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Request) {
-	// Parse query parameters into request struct
-	req := TimeSeriesMetricsRequest{
-		Index:              r.URL.Query().Get("index"),
-		Interval:           r.URL.Query().Get("interval"),
-		Mode:               r.URL.Query().Get("mode"),
-		SinceTimestamp:     r.URL.Query().Get("since_timestamp"),
-		UntilTimestamp:     r.URL.Query().Get("until_timestamp"),
-		LastKnownTimestamp: r.URL.Query().Get("last_known_timestamp"),
-	}
-
-	// Set default mode if not specified
-	if req.Mode == "" {
-		req.Mode = "historical"
-	}
-
-	// Validate index (required for all modes)
-	if req.Index == "" {
-		sendErrorResponse(w, "Missing required parameter: index", http.StatusBadRequest)
+	if r.Method != http.MethodGet && r.Method != http.MethodOptions {
+		sendErrorResponse(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Use TimescaleDB directly for metrics
-	var dbMetrics []*db.IndexMetrics
+	// Handle CORS preflight
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Parse query parameters
+	metricType := r.URL.Query().Get("metric_type")
+	if metricType == "" {
+		sendErrorResponse(w, "metric_type parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	// Get time range parameters
+	startTimeStr := r.URL.Query().Get("start_time")
+	endTimeStr := r.URL.Query().Get("end_time")
+
+	// Validate time parameters
+	var startTime, endTime time.Time
 	var err error
 
-	var metrics []*types.MetricsData
-
-	// Helper to convert db.IndexMetrics to types.MetricsData
-	convertIndexMetrics := func(dbMetrics []*db.IndexMetrics) []*types.MetricsData {
-		var result []*types.MetricsData
-		for _, m := range dbMetrics {
-			result = append(result, &types.MetricsData{
-				UnderlyingPrice: m.SpotPrice,
-				SyntheticFuture: m.FairPrice,
-				LowestStraddle:  m.StraddlePrice,
-				Timestamp:       m.Timestamp.UnixMilli(),
-			})
-		}
-		return result
-	}
-
-	switch req.Mode {
-	case "realtime":
-		// Handle real-time mode
-		if req.LastKnownTimestamp != "" {
-			// Parse last known timestamp
-			lastKnown, err := strconv.ParseInt(req.LastKnownTimestamp, 10, 64)
-			if err != nil {
-				sendErrorResponse(w, "Invalid last_known_timestamp format", http.StatusBadRequest)
-				return
-			}
-			// Get only newer points
-			// Get points after lastKnown timestamp (assume milliseconds since epoch)
-			startTime := time.UnixMilli(lastKnown)
-			endTime := time.Now()
-			dbMetrics, err = db.GetTimescaleDB().GetIndexMetricsInTimeRange(req.Index, startTime, endTime)
-		} else {
-			// Get latest point only
-			dbMetrics, err = db.GetTimescaleDB().GetLatestIndexMetrics(req.Index, 1)
-		}
-
-	case "historical":
-		// Validate historical mode parameters
-		if req.Interval == "" {
-			sendErrorResponse(w, "Missing required parameter for historical mode: interval", http.StatusBadRequest)
+	if startTimeStr != "" {
+		startTime, err = time.Parse(time.RFC3339, startTimeStr)
+		if err != nil {
+			sendErrorResponse(w, "Invalid start_time format. Use RFC3339 format.", http.StatusBadRequest)
 			return
 		}
-
-		// Validate interval
-		if _, ok := ValidIntervals[req.Interval]; !ok {
-			sendErrorResponse(w, "Invalid interval. Valid values are: 5s, 10s, 20s, 30s", http.StatusBadRequest)
-			return
-		}
-
-		// Parse count if provided
-		if countStr := r.URL.Query().Get("count"); countStr != "" {
-			count, err := strconv.Atoi(countStr)
-			if err != nil {
-				sendErrorResponse(w, "Invalid count parameter. Must be an integer.", http.StatusBadRequest)
-				return
-			}
-			if count <= 0 {
-				sendErrorResponse(w, "Count must be greater than 0", http.StatusBadRequest)
-				return
-			}
-			if count > 1000 {
-				sendErrorResponse(w, "Count cannot exceed 1000", http.StatusBadRequest)
-				return
-			}
-			req.Count = count
-		}
-
-		// Handle time range if provided
-		var startTime, endTime int64
-		if req.SinceTimestamp != "" {
-			startTime, err = strconv.ParseInt(req.SinceTimestamp, 10, 64)
-			if err != nil {
-				sendErrorResponse(w, "Invalid since_timestamp format", http.StatusBadRequest)
-				return
-			}
-		}
-		if req.UntilTimestamp != "" {
-			endTime, err = strconv.ParseInt(req.UntilTimestamp, 10, 64)
-			if err != nil {
-				sendErrorResponse(w, "Invalid until_timestamp format", http.StatusBadRequest)
-				return
-			}
-		}
-
-		if startTime > 0 && endTime > 0 {
-			dbMetrics, err = db.GetTimescaleDB().GetIndexMetricsInTimeRange(req.Index, time.UnixMilli(startTime), time.UnixMilli(endTime))
-		} else if req.Count > 0 {
-			dbMetrics, err = db.GetTimescaleDB().GetLatestIndexMetrics(req.Index, req.Count)
-		} else {
-			// Default to last 50 points if no time range or count specified
-			dbMetrics, err = db.GetTimescaleDB().GetLatestIndexMetrics(req.Index, 50)
-		}
-
-	default:
-		sendErrorResponse(w, "Invalid mode. Must be 'historical' or 'realtime'", http.StatusBadRequest)
-		return
+	} else {
+		// Default to 24 hours ago if not provided
+		startTime = time.Now().Add(-24 * time.Hour)
 	}
 
+	if endTimeStr != "" {
+		endTime, err = time.Parse(time.RFC3339, endTimeStr)
+		if err != nil {
+			sendErrorResponse(w, "Invalid end_time format. Use RFC3339 format.", http.StatusBadRequest)
+			return
+		}
+	} else {
+		// Default to now if not provided
+		endTime = time.Now()
+	}
+
+	// Get Redis client
+	redisClient, err := cache.GetRedisCache()
 	if err != nil {
-		s.log.Error("Failed to fetch metrics", map[string]interface{}{
+		logger.L().Error("Failed to get Redis client", map[string]interface{}{
 			"error": err.Error(),
 		})
-		sendErrorResponse(w, "Failed to fetch metrics", http.StatusInternalServerError)
+		sendErrorResponse(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	// If dbMetrics was used, convert to API type
-	if dbMetrics != nil {
-		metrics = convertIndexMetrics(dbMetrics)
+	// Define Redis key pattern based on metric type
+	var keyPattern string
+	switch metricType {
+	case "cpu_usage":
+		keyPattern = "metrics:cpu:*"
+	case "memory_usage":
+		keyPattern = "metrics:memory:*"
+	case "network_io":
+		keyPattern = "metrics:network:*"
+	case "disk_io":
+		keyPattern = "metrics:disk:*"
+	default:
+		sendErrorResponse(w, "Unsupported metric type", http.StatusBadRequest)
+		return
 	}
 
-	// Convert to response format
-	validMetrics := make([]*TimeSeriesMetricsResponse, 0, len(metrics))
-	for _, metric := range metrics {
-		validMetrics = append(validMetrics, &TimeSeriesMetricsResponse{
-			Timestamp:       metric.Timestamp,
-			UnderlyingPrice: metric.UnderlyingPrice,
-			SyntheticFuture: metric.SyntheticFuture,
-			LowestStraddle:  metric.LowestStraddle,
-			ATMStrike:       metric.ATMStrike,
+	// Get all keys matching the pattern
+	ctx := r.Context()
+	keys, err := redisClient.GetCacheDB1().Keys(ctx, keyPattern).Result()
+	if err != nil {
+		logger.L().Error("Failed to get metric keys from Redis", map[string]interface{}{
+			"error":       err.Error(),
+			"key_pattern": keyPattern,
+		})
+		sendErrorResponse(w, "Failed to retrieve metrics", http.StatusInternalServerError)
+		return
+	}
+
+	// If no metrics found
+	if len(keys) == 0 {
+		sendJSONResponse(w, Response{
+			Success: true,
+			Message: "No metrics found for the specified type and time range",
+			Data: map[string]interface{}{
+				"metric_type": metricType,
+				"start_time":  startTime.Format(time.RFC3339),
+				"end_time":    endTime.Format(time.RFC3339),
+				"data_points": []interface{}{},
+			},
+		})
+		return
+	}
+
+	// Get values for all keys in a pipeline
+	pipe := redisClient.GetCacheDB1().Pipeline()
+	cmds := make([]*redis.StringCmd, len(keys))
+
+	for i, key := range keys {
+		cmds[i] = pipe.Get(ctx, key)
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil && err != redis.Nil {
+		logger.L().Error("Failed to get metric values from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to retrieve metric values", http.StatusInternalServerError)
+		return
+	}
+
+	// Process results
+	type MetricPoint struct {
+		Timestamp time.Time `json:"timestamp"`
+		Value     float64   `json:"value"`
+	}
+
+	var dataPoints []MetricPoint
+
+	for i, cmd := range cmds {
+		val, err := cmd.Result()
+		if err == redis.Nil {
+			continue
+		}
+		if err != nil {
+			logger.L().Error("Failed to get value for key", map[string]interface{}{
+				"error": err.Error(),
+				"key":   keys[i],
+			})
+			continue
+		}
+
+		// Extract timestamp from key
+		// Expected format: metrics:type:timestamp
+		parts := strings.Split(keys[i], ":")
+		if len(parts) < 3 {
+			continue
+		}
+
+		// Parse timestamp
+		tsStr := parts[2]
+		ts, err := strconv.ParseInt(tsStr, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		timestamp := time.Unix(ts, 0)
+
+		// Filter by time range
+		if timestamp.Before(startTime) || timestamp.After(endTime) {
+			continue
+		}
+
+		// Parse value
+		value, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			continue
+		}
+
+		dataPoints = append(dataPoints, MetricPoint{
+			Timestamp: timestamp,
+			Value:     value,
 		})
 	}
 
-	resp := Response{
+	// Sort data points by timestamp
+	sort.Slice(dataPoints, func(i, j int) bool {
+		return dataPoints[i].Timestamp.Before(dataPoints[j].Timestamp)
+	})
+
+	// Return response
+	sendJSONResponse(w, Response{
 		Success: true,
 		Message: "Time series metrics retrieved successfully",
 		Data: map[string]interface{}{
-			"mode":            req.Mode,
-			"index":           req.Index,
-			"interval":        req.Interval,
-			"requested_count": req.Count,
-			"returned_count":  len(validMetrics),
-			"metrics":         validMetrics,
+			"metric_type": metricType,
+			"start_time":  startTime.Format(time.RFC3339),
+			"end_time":    endTime.Format(time.RFC3339),
+			"data_points": dataPoints,
 		},
-	}
-
-	sendJSONResponse(w, resp)
+	})
 }
 
 // handleGeneral handles the /general endpoint that returns general market information

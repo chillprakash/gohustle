@@ -31,11 +31,11 @@
         }
     },
     "kite": {
-        "api_key": "mpztqt5n7hujwxhy",
-        "api_secret": "lokvoi4wl1dpyegm1j7g4svf46ckoell",
-        "user_id": "QUM025",
-        "user_password": "Test@1122",
-        "totp_key": "WGUKEQ5RS5TNUWHWCE65HZD6VGZACVF2",
+        "api_key": "",
+        "api_secret": "",
+        "user_id": "",
+        "user_password": "",
+        "totp_key": "",
         "login_url": "https://kite.zerodha.com/api/login",
         "twofa_url": "https://kite.zerodha.com/api/twofa",
         "data_path": "data"

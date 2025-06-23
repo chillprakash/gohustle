@@ -12,7 +12,7 @@ import (
 // HandleGetLatestPnLSummary returns the latest P&L summary for both real and paper trading
 func HandleGetLatestPnLSummary(w http.ResponseWriter, r *http.Request) {
 	log := logger.L()
-	log.Info("Returning dummy P&L summary")
+	log.Debug("Returning dummy P&L summary")
 
 	// Return a dummy response
 	sendJSONResponse(w, Response{

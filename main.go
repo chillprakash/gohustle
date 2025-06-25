@@ -66,14 +66,6 @@ func startDataProcessing(ctx context.Context, cfg *config.Config) error {
 
 	scheduler.InitializePositionPolling(ctx)
 
-	// scheduler.InitializeIndexOptionChainPolling(ctx)
-
-	// // Initialize tick data archiving (hourly) and consolidation (outside market hours)
-	// archive.InitializeTickDataArchiving(ctx)
-	// archive.InitializeTickDataConsolidation(ctx)
-	// logger.L().Info("Initialized tick data archiving and consolidation", nil)
-
-	// Block until context is cancelled
 	<-ctx.Done()
 	return nil
 }

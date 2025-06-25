@@ -205,59 +205,33 @@ func (pm *PositionManager) ListPositionsFromDB(ctx context.Context) ([]positions
 
 	var positionsList []positions
 
-	// Always use real trading positions key
-	allPositionsKey := RealTradingPositionKeyFormat
+	// Debug: Log that we're looking for positions
+	pm.log.Debug("Looking for positions in Redis", map[string]interface{}{})
 
-	// Get the consolidated position string (format: "token1_qty1,token2_qty2,...")
-	positionsStr, err := pm.positionsRedis.Get(ctx, allPositionsKey).Result()
+	// DIRECT APPROACH: Get all position keys directly from the hash
+	// This bypasses the need to use the consolidated key list which might be inconsistent
+	positionKeys, err := pm.positionsRedis.HKeys(ctx, "positions").Result()
 	if err != nil {
-		if err == redis.Nil {
-			// Key doesn't exist, return empty list
-			return positionsList, nil
-		}
-		return nil, fmt.Errorf("failed to get positions data: %w", err)
+		pm.log.Error("Failed to get position keys from hash", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to get position keys: %w", err)
 	}
 
-	// No positions found
-	if positionsStr == "" {
-		return positionsList, nil
-	}
+	// Log what we found
+	pm.log.Debug("Found positions in Redis hash", map[string]interface{}{
+		"count": len(positionKeys),
+		"sample_keys": func() []string {
+			if len(positionKeys) > 5 {
+				return positionKeys[:5] // Just show first 5 keys
+			}
+			return positionKeys
+		}(),
+	})
 
-	// Parse the comma-separated list of positions
-	positionEntries := strings.Split(positionsStr, ",")
-	if len(positionEntries) == 0 {
-		return positionsList, nil
-	}
-
-	// Process each position entry (format: "token_quantity")
-	positionKeys := make([]string, 0, len(positionEntries))
-	for _, entry := range positionEntries {
-		parts := strings.Split(entry, "_")
-		if len(parts) != 2 {
-			// Skip invalid entries
-			continue
-		}
-
-		tokenStr := parts[0]
-		// Create the position key format based on the token
-		positionKey := fmt.Sprintf("position:*:%s", tokenStr)
-
-		// Find all keys matching this pattern
-		keys, err := pm.positionsRedis.Keys(ctx, positionKey).Result()
-		if err != nil {
-			pm.log.Error("Failed to find position keys", map[string]interface{}{
-				"token": tokenStr,
-				"error": err.Error(),
-			})
-			continue
-		}
-
-		// Add all matching keys to our list
-		positionKeys = append(positionKeys, keys...)
-	}
-
-	// No position keys found
+	// If no positions found, return empty list
 	if len(positionKeys) == 0 {
+		pm.log.Debug("No positions found in Redis", map[string]interface{}{})
 		return positionsList, nil
 	}
 
@@ -849,6 +823,8 @@ func getOptionType(symbol string) string {
 	}
 	return "PE"
 }
+
+
 
 // getInstrumentTokenForStrike is a helper function to find the instrument token for a given strike price and option type
 func (pm *PositionManager) getInstrumentTokenForStrike(ctx context.Context, strike float64, optionType string, baseSymbol string, expiryDate string) string {

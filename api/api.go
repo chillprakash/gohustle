@@ -172,9 +172,9 @@ func (s *APIServer) Start(ctx context.Context) error {
 	s.server = &http.Server{
 		Addr:         ":" + s.port,
 		Handler:      s.CORSMiddleware(s.router),
-		ReadTimeout:  2400 * time.Second, // Reduced from 300s
-		WriteTimeout: 2400 * time.Second, // Reduced from 300s
-		IdleTimeout:  2400 * time.Second, // Reduced from 600s
+		ReadTimeout:  30 * time.Second,  // Standard timeout for reading request
+		WriteTimeout: 30 * time.Second,  // Standard timeout for writing response
+		IdleTimeout:  120 * time.Second, // Longer timeout for idle connections
 	}
 
 	// Start the server in a goroutine
@@ -1045,4 +1045,22 @@ func (s *APIServer) handleGeneral(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, response)
+}
+
+// HandleGetLatestPnLSummary returns the latest P&L summary for both real and paper trading
+func HandleGetLatestPnLSummary(w http.ResponseWriter, r *http.Request) {
+	log := logger.L()
+	log.Debug("Returning dummy P&L summary")
+
+	// Return a dummy response
+	sendJSONResponse(w, Response{
+		Success: true,
+		Message: "P&L summary endpoint is temporarily returning dummy data",
+		Data: map[string]interface{}{
+			"realized_pnl":   0.0,
+			"unrealized_pnl": 0.0,
+			"total_pnl":      0.0,
+			"last_updated":   time.Now().Format(time.RFC3339),
+		},
+	})
 }

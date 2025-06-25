@@ -62,20 +62,7 @@ func (s *APIServer) setupRoutes() {
 	// Data export endpoints
 	authenticatedRouter.HandleFunc("/export/wal-to-parquet", s.handleWalToParquet).Methods("POST")
 
-	// Tick data export endpoints
-	authenticatedRouter.HandleFunc("/ticks/dates", handleGetAvailableTickDates).Methods("GET")
-	authenticatedRouter.HandleFunc("/ticks/export", handleExportTickData).Methods("POST")
-	authenticatedRouter.HandleFunc("/ticks/delete", handleDeleteTickData).Methods("POST")
-	authenticatedRouter.HandleFunc("/ticks/files", handleListExportedFiles).Methods("GET")
-	authenticatedRouter.HandleFunc("/ticks/samples", handleGetTickSamples).Methods("POST")
-
-	// Archive management endpoints
-	authenticatedRouter.HandleFunc("/archive/jobs", handleGetArchiveJobs).Methods("GET")
-	authenticatedRouter.HandleFunc("/archive/retry", handleRetryArchiveJob).Methods("POST")
-	authenticatedRouter.HandleFunc("/archive/run", handleRunArchiveJob).Methods("POST")
-	authenticatedRouter.HandleFunc("/archive/consolidate", handleRunConsolidationJob).Methods("POST")
-	authenticatedRouter.HandleFunc("/archive/files", handleListArchiveFiles).Methods("GET")
-	authenticatedRouter.HandleFunc("/tick-data/dashboard", handleGetTickDataDashboard).Methods("GET")
+	// No tick data endpoints - removed
 
 	// General endpoint
 	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET")

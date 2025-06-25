@@ -134,7 +134,7 @@ func initializeRedisCache() (*RedisCache, error) {
 	}()
 
 	// Wait for all pings
-	for i := 0; i < 4; i++ { // Changed to 4
+	for i := 0; i < 5; i++ { // Changed to 4
 		if err := <-errChan; err != nil {
 			// Clean up on failure
 			positionsDB2.Close()

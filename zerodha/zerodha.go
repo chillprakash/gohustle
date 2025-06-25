@@ -23,7 +23,6 @@ import (
 	"gohustle/cache"
 	"gohustle/config"
 	"gohustle/logger"
-	"gohustle/token"
 
 	"github.com/pquerna/otp/totp"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
@@ -36,6 +35,13 @@ const (
 	MaxConnections         = 3
 	MaxTokensPerConnection = 3000
 )
+
+// TokenData represents the common structure for token data
+type TokenData struct {
+	AccessToken string    `json:"access_token"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	CreatedAt   time.Time `json:"created_at"`
+}
 
 // KiteConnect provides a wrapper around the Kite Connect API
 type KiteConnect struct {
@@ -163,7 +169,7 @@ func (k *KiteConnect) IsTokenValid() bool {
 		return false
 	}
 
-	var tokenData token.TokenData
+	var tokenData TokenData
 	if err := json.Unmarshal([]byte(cred), &tokenData); err != nil {
 		k.log.Error("Failed to unmarshal token data", map[string]interface{}{
 			"error": err.Error(),
@@ -210,7 +216,7 @@ func (k *KiteConnect) storeToken(ctx context.Context, accessToken string) error 
 	now := time.Now()
 
 	// Create token data
-	tokenData := token.TokenData{
+	tokenData := TokenData{
 		AccessToken: accessToken,
 		ExpiresAt:   now.Add(TokenValidity),
 		CreatedAt:   now,
@@ -426,7 +432,7 @@ func (k *KiteConnect) getStoredToken() (string, error) {
 		return "", fmt.Errorf("failed to get token from Redis: %w", err)
 	}
 
-	var tokenData token.TokenData
+	var tokenData TokenData
 	if err := json.Unmarshal([]byte(cred), &tokenData); err != nil {
 		k.log.Error("Failed to unmarshal token data", map[string]interface{}{
 			"error": err.Error(),

@@ -14,49 +14,7 @@ services:
           memory: 384M
         reservations:
           memory: 128M
-  
-  nats:
-    image: nats:2.9-alpine
-    ports:
-      - "4222:4222"
-      - "8222:8222"
-    command: ["-js", "-m", "8222"]
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-        reservations:
-          memory: 128M
-  
-  timescaledb:
-    image: timescale/timescaledb:latest-pg14
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=gohustle
-      # Performance tuning
-      - TIMESCALEDB_TUNE_MAX_CONNECTIONS=100
-      - TIMESCALEDB_TUNE_MAX_BACKGROUND_WORKERS=8
-      - TIMESCALEDB_TUNE_MEMORY=1GB
-    ports:
-      - "5432:5432"
-    volumes:
-      - timescaledb_data:/var/lib/postgresql/data
-      - ./db/schema.sql:/docker-entrypoint-initdb.d/schema.sql
-    deploy:
-      resources:
-        limits:
-          memory: 1536M
-        reservations:
-          memory: 512M
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
 volumes:
   redis_data:
-    driver: local
-  timescaledb_data:
     driver: local

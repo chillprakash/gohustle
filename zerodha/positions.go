@@ -38,10 +38,9 @@ type positions struct {
 }
 
 const (
-	RealTradingPositionKeyFormat  = "position:real_trading:all_positions"  // category, tradingsymbol, product
-	PaperTradingPositionKeyFormat = "position:paper_trading:all_positions" // category, tradingsymbol, product
-	PositionTokenKeyFormat        = "position:token:%d"                    // instrumentToken
-	PostionsJSONKeyFormat         = "positionsdump:%s"                     // paper or real
+	PositionsKeyFormat     = "position:all_positions" // List of all positions
+	PositionTokenKeyFormat = "position:token:%d"      // instrumentToken
+	PostionsJSONKeyFormat  = "positionsdump:real"     // Positions dump
 )
 
 type PositionManager struct {
@@ -88,7 +87,6 @@ type DetailedPosition struct {
 	LTP             float64         `json:"ltp"`
 	Diff            float64         `json:"diff"`
 	Value           float64         `json:"value"`
-	PaperTrading    bool            `json:"paper_trading"`    // Whether this is a paper trading position
 	InstrumentToken string          `json:"instrument_token"` // Instrument token for the position
 	Moves           MoveSuggestions `json:"moves"`
 }
@@ -151,7 +149,7 @@ func GetPositionManager() *PositionManager {
 	return positionInstance
 }
 
-func (pm *PositionManager) CreatePaperPositions(ctx context.Context, orders []Order, indexMeta *cache.InstrumentData, side Side) error {
+func (pm *PositionManager) CreatePositions(ctx context.Context, orders []Order, indexMeta *cache.InstrumentData, side Side) error {
 	if pm == nil || pm.positionsRedis == nil {
 		return fmt.Errorf("position manager or redis client not initialized")
 	}
@@ -162,20 +160,15 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, orders []Or
 		return err
 	}
 
-	pm.log.Info("Creating paper positions", map[string]interface{}{
-		"orders": orders,
-		"index":  indexMeta,
-		"side":   side,
-	})
 	positionsList := []positions{}
 	for _, order := range orders {
-
 		position := positions{
 			InstrumentToken: indexMeta.InstrumentToken,
 			TradingSymbol:   indexMeta.TradingSymbol,
 			Exchange:        indexMeta.Exchange,
 			Product:         string(productType),
 			Multiplier:      1,
+			CreatedAt:       time.Now(),
 			AveragePrice:    ltpData.LTP,
 		}
 
@@ -188,14 +181,14 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, orders []Or
 			position.SellValue = float64(order.Quantity) * ltpData.LTP
 		}
 
-		pm.log.Info("Creating paper positions", map[string]interface{}{
+		pm.log.Info("Creating positions", map[string]interface{}{
 			"position": position,
 		})
 		positionsList = append(positionsList, position)
 	}
 
-	storePositionsToRedis(ctx, positionsList, true)
-	return nil
+	_, err = storePositionsToRedis(ctx, positionsList)
+	return err
 }
 
 func (pm *PositionManager) ListPositionsFromDB(ctx context.Context) ([]positions, error) {
@@ -333,9 +326,9 @@ func (pm *PositionManager) ListPositionsFromDB(ctx context.Context) ([]positions
 	return positionsList, nil
 }
 
-// storePositionsToRedis stores or updates positions in Redis based on paperTrading flag
+// storePositionsToRedis stores or updates positions in Redis
 // Uses Redis hash to store position data
-func storePositionsToRedis(ctx context.Context, positions []positions, paperTrading bool) ([]int64, error) {
+func storePositionsToRedis(ctx context.Context, positions []positions) ([]int64, error) {
 	if len(positions) == 0 {
 		return []int64{}, nil
 	}
@@ -343,7 +336,6 @@ func storePositionsToRedis(ctx context.Context, positions []positions, paperTrad
 	log := logger.L()
 	log.Info("Storing positions to Redis", map[string]interface{}{
 		"positions_count": len(positions),
-		"paper":           paperTrading,
 	})
 
 	// Get Redis client
@@ -352,13 +344,9 @@ func storePositionsToRedis(ctx context.Context, positions []positions, paperTrad
 		return nil, fmt.Errorf("failed to get Redis cache: %w", err)
 	}
 
-	// Determine the key prefix based on paper trading flag
-	keyPrefix := "position:real:"
-	allPositionsKey := RealTradingPositionKeyFormat
-	if paperTrading {
-		keyPrefix = "position:paper:"
-		allPositionsKey = PaperTradingPositionKeyFormat
-	}
+	// Use standard key prefix for positions
+	keyPrefix := "position:"
+	allPositionsKey := PositionsKeyFormat
 
 	var positionIDs []int64
 	pipe := redisCache.GetCacheDB1().Pipeline()
@@ -429,11 +417,11 @@ func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.C
 	cachePositionsMap := make(map[string]CachedRedisPostitionsAndQuantity)
 
 	// Get the comma-separated position data from Redis
-	allPositions, err := pm.positionsRedis.Get(ctx, RealTradingPositionKeyFormat).Result()
+	allPositions, err := pm.positionsRedis.Get(ctx, PositionsKeyFormat).Result()
 
 	if err == redis.Nil {
 		pm.log.Debug("No positions found in Redis", map[string]interface{}{
-			"key": RealTradingPositionKeyFormat,
+			"key": PositionsKeyFormat,
 		})
 		return cachePositionsMap, nil
 	}
@@ -536,14 +524,29 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions []kiteconnect.Position) error {
 	// Filter out positions with zero quantity (closed positions)
 	activePositions := make([]kiteconnect.Position, 0, len(positions))
+
+	// Create a map of all tokens from the API response for stale detection
+	allTokensFromAPI := make(map[uint32]bool)
+
+	// Process all positions from API
 	for _, pos := range positions {
+		// Mark this token as seen in the API response
+		allTokensFromAPI[uint32(pos.InstrumentToken)] = true
+
+		// Only keep positions with non-zero quantity
 		if pos.Quantity != 0 {
 			activePositions = append(activePositions, pos)
+		} else {
+			// This is a closed position, log it
+			pm.log.Debug("Skipping closed position", map[string]interface{}{
+				"symbol": pos.Tradingsymbol,
+				"token":  pos.InstrumentToken,
+			})
 		}
 	}
 
-	// Get existing position data from RealTradingPositionKeyFormat
-	existingPositionsStr, err := pm.positionsRedis.Get(ctx, RealTradingPositionKeyFormat).Result()
+	// Get existing position data from PositionsKeyFormat
+	existingPositionsStr, err := pm.positionsRedis.Get(ctx, PositionsKeyFormat).Result()
 	if err != nil && err != redis.Nil {
 		pm.log.Error("Failed to get existing positions", map[string]interface{}{
 			"error": err.Error(),
@@ -613,30 +616,43 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 		positionValues = append(positionValues, fmt.Sprintf("%d_%d", pos.InstrumentToken, pos.Quantity))
 	}
 
-	// Remove stale positions from the hash
-	for token, isStale := range existingTokens {
-		if isStale {
-			// This token exists in the old list but not in the new positions
-			// We should find and remove any positions with this token
-			pattern := fmt.Sprintf("position:*:%d", token)
-			keys, err := pm.positionsRedis.Keys(ctx, pattern).Result()
-			if err != nil {
-				pm.log.Error("Failed to find stale positions", map[string]interface{}{
-					"token": token,
-					"error": err.Error(),
-				})
-				continue
-			}
+	// Find and remove stale positions that are no longer in the API response or have zero quantity
+	// First, get all position keys from Redis
+	positionKeys, err := pm.positionsRedis.HKeys(ctx, "positions").Result()
+	if err != nil {
+		pm.log.Error("Failed to get position keys from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+	} else {
+		// Check each position in Redis to see if it's still active
+		for _, key := range positionKeys {
+			// Extract the token from the key (format: position:{tradingsymbol}:{token})
+			keyParts := strings.Split(key, ":")
+			if len(keyParts) >= 3 {
+				tokenStr := keyParts[2]
+				token, err := strconv.ParseUint(tokenStr, 10, 32)
+				if err != nil {
+					pm.log.Error("Failed to parse token from key", map[string]interface{}{
+						"key":   key,
+						"token": tokenStr,
+						"error": err.Error(),
+					})
+					continue
+				}
 
-			for _, key := range keys {
-				// Extract just the key name without the hash name
-				keyParts := strings.Split(key, ":")
-				if len(keyParts) >= 3 {
-					posKey := key
-					err := pm.positionsRedis.HDel(ctx, "positions", posKey).Err()
+				// Check if this token is in the API response and has non-zero quantity
+				if !allTokensFromAPI[uint32(token)] {
+					// This position is stale (not in API response at all)
+					pm.log.Debug("Removing stale position (not in API)", map[string]interface{}{
+						"key":   key,
+						"token": token,
+					})
+
+					// Remove from Redis
+					err := pm.positionsRedis.HDel(ctx, "positions", key).Err()
 					if err != nil {
 						pm.log.Error("Failed to remove stale position", map[string]interface{}{
-							"key":   posKey,
+							"key":   key,
 							"error": err.Error(),
 						})
 					}
@@ -647,7 +663,14 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 
 	// Store the consolidated list of positions
 	positionAllKeyFormatValue := strings.Join(positionValues, ",")
-	err = pm.positionsRedis.Set(ctx, RealTradingPositionKeyFormat, positionAllKeyFormatValue, 0).Err()
+
+	// Log the consolidated position list for debugging
+	pm.log.Debug("Storing consolidated position list", map[string]interface{}{
+		"count": len(positionValues),
+		"value": positionAllKeyFormatValue,
+	})
+
+	err = pm.positionsRedis.Set(ctx, PositionsKeyFormat, positionAllKeyFormatValue, 0).Err()
 	if err != nil {
 		pm.log.Error("Failed to store all positions in Redis", map[string]interface{}{
 			"error": err.Error(),
@@ -823,8 +846,6 @@ func getOptionType(symbol string) string {
 	}
 	return "PE"
 }
-
-
 
 // getInstrumentTokenForStrike is a helper function to find the instrument token for a given strike price and option type
 func (pm *PositionManager) getInstrumentTokenForStrike(ctx context.Context, strike float64, optionType string, baseSymbol string, expiryDate string) string {

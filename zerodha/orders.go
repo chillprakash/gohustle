@@ -26,7 +26,6 @@ type Order struct {
 	InstrumentToken    uint32          `json:"instrument_token" db:"instrument_token"`
 	TradingSymbol      string          `json:"trading_symbol" db:"trading_symbol"`
 	Quantity           int             `json:"quantity" db:"quantity"`
-	PaperTrading       bool            `json:"paper_trading" db:"paper_trading"`
 	CreatedAt          time.Time       `json:"created_at" db:"created_at"`
 	PayloadToBroker    json.RawMessage `json:"payload_to_broker" db:"payload_to_broker"`
 	ResponseFromBroker json.RawMessage `json:"response_from_broker" db:"response_from_broker"`
@@ -51,7 +50,6 @@ type PlaceOrderRequest struct {
 	OrderType             OrderType `json:"order_type"`
 	Quantity              int       `json:"quantity"`
 	Percentage            int       `json:"percentage"`
-	PaperTrading          bool      `json:"paper_trading"`
 	TargetInstrumentToken uint32    `json:"target_instrument_token"`
 }
 type IceBergParams struct {
@@ -267,7 +265,6 @@ func createNormalOrder(req PlaceOrderRequest, indexMeta *cache.InstrumentData, o
 
 	// Create payload to broker
 	payload := map[string]interface{}{
-		"paper":            req.PaperTrading,
 		"quantity":         req.Quantity,
 		"order_type":       req.OrderType,
 		"instrument_token": req.InstrumentToken,
@@ -283,7 +280,6 @@ func createNormalOrder(req PlaceOrderRequest, indexMeta *cache.InstrumentData, o
 		InstrumentToken:    req.InstrumentToken,
 		TradingSymbol:      indexMeta.TradingSymbol,
 		Quantity:           req.Quantity,
-		PaperTrading:       req.PaperTrading,
 		CreatedAt:          time.Now(),
 		PayloadToBroker:    payloadJSON,
 		ResponseFromBroker: respJSON,
@@ -316,7 +312,7 @@ func storeOrdersToDB(ctx context.Context, orders []Order) ([]string, error) {
 			ctx,
 			pgx.Identifier{"orders"},
 			[]string{"external_order_id", "order_type", "instrument_token", "trading_symbol",
-				"quantity", "paper_trading", "created_at", "payload_to_broker", "response_from_broker"},
+				"quantity", "created_at", "payload_to_broker", "response_from_broker"},
 			pgx.CopyFromSlice(len(orders), func(i int) ([]interface{}, error) {
 				order := orders[i]
 				payload, err := json.Marshal(order.PayloadToBroker)
@@ -338,7 +334,6 @@ func storeOrdersToDB(ctx context.Context, orders []Order) ([]string, error) {
 					order.InstrumentToken,
 					order.TradingSymbol,
 					order.Quantity,
-					order.PaperTrading,
 					order.CreatedAt,
 					payload,
 					response,
@@ -376,7 +371,7 @@ func populateKiteOrderStruct(quantity int, side Side, instrumentData *cache.Inst
 	}
 }
 
-func populateOrderStructForDB(orderID string, orderType OrderType, instrumentData *cache.InstrumentData, quantity int, paperTrading bool, payloadToBroker json.RawMessage, responseFromBroker json.RawMessage) Order {
+func populateOrderStructForDB(orderID string, orderType OrderType, instrumentData *cache.InstrumentData, quantity int, payloadToBroker json.RawMessage, responseFromBroker json.RawMessage) Order {
 	if orderID == "" {
 		orderID = utils.GenerateRandomString(5)
 	}
@@ -386,7 +381,6 @@ func populateOrderStructForDB(orderID string, orderType OrderType, instrumentDat
 		InstrumentToken:    instrumentData.InstrumentToken,
 		TradingSymbol:      instrumentData.TradingSymbol,
 		Quantity:           quantity,
-		PaperTrading:       paperTrading,
 		CreatedAt:          time.Now(),
 		PayloadToBroker:    payloadToBroker,
 		ResponseFromBroker: responseFromBroker,
@@ -434,7 +428,6 @@ func populateModifyQuantityForModifyRequest(req PlaceOrderRequest, existingQuant
 func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 	log := logger.L()
 	orderResponseToReturn := []OrderResponse{}
-	paperPositionsToBeStored := []Order{}
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
 		log.Error("Failed to get cache meta", map[string]interface{}{
@@ -456,11 +449,7 @@ func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 		if req.OrderType == OrderTypeCreateSell {
 			side = SideSell
 		}
-		if !req.PaperTrading {
-			kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(req.Quantity, side, &indexMeta))
-		} else {
-			paperPositionsToBeStored = append(paperPositionsToBeStored, populateOrderStructForDB("", req.OrderType, &indexMeta, req.Quantity, true, nil, nil))
-		}
+		kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(req.Quantity, side, &indexMeta))
 	}
 
 	if req.OrderType == OrderTypeExit {
@@ -474,11 +463,7 @@ func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 		if quantity > 0 {
 			side = SideSell
 		}
-		if !req.PaperTrading {
-			kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(quantity, side, &indexMeta))
-		} else {
-			paperPositionsToBeStored = append(paperPositionsToBeStored, populateOrderStructForDB("", req.OrderType, &indexMeta, quantity, true, nil, nil))
-		}
+		kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(quantity, side, &indexMeta))
 	}
 
 	if req.OrderType == OrderTypeModifyAway || req.OrderType == OrderTypeModifyCloser {
@@ -500,41 +485,30 @@ func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 		if existingQuantity < 0 {
 			var currentPositionSide Side = SideBuy
 			var targetPositionSide Side = SideSell
-			if !req.PaperTrading {
-				kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, currentPositionSide, &indexMeta))
-				kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, targetPositionSide, &targetIndexMeta))
-			} else {
-				paperPositionsToBeStored = append(paperPositionsToBeStored, populateOrderStructForDB("", req.OrderType, &indexMeta, modifyQuantity, true, nil, nil))
-				paperPositionsToBeStored = append(paperPositionsToBeStored, populateOrderStructForDB("", req.OrderType, &targetIndexMeta, modifyQuantity, true, nil, nil))
-			}
-
+			kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, currentPositionSide, &indexMeta))
+			kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, targetPositionSide, &targetIndexMeta))
 		} else if existingQuantity > 0 {
 			var currentPositionSide Side = SideSell
 			var targetPositionSide Side = SideBuy
-			if !req.PaperTrading {
-				kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, currentPositionSide, &indexMeta))
-				kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, targetPositionSide, &targetIndexMeta))
-			}
+			kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, currentPositionSide, &indexMeta))
+			kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, targetPositionSide, &targetIndexMeta))
 		}
 	}
 
-	if len(kiteOrdersTobePlaced) > 0 {
-		for _, order := range kiteOrdersTobePlaced {
-			ordersResponse, err := placeOrdersAtZerodha(&indexMeta, order.TransactionType, order.Quantity)
-			if err != nil {
-				log.Error("Failed to place orders at Zerodha", map[string]interface{}{
-					"error": err.Error(),
-				})
-				return nil, err
-			}
-			orderResponseToReturn = append(orderResponseToReturn, *ordersResponse...)
+	// Place all orders at Zerodha
+	for _, order := range kiteOrdersTobePlaced {
+		ordersResponse, err := placeOrdersAtZerodha(&indexMeta, order.TransactionType, order.Quantity)
+		if err != nil {
+			log.Error("Failed to place orders at Zerodha", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return nil, err
 		}
-		return orderResponseToReturn, nil
-	} else {
-
+		orderResponseToReturn = append(orderResponseToReturn, *ordersResponse...)
 	}
-
-	return nil, nil
+	
+	// Return the responses
+	return orderResponseToReturn, nil
 }
 
 func getQuantityOfPositionsforInstrumentToken(instrumentToken string) (int, error) {

@@ -655,6 +655,9 @@ func (s *APIServer) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 		filterType = zerodha.PositionFilterPaper
 	case "real":
 		filterType = zerodha.PositionFilterReal
+	case "all", "":
+		// Empty string or "all" means no filter - will return all positions
+		// We'll pass an empty string to GetPositionAnalysis which will be handled there
 	default:
 		sendErrorResponse(w, "Invalid filter parameter. Must be 'all', 'paper', or 'real'.", http.StatusBadRequest)
 		return

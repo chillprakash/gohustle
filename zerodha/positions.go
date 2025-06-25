@@ -12,7 +12,6 @@ import (
 
 	"gohustle/appparameters"
 	"gohustle/cache"
-	"gohustle/db"
 	"gohustle/logger"
 	"gohustle/utils"
 
@@ -212,23 +211,66 @@ func (pm *PositionManager) ListPositionsFromDB(ctx context.Context, paperTrading
 		allPositionsKey = PaperTradingPositionKeyFormat
 	}
 
-	// Get all position keys
-	posKeys, err := pm.positionsRedis.SMembers(ctx, allPositionsKey).Result()
+	// Get the consolidated position string (format: "token1_qty1,token2_qty2,...")
+	positionsStr, err := pm.positionsRedis.Get(ctx, allPositionsKey).Result()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get position keys: %w", err)
+		if err == redis.Nil {
+			// Key doesn't exist, return empty list
+			return positionsList, nil
+		}
+		return nil, fmt.Errorf("failed to get positions data: %w", err)
 	}
 
 	// No positions found
-	if len(posKeys) == 0 {
+	if positionsStr == "" {
+		return positionsList, nil
+	}
+
+	// Parse the comma-separated list of positions
+	positionEntries := strings.Split(positionsStr, ",")
+	if len(positionEntries) == 0 {
+		return positionsList, nil
+	}
+
+	// Process each position entry (format: "token_quantity")
+	positionKeys := make([]string, 0, len(positionEntries))
+	for _, entry := range positionEntries {
+		parts := strings.Split(entry, "_")
+		if len(parts) != 2 {
+			// Skip invalid entries
+			continue
+		}
+
+		tokenStr := parts[0]
+		// Create the position key format based on the token
+		positionKey := fmt.Sprintf("position:*:%s", tokenStr)
+
+		// Find all keys matching this pattern
+		keys, err := pm.positionsRedis.Keys(ctx, positionKey).Result()
+		if err != nil {
+			pm.log.Error("Failed to find position keys", map[string]interface{}{
+				"token": tokenStr,
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		// Add all matching keys to our list
+		positionKeys = append(positionKeys, keys...)
+	}
+
+	// No position keys found
+	if len(positionKeys) == 0 {
 		return positionsList, nil
 	}
 
 	// Get all positions in a pipeline
 	pipe := pm.positionsRedis.Pipeline()
-	cmds := make([]*redis.MapStringStringCmd, len(posKeys))
+	cmds := make([]*redis.StringCmd, len(positionKeys))
 
-	for i, key := range posKeys {
-		cmds[i] = pipe.HGetAll(ctx, key)
+	for i, key := range positionKeys {
+		// Get the position JSON from the hash
+		cmds[i] = pipe.HGet(ctx, "positions", key)
 	}
 
 	_, err = pipe.Exec(ctx)
@@ -237,60 +279,82 @@ func (pm *PositionManager) ListPositionsFromDB(ctx context.Context, paperTrading
 	}
 
 	// Process results
-	for _, cmd := range cmds {
-		posMap, err := cmd.Result()
+	for i, cmd := range cmds {
+		posJSON, err := cmd.Result()
 		if err != nil {
-			pm.log.Error("Failed to get position", map[string]interface{}{
+			if err != redis.Nil {
+				pm.log.Error("Failed to get position", map[string]interface{}{
+					"key":   positionKeys[i],
+					"error": err.Error(),
+				})
+			}
+			continue
+		}
+
+		// Skip empty results
+		if posJSON == "" {
+			continue
+		}
+
+		// Parse the JSON into a map
+		var posData map[string]interface{}
+		if err := json.Unmarshal([]byte(posJSON), &posData); err != nil {
+			pm.log.Error("Failed to parse position JSON", map[string]interface{}{
+				"key":   positionKeys[i],
 				"error": err.Error(),
 			})
 			continue
 		}
 
-		// Skip empty results
-		if len(posMap) == 0 {
-			continue
-		}
-
-		// Parse position data
+		// Create a position object from the parsed data
 		var pos positions
 
-		// Parse ID
-		if idStr, ok := posMap["id"]; ok {
-			pos.ID, _ = strconv.ParseInt(idStr, 10, 64)
+		// Generate a unique ID for this position
+		pos.ID = time.Now().UnixNano()
+
+		// Extract the token from the position data
+		if token, ok := posData["instrument_token"].(float64); ok {
+			pos.InstrumentToken = uint32(token)
 		}
 
-		// Parse instrument token
-		if tokenStr, ok := posMap["instrument_token"]; ok {
-			tokenUint64, _ := strconv.ParseUint(tokenStr, 10, 32)
-			pos.InstrumentToken = uint32(tokenUint64)
+		// Extract string fields
+		if symbol, ok := posData["tradingsymbol"].(string); ok {
+			pos.TradingSymbol = symbol
+		}
+		if exchange, ok := posData["exchange"].(string); ok {
+			pos.Exchange = exchange
+		}
+		if product, ok := posData["product"].(string); ok {
+			pos.Product = product
 		}
 
-		// Parse string fields
-		pos.TradingSymbol = posMap["trading_symbol"]
-		pos.Exchange = posMap["exchange"]
-		pos.Product = posMap["product"]
-
-		// Parse float fields
-		pos.BuyPrice, _ = strconv.ParseFloat(posMap["buy_price"], 64)
-		pos.BuyValue, _ = strconv.ParseFloat(posMap["buy_value"], 64)
-		pos.SellPrice, _ = strconv.ParseFloat(posMap["sell_price"], 64)
-		pos.SellValue, _ = strconv.ParseFloat(posMap["sell_value"], 64)
-		pos.AveragePrice, _ = strconv.ParseFloat(posMap["average_price"], 64)
-		pos.Multiplier, _ = strconv.ParseFloat(posMap["multiplier"], 64)
-
-		// Parse int fields
-		buyQty, _ := strconv.Atoi(posMap["buy_quantity"])
-		pos.BuyQuantity = buyQty
-		sellQty, _ := strconv.Atoi(posMap["sell_quantity"])
-		pos.SellQuantity = sellQty
-
-		// Parse time fields
-		if createdStr, ok := posMap["created_at"]; ok {
-			pos.CreatedAt, _ = time.Parse(time.RFC3339, createdStr)
+		// Extract numeric fields
+		if qty, ok := posData["quantity"].(float64); ok {
+			if qty > 0 {
+				pos.BuyQuantity = int(qty)
+				pos.SellQuantity = 0
+			} else {
+				pos.SellQuantity = int(math.Abs(qty))
+				pos.BuyQuantity = 0
+			}
 		}
-		if updatedStr, ok := posMap["updated_at"]; ok {
-			pos.UpdatedAt, _ = time.Parse(time.RFC3339, updatedStr)
+
+		if avgPrice, ok := posData["average_price"].(float64); ok {
+			pos.AveragePrice = avgPrice
 		}
+
+		// Calculate buy/sell values based on quantity and prices
+		if pos.BuyQuantity > 0 {
+			pos.BuyPrice = pos.AveragePrice
+			pos.BuyValue = pos.BuyPrice * float64(pos.BuyQuantity)
+		} else if pos.SellQuantity > 0 {
+			pos.SellPrice = pos.AveragePrice
+			pos.SellValue = pos.SellPrice * float64(pos.SellQuantity)
+		}
+
+		// Set timestamps
+		pos.CreatedAt = time.Now().Add(-24 * time.Hour) // Assume created yesterday
+		pos.UpdatedAt = time.Now()
 
 		positionsList = append(positionsList, pos)
 	}
@@ -468,10 +532,10 @@ func (pm *PositionManager) PollPositionsAndUpdateInRedis(ctx context.Context) er
 
 	// Use a wait group to wait for both operations to complete
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 
 	// Channel to collect errors from goroutines
-	errChan := make(chan error, 2)
+	errChan := make(chan error, 1)
 
 	// Store positions in Redis concurrently
 	go func() {
@@ -651,37 +715,66 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 		ClosedPositions: make([]DetailedPosition, 0),
 	}
 
-	// Get positions from database (includes both real and paper trading positions)
-	timescaleDB := db.GetTimescaleDB()
-	if timescaleDB == nil {
-		return nil, fmt.Errorf("timescale DB is nil")
-	}
-
 	cacheMeta, err := cache.GetCacheMetaInstance()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get cache meta instance: %w", err)
 	}
 
-	var isPaper bool
-	if filterType == PositionFilterPaper {
-		isPaper = true
+	// Determine which positions to fetch based on filter type
+	var allPositions []positions
+
+	switch filterType {
+	case PositionFilterPaper:
+		// Fetch only paper trading positions
+		paperPositions, err := pm.ListPositionsFromDB(ctx, true)
+		if err != nil {
+			pm.log.Error("Failed to fetch paper positions from Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return nil, fmt.Errorf("failed to get paper positions from Redis: %w", err)
+		}
+		allPositions = paperPositions
+
+	case PositionFilterReal:
+		// Fetch only real trading positions
+		realPositions, err := pm.ListPositionsFromDB(ctx, false)
+		if err != nil {
+			pm.log.Error("Failed to fetch real positions from Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return nil, fmt.Errorf("failed to get real positions from Redis: %w", err)
+		}
+		allPositions = realPositions
+
+	default:
+		// Fetch both paper and real trading positions for "all" filter
+		paperPositions, err := pm.ListPositionsFromDB(ctx, true)
+		if err != nil {
+			pm.log.Error("Failed to fetch paper positions from Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return nil, fmt.Errorf("failed to get paper positions from Redis: %w", err)
+		}
+
+		realPositions, err := pm.ListPositionsFromDB(ctx, false)
+		if err != nil {
+			pm.log.Error("Failed to fetch real positions from Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+			return nil, fmt.Errorf("failed to get real positions from Redis: %w", err)
+		}
+
+		// Combine both types of positions
+		allPositions = append(paperPositions, realPositions...)
 	}
 
-	// Fetch all positions from database
-	dbPositions, err := pm.ListPositionsFromDB(ctx, isPaper)
-	if err != nil {
-		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, fmt.Errorf("failed to get positions from database: %w", err)
-	}
-
-	pm.log.Debug("Fetched positions from database", map[string]interface{}{
-		"count": len(dbPositions),
+	pm.log.Debug("Fetched positions from Redis", map[string]interface{}{
+		"count":  len(allPositions),
+		"filter": filterType,
 	})
 
-	// Process all positions from database (both real and paper trading)
-	for _, dbPos := range dbPositions {
+	// Process all positions from Redis
+	for _, dbPos := range allPositions {
 		// Skip non-option positions
 		if !isOptionPosition(dbPos.TradingSymbol) {
 			continue

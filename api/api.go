@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -421,92 +419,6 @@ func (s *APIServer) readRawParquetSamples(filePath string, numSamples int) error
 	}
 
 	return nil
-}
-
-// Update handleWalToParquet to use the method
-func (s *APIServer) handleWalToParquet(w http.ResponseWriter, r *http.Request) {
-	// Parse request
-	var req WalToParquetRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		sendErrorResponse(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Validate required fields
-	if req.IndexName == "" {
-		sendErrorResponse(w, "index_name is required", http.StatusBadRequest)
-		return
-	}
-	if req.Date == "" {
-		sendErrorResponse(w, "date is required", http.StatusBadRequest)
-		return
-	}
-
-	// Create output directory if not specified
-	if req.ParquetPath == "" {
-		req.ParquetPath = filepath.Join(filestore.DefaultParquetDir, fmt.Sprintf("%s_%s.parquet", req.IndexName, req.Date))
-	}
-
-	// Ensure output directory exists
-	if err := os.MkdirAll(filepath.Dir(req.ParquetPath), 0755); err != nil {
-		sendErrorResponse(w, fmt.Sprintf("failed to create output directory: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Create Arrow converter
-	converter := filestore.NewArrowConverter()
-
-	// Start conversion with timeout context
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
-	defer cancel()
-
-	// Create error channel for monitoring conversion
-	errChan := make(chan error, 1)
-	go func() {
-		errChan <- converter.ConvertWALToParquet(req.IndexName, req.Date, req.ParquetPath)
-	}()
-
-	// Wait for completion or timeout
-	select {
-	case err := <-errChan:
-		if err != nil {
-			s.log.Error("Failed to convert WAL to Parquet", map[string]interface{}{
-				"error": err.Error(),
-				"index": req.IndexName,
-				"date":  req.Date,
-			})
-			sendErrorResponse(w, fmt.Sprintf("conversion failed: %v", err), http.StatusInternalServerError)
-			return
-		}
-	case <-ctx.Done():
-		sendErrorResponse(w, "operation timed out after 10 minutes", http.StatusGatewayTimeout)
-		return
-	}
-
-	// After successful conversion, read and print raw samples
-	if err := s.readRawParquetSamples(req.ParquetPath, 5); err != nil {
-		s.log.Error("Failed to read raw samples", map[string]interface{}{
-			"error": err.Error(),
-			"path":  req.ParquetPath,
-		})
-	}
-
-	// Send success response
-	resp := Response{
-		Success: true,
-		Message: "Successfully converted WAL to Parquet using Arrow",
-		Data: map[string]interface{}{
-			"output_file": req.ParquetPath,
-		},
-	}
-
-	s.log.Info("Successfully converted WAL to Parquet", map[string]interface{}{
-		"index":       req.IndexName,
-		"date":        req.Date,
-		"output_file": req.ParquetPath,
-	})
-
-	sendJSONResponse(w, resp)
 }
 
 // handleGetExpiries returns the expiry dates for all indices from Redis cache

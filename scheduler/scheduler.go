@@ -2,13 +2,8 @@ package scheduler
 
 import (
 	"context"
-	"fmt"
-	"gohustle/cache"
-	"gohustle/core"
 	"gohustle/logger"
-	"gohustle/optionchain"
 	"gohustle/zerodha"
-	"sort"
 	"sync"
 	"time"
 )
@@ -220,71 +215,4 @@ func InitializeHighFrequencyPnLTracking(ctx context.Context) {
 	logger.L().Info("Initialized high-frequency P&L tracking", map[string]interface{}{
 		"frequency": "1 second",
 	})
-}
-
-// InitializeIndexOptionChainPolling sets up option chain polling for all indices
-func InitializeIndexOptionChainPolling(ctx context.Context) {
-	scheduler := GetScheduler()
-	optionChainMgr := optionchain.GetOptionChainManager()
-	inMemCache := cache.GetInMemoryCacheInstance()
-
-	// Get all indices
-	indices := core.GetIndices().GetAllIndices()
-
-	task := &Task{
-		Name:     "IndexOptionChainPolling",
-		Interval: time.Second,
-		Execute: func(ctx context.Context) error {
-			if !isMarketOpen() {
-				return nil
-			}
-
-			// Get list of instruments from cache
-			instrumentsKey := "instrument:expiries:list"
-			_, exists := inMemCache.Get(instrumentsKey)
-			if !exists {
-				return fmt.Errorf("no instruments found in cache")
-			}
-
-			// Process each index
-			for _, index := range indices {
-				// Get expiries for this index
-				key := fmt.Sprintf("instrument:expiries:%s", index.NameInOptions)
-				value, exists := inMemCache.Get(key)
-				if !exists {
-					continue
-				}
-
-				dates, ok := value.([]string)
-				if !ok {
-					continue
-				}
-
-				// Sort expiries to get the nearest one
-				sort.Strings(dates)
-				if len(dates) == 0 {
-					continue
-				}
-
-				// Get nearest expiry
-				nearestExpiry := dates[0]
-
-				// Calculate option chain for this index and expiry
-				_, err := optionChainMgr.CalculateOptionChain(ctx, index.NameInOptions, nearestExpiry, 25)
-				if err != nil {
-					logger.L().Error("Failed to calculate option chain", map[string]interface{}{
-						"index":  index.NameInOptions,
-						"expiry": nearestExpiry,
-						"error":  err.Error(),
-					})
-					continue
-				}
-			}
-
-			return nil
-		},
-	}
-
-	scheduler.AddTask(task)
-	scheduler.Start(ctx)
 }

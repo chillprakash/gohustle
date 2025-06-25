@@ -149,48 +149,6 @@ func GetPositionManager() *PositionManager {
 	return positionInstance
 }
 
-func (pm *PositionManager) CreatePositions(ctx context.Context, orders []Order, indexMeta *cache.InstrumentData, side Side) error {
-	if pm == nil || pm.positionsRedis == nil {
-		return fmt.Errorf("position manager or redis client not initialized")
-	}
-	productType := pm.appParameterManager.GetOrderAppParameters().ProductType
-
-	ltpData, err := pm.cacheMetaInstance.GetLTPforInstrumentToken(ctx, utils.Uint32ToString(indexMeta.InstrumentToken))
-	if err != nil {
-		return err
-	}
-
-	positionsList := []positions{}
-	for _, order := range orders {
-		position := positions{
-			InstrumentToken: indexMeta.InstrumentToken,
-			TradingSymbol:   indexMeta.TradingSymbol,
-			Exchange:        indexMeta.Exchange,
-			Product:         string(productType),
-			Multiplier:      1,
-			CreatedAt:       time.Now(),
-			AveragePrice:    ltpData.LTP,
-		}
-
-		if side == SideBuy {
-			position.BuyQuantity = order.Quantity
-			position.BuyValue = float64(order.Quantity) * ltpData.LTP
-
-		} else {
-			position.SellQuantity = order.Quantity
-			position.SellValue = float64(order.Quantity) * ltpData.LTP
-		}
-
-		pm.log.Info("Creating positions", map[string]interface{}{
-			"position": position,
-		})
-		positionsList = append(positionsList, position)
-	}
-
-	_, err = storePositionsToRedis(ctx, positionsList)
-	return err
-}
-
 func (pm *PositionManager) ListPositionsFromDB(ctx context.Context) ([]positions, error) {
 	if pm == nil {
 		return nil, fmt.Errorf("position manager not initialized")
@@ -845,43 +803,6 @@ func getOptionType(symbol string) string {
 		return "CE"
 	}
 	return "PE"
-}
-
-// getInstrumentTokenForStrike is a helper function to find the instrument token for a given strike price and option type
-func (pm *PositionManager) getInstrumentTokenForStrike(ctx context.Context, strike float64, optionType string, baseSymbol string, expiryDate string) string {
-	// Get in-memory cache instance
-	inmemoryCache := cache.GetInMemoryCacheInstance()
-
-	// Create symbol with the strike price
-	strike = math.Round(strike) // Round to whole number
-	strikeStr := fmt.Sprintf("%.0f", strike)
-	newSymbol := baseSymbol + strikeStr + optionType
-
-	// First try direct lookup by symbol
-	tokenInterface, exists := inmemoryCache.Get(newSymbol)
-	if exists {
-		pm.log.Debug("Found token directly from symbol", map[string]interface{}{
-			"symbol": newSymbol,
-			"token":  fmt.Sprintf("%v", tokenInterface),
-		})
-		return fmt.Sprintf("%v", tokenInterface)
-	}
-
-	// Try to find using the strike lookup key if we have expiry date
-	if expiryDate != "" {
-		strikeLookupKey := fmt.Sprintf("next_strike_lookup:%.0f:%s:%s", strike, expiryDate, optionType)
-		tokenInterface, exists = inmemoryCache.Get(strikeLookupKey)
-		if exists {
-			pm.log.Debug("Found token using strike lookup", map[string]interface{}{
-				"key":   strikeLookupKey,
-				"token": fmt.Sprintf("%v", tokenInterface),
-			})
-			return fmt.Sprintf("%v", tokenInterface)
-		}
-	}
-
-	// If all else fails, return empty string
-	return ""
 }
 
 // calculateMoves calculates potential position adjustment moves

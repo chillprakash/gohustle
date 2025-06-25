@@ -59,11 +59,6 @@ func (s *APIServer) setupRoutes() {
 	authenticatedRouter.HandleFunc("/instruments", s.handleListInstruments).Methods("GET")
 	authenticatedRouter.HandleFunc("/status", s.handleGetMarketStatus).Methods("GET")
 
-	// Data export endpoints
-	authenticatedRouter.HandleFunc("/export/wal-to-parquet", s.handleWalToParquet).Methods("POST")
-
-	// No tick data endpoints - removed
-
 	// General endpoint
 	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET")
 }

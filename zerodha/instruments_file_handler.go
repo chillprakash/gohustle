@@ -56,7 +56,7 @@ func NewInstrumentsFileHandler(kite *kiteconnect.Client) *InstrumentsFileHandler
 }
 
 // DownloadInstrumentData downloads and saves instrument data
-func (h *InstrumentsFileHandler) DownloadInstrumentData(ctx context.Context, instrumentNames []core.Index) error {
+func (h *InstrumentsFileHandler) DownloadInstrumentDataFromZerodha(ctx context.Context, instrumentNames []core.Index) error {
 	log := logger.L()
 	currentDate := utils.GetCurrentKiteDate()
 

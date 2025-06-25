@@ -1,1 +1,8 @@
 This is a trade Exectuion Application, built on Go.
+Here is what the application mainly does:
+1)Logs in to Zerodha
+2)Download the complete instruments data from Zerodha
+3)Synchs the instrument data to Redis.
+4)Get the instument tokens for upcoming expiry and subscribe to the websocket.
+
+I run the app from terminal separately. Dont ask/suggest to run build/run commands from terminal.

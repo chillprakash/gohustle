@@ -5,31 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"gohustle/appparameters"
 	"gohustle/cache"
 	"gohustle/core"
-	"gohustle/db"
 	"gohustle/logger"
 	"gohustle/utils"
 
-	"github.com/jackc/pgx/v5"
 	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
-
-// Order represents a trading order in the system
-type Order struct {
-	ID                 int64           `json:"id" db:"id"`
-	ExternalOrderID    string          `json:"external_order_id" db:"external_order_id"`
-	OrderType          string          `json:"order_type" db:"order_type"`
-	InstrumentToken    uint32          `json:"instrument_token" db:"instrument_token"`
-	TradingSymbol      string          `json:"trading_symbol" db:"trading_symbol"`
-	Quantity           int             `json:"quantity" db:"quantity"`
-	CreatedAt          time.Time       `json:"created_at" db:"created_at"`
-	PayloadToBroker    json.RawMessage `json:"payload_to_broker" db:"payload_to_broker"`
-	ResponseFromBroker json.RawMessage `json:"response_from_broker" db:"response_from_broker"`
-}
 
 type KiteOrder struct {
 	Exchange        string
@@ -38,11 +22,6 @@ type KiteOrder struct {
 	OrderType       appparameters.OrderType
 	TransactionType Side
 	Quantity        int
-}
-
-// TableName specifies the database table name for GORM
-func (Order) TableName() string {
-	return "orders"
 }
 
 type PlaceOrderRequest struct {
@@ -251,113 +230,6 @@ func placeOrdersAtZerodha(indexMeta *cache.InstrumentData, side Side, quantity i
 	return &orderResponses, nil
 }
 
-// createNormalOrder creates an Order struct from PlaceOrderRequest and OrderResponse
-func createNormalOrder(req PlaceOrderRequest, indexMeta *cache.InstrumentData, orderResponse *OrderResponse) (*Order, error) {
-	if orderResponse == nil {
-		return nil, fmt.Errorf("order response cannot be nil")
-	}
-
-	// Marshal the order response to store in ResponseFromBroker
-	respJSON, err := json.Marshal(orderResponse)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal order response: %v", err)
-	}
-
-	// Create payload to broker
-	payload := map[string]interface{}{
-		"quantity":         req.Quantity,
-		"order_type":       req.OrderType,
-		"instrument_token": req.InstrumentToken,
-	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal payload: %v", err)
-	}
-
-	return &Order{
-		ExternalOrderID:    orderResponse.OrderID,
-		OrderType:          string(req.OrderType),
-		InstrumentToken:    req.InstrumentToken,
-		TradingSymbol:      indexMeta.TradingSymbol,
-		Quantity:           req.Quantity,
-		CreatedAt:          time.Now(),
-		PayloadToBroker:    payloadJSON,
-		ResponseFromBroker: respJSON,
-	}, nil
-}
-
-// storeOrdersToDB stores the given orders in the database and returns their external order IDs
-func storeOrdersToDB(ctx context.Context, orders []Order) ([]string, error) {
-	if len(orders) == 0 {
-		return []string{}, nil
-	}
-
-	log := logger.L()
-	log.Info("Storing orders to DB", map[string]interface{}{
-		"order_count": len(orders),
-	})
-
-	timescaleDB := db.GetTimescaleDB()
-	if timescaleDB == nil {
-		return nil, fmt.Errorf("failed to get database instance")
-	}
-
-	orderIDs := make([]string, 0, len(orders))
-	var copyErr error
-
-	// Use WithTx for automatic transaction management
-	err := timescaleDB.WithTx(ctx, func(tx pgx.Tx) error {
-		// Use COPY command for bulk insert
-		_, copyErr = tx.CopyFrom(
-			ctx,
-			pgx.Identifier{"orders"},
-			[]string{"external_order_id", "order_type", "instrument_token", "trading_symbol",
-				"quantity", "created_at", "payload_to_broker", "response_from_broker"},
-			pgx.CopyFromSlice(len(orders), func(i int) ([]interface{}, error) {
-				order := orders[i]
-				payload, err := json.Marshal(order.PayloadToBroker)
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal order payload: %w", err)
-				}
-
-				response, err := json.Marshal(order.ResponseFromBroker)
-				if err != nil {
-					return nil, fmt.Errorf("failed to marshal order response: %w", err)
-				}
-
-				// Collect the order ID
-				orderIDs = append(orderIDs, order.ExternalOrderID)
-
-				return []interface{}{
-					order.ExternalOrderID,
-					order.OrderType,
-					order.InstrumentToken,
-					order.TradingSymbol,
-					order.Quantity,
-					order.CreatedAt,
-					payload,
-					response,
-				}, nil
-			}),
-		)
-		return copyErr
-	})
-
-	if err != nil {
-		log.Error("Failed to store orders in transaction", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, fmt.Errorf("transaction failed: %w", err)
-	}
-
-	log.Info("Successfully stored orders", map[string]interface{}{
-		"order_count": len(orderIDs),
-		"order_ids":   orderIDs,
-	})
-
-	return orderIDs, nil
-}
-
 func populateKiteOrderStruct(quantity int, side Side, instrumentData *cache.InstrumentData) KiteOrder {
 	productType := appparameters.GetAppParameterManager().GetOrderAppParameters().ProductType
 	orderType := appparameters.GetAppParameterManager().GetOrderAppParameters().OrderType
@@ -368,22 +240,6 @@ func populateKiteOrderStruct(quantity int, side Side, instrumentData *cache.Inst
 		OrderType:       orderType,
 		TransactionType: side,
 		Quantity:        quantity,
-	}
-}
-
-func populateOrderStructForDB(orderID string, orderType OrderType, instrumentData *cache.InstrumentData, quantity int, payloadToBroker json.RawMessage, responseFromBroker json.RawMessage) Order {
-	if orderID == "" {
-		orderID = utils.GenerateRandomString(5)
-	}
-	return Order{
-		ExternalOrderID:    orderID,
-		OrderType:          string(orderType),
-		InstrumentToken:    instrumentData.InstrumentToken,
-		TradingSymbol:      instrumentData.TradingSymbol,
-		Quantity:           quantity,
-		CreatedAt:          time.Now(),
-		PayloadToBroker:    payloadToBroker,
-		ResponseFromBroker: responseFromBroker,
 	}
 }
 
@@ -506,7 +362,7 @@ func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 		}
 		orderResponseToReturn = append(orderResponseToReturn, *ordersResponse...)
 	}
-	
+
 	// Return the responses
 	return orderResponseToReturn, nil
 }

@@ -9,7 +9,6 @@ import (
 	"gohustle/config"
 	"gohustle/core"
 	"gohustle/logger"
-	"gohustle/nats"
 	"gohustle/scheduler"
 	"gohustle/zerodha"
 	"os"
@@ -152,10 +151,6 @@ func cleanup(ctx context.Context) error {
 	if err := apiServer.Shutdown(); err != nil {
 		return fmt.Errorf("error shutting down API server: %w", err)
 	}
-
-	// Close NATS connections
-	natsHelper := nats.GetNATSHelper()
-	natsHelper.Shutdown()
 
 	// Close Redis connections
 	redisCache, err := cache.GetRedisCache()

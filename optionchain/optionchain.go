@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"gohustle/cache"
 	"gohustle/core"
-	"gohustle/db"
 	"gohustle/logger"
 	"gohustle/utils"
 	"gohustle/zerodha"
@@ -43,9 +42,6 @@ type OptionChainManager struct {
 	subscribers map[string][]chan *OptionChainResponse // key: "index:expiry"
 	subMutex    sync.RWMutex
 
-	// Metrics manager for time series data
-	metricsManager *MetricsManager
-
 	// Context for cleanup
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -82,13 +78,12 @@ type OptionChainResponse struct {
 func NewOptionChainManager(ctx context.Context) *OptionChainManager {
 	ctx, cancel := context.WithCancel(ctx)
 	mgr := &OptionChainManager{
-		log:            logger.L(),
-		broadcastChan:  make(chan *OptionChainResponse, 100),
-		latestData:     make(map[string]*OptionChainResponse),
-		subscribers:    make(map[string][]chan *OptionChainResponse),
-		metricsManager: NewMetricsManager(),
-		ctx:            ctx,
-		cancel:         cancel,
+		log:           logger.L(),
+		broadcastChan: make(chan *OptionChainResponse, 100),
+		latestData:    make(map[string]*OptionChainResponse),
+		subscribers:   make(map[string][]chan *OptionChainResponse),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 
 	// Start broadcast handler
@@ -165,84 +160,6 @@ func (m *OptionChainManager) handleBroadcasts() {
 			}
 		}
 	}
-}
-
-// storeTimeSeriesMetrics stores the calculated metrics for different intervals
-func (m *OptionChainManager) storeTimeSeriesMetrics(ctx context.Context, index string, chain []*StrikeData, underlyingPrice float64) error {
-	// Create a context with timeout for database operations
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	// Calculate metrics once
-	metrics := m.metricsManager.calculateMetrics(chain, underlyingPrice)
-	now := time.Unix(0, metrics.Timestamp*int64(time.Millisecond))
-
-	// Create error channel to collect errors from goroutines
-	errChan := make(chan error, len(m.metricsManager.intervals))
-	var wg sync.WaitGroup
-
-	// Store metrics for each configured interval
-	for _, interval := range m.metricsManager.intervals {
-		if m.metricsManager.shouldStoreForInterval(now, interval.Duration) {
-			wg.Add(1)
-			go func(interval IntervalConfig) {
-				defer wg.Done()
-
-				// Get metrics store instance
-
-				// Store metrics in TimescaleDB
-				indexMetrics := &db.IndexMetrics{
-					IndexName:     index,
-					SpotPrice:     metrics.UnderlyingPrice,
-					FairPrice:     metrics.SyntheticFuture,
-					StraddlePrice: metrics.LowestStraddle,
-					ATMStrike:     metrics.ATMStrike,
-					Timestamp:     now,
-				}
-				if err := db.GetTimescaleDB().StoreIndexMetrics(index, indexMetrics); err != nil {
-					errChan <- fmt.Errorf("failed to store metrics for interval %s: %w", interval.Name, err)
-					return
-				}
-
-				// Run cleanup in a separate goroutine
-				// go func() {
-				// 	if err := db.GetTimescaleDB().CleanupOldMetrics(interval.TTL); err != nil {
-				// 		m.log.Error("Failed to cleanup old metrics", map[string]interface{}{
-				// 			"error":    err.Error(),
-				// 			"interval": interval.Name,
-				// 		})
-				// 	}
-				// }()
-			}(interval)
-		}
-	}
-
-	// Wait for all goroutines to complete
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
-
-	// Collect any errors
-	var errors []string
-	for err := range errChan {
-		errors = append(errors, err.Error())
-	}
-
-	// If there were any errors, return them combined
-	if len(errors) > 0 {
-		return fmt.Errorf("errors storing metrics: %s", strings.Join(errors, "; "))
-	}
-
-	m.log.Debug("Stored time series metrics", map[string]interface{}{
-		"index":     index,
-		"timestamp": metrics.Timestamp,
-		"spot":      metrics.UnderlyingPrice,
-		"fair":      metrics.SyntheticFuture,
-		"straddle":  metrics.LowestStraddle,
-	})
-
-	return nil
 }
 
 // CalculateOptionChain calculates the option chain for given parameters

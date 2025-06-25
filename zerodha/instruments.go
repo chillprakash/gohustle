@@ -56,7 +56,7 @@ var (
 	expiryCache                  *cache.InMemoryCache
 
 	// Minimum OI threshold for filtering instruments
-	MinimumOIForInstrument = 25000.00 // Set an appropriate threshold value
+	MinimumOIForInstrument = 0.00 // Set an appropriate threshold value
 )
 
 func init() {

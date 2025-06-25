@@ -198,18 +198,15 @@ func (pm *PositionManager) CreatePaperPositions(ctx context.Context, orders []Or
 	return nil
 }
 
-func (pm *PositionManager) ListPositionsFromDB(ctx context.Context, paperTrading bool) ([]positions, error) {
+func (pm *PositionManager) ListPositionsFromDB(ctx context.Context) ([]positions, error) {
 	if pm == nil {
 		return nil, fmt.Errorf("position manager not initialized")
 	}
 
 	var positionsList []positions
 
-	// Determine the key based on paper trading flag
+	// Always use real trading positions key
 	allPositionsKey := RealTradingPositionKeyFormat
-	if paperTrading {
-		allPositionsKey = PaperTradingPositionKeyFormat
-	}
 
 	// Get the consolidated position string (format: "token1_qty1,token2_qty2,...")
 	positionsStr, err := pm.positionsRedis.Get(ctx, allPositionsKey).Result()
@@ -695,19 +692,8 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 	return nil
 }
 
-// PositionFilterType represents the type of position filtering to apply
-type PositionFilterType string
-
-const (
-	// PositionFilterPaper returns only paper trading positions
-	PositionFilterPaper PositionFilterType = "paper"
-	// PositionFilterReal returns only real trading positions
-	PositionFilterReal PositionFilterType = "real"
-)
-
 // GetPositionAnalysis returns detailed analysis of positions
-// filterType specifies which positions to include (all, paper, or real)
-func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType PositionFilterType) (*PositionAnalysis, error) {
+func (pm *PositionManager) GetPositionAnalysis(ctx context.Context) (*PositionAnalysis, error) {
 	// Initialize analysis structure
 	analysis := &PositionAnalysis{
 		Summary:         PositionSummary{},
@@ -720,57 +706,17 @@ func (pm *PositionManager) GetPositionAnalysis(ctx context.Context, filterType P
 		return nil, fmt.Errorf("failed to get cache meta instance: %w", err)
 	}
 
-	// Determine which positions to fetch based on filter type
-	var allPositions []positions
-
-	switch filterType {
-	case PositionFilterPaper:
-		// Fetch only paper trading positions
-		paperPositions, err := pm.ListPositionsFromDB(ctx, true)
-		if err != nil {
-			pm.log.Error("Failed to fetch paper positions from Redis", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, fmt.Errorf("failed to get paper positions from Redis: %w", err)
-		}
-		allPositions = paperPositions
-
-	case PositionFilterReal:
-		// Fetch only real trading positions
-		realPositions, err := pm.ListPositionsFromDB(ctx, false)
-		if err != nil {
-			pm.log.Error("Failed to fetch real positions from Redis", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, fmt.Errorf("failed to get real positions from Redis: %w", err)
-		}
-		allPositions = realPositions
-
-	default:
-		// Fetch both paper and real trading positions for "all" filter
-		paperPositions, err := pm.ListPositionsFromDB(ctx, true)
-		if err != nil {
-			pm.log.Error("Failed to fetch paper positions from Redis", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, fmt.Errorf("failed to get paper positions from Redis: %w", err)
-		}
-
-		realPositions, err := pm.ListPositionsFromDB(ctx, false)
-		if err != nil {
-			pm.log.Error("Failed to fetch real positions from Redis", map[string]interface{}{
-				"error": err.Error(),
-			})
-			return nil, fmt.Errorf("failed to get real positions from Redis: %w", err)
-		}
-
-		// Combine both types of positions
-		allPositions = append(paperPositions, realPositions...)
+	// Fetch positions from Redis
+	allPositions, err := pm.ListPositionsFromDB(ctx)
+	if err != nil {
+		pm.log.Error("Failed to fetch positions from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, fmt.Errorf("failed to get positions from Redis: %w", err)
 	}
 
 	pm.log.Debug("Fetched positions from Redis", map[string]interface{}{
-		"count":  len(allPositions),
-		"filter": filterType,
+		"count": len(allPositions),
 	})
 
 	// Process all positions from Redis

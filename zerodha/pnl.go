@@ -87,7 +87,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		})
 	}
 
-	positions, err := positionManagerInstance.ListPositionsFromDB(ctx, false)
+	positions, err := positionManagerInstance.ListPositionsFromDB(ctx)
 	if err != nil {
 		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
 			"error": err.Error(),
@@ -111,7 +111,7 @@ func (pm *PnLManager) CalculatePnL(ctx context.Context) (*PnLSummary, error) {
 		summary.RealPositionsPNL += totalPnL
 	}
 
-	paperTradingPositions, err := positionManagerInstance.ListPositionsFromDB(ctx, true)
+	paperTradingPositions, err := positionManagerInstance.ListPositionsFromDB(ctx)
 	if err != nil {
 		pm.log.Error("Failed to fetch positions from database", map[string]interface{}{
 			"error": err.Error(),

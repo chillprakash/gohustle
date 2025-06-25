@@ -196,6 +196,10 @@ func placeOrdersAtZerodha(indexMeta *cache.InstrumentData, side Side, quantity i
 	orderType := appParameterManager.GetOrderAppParameters().OrderType
 	productType := appParameterManager.GetOrderAppParameters().ProductType
 	freezeLimit := indexMeta.Name.GetUnitsPerLot()
+	log.Info("Placing orders", map[string]interface{}{
+		"quantity":     quantity,
+		"freeze_limit": freezeLimit,
+	})
 
 	// For quantities within limit, place a single order
 	if quantity <= freezeLimit {

@@ -1418,7 +1418,22 @@ func convertMetadataToInstrumentData(metadata string, token string) (InstrumentD
 
 	// Map the parts to the InstrumentData struct fields
 	if len(parts) >= 1 {
-		inst.Name = core.Index{NameInOptions: parts[0]}
+		// Get the full index configuration from core.GetIndices
+		indexName := parts[0]
+		indices := core.GetIndices()
+		if idx := indices.GetIndexByName(indexName); idx != nil {
+			// Use the full index configuration
+			inst.Name = *idx
+		} else {
+			// Log when an index name isn't recognized
+			logger.L().Error("Unknown index name in metadata", map[string]interface{}{
+				"index_name": indexName,
+				"token":      token,
+				"metadata":   metadata,
+			})
+			// Still set the name to maintain the field
+			inst.Name.NameInOptions = indexName
+		}
 	}
 
 	if len(parts) >= 2 {

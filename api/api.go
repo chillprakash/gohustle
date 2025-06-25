@@ -645,29 +645,7 @@ func (s *APIServer) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get filter from query parameter, default to "all"
-	filterParam := r.URL.Query().Get("filter")
-	var filterType zerodha.PositionFilterType
-
-	// Validate filter parameter
-	switch filterParam {
-	case "paper":
-		filterType = zerodha.PositionFilterPaper
-	case "real":
-		filterType = zerodha.PositionFilterReal
-	case "all", "":
-		// Empty string or "all" means no filter - will return all positions
-		// We'll pass an empty string to GetPositionAnalysis which will be handled there
-	default:
-		sendErrorResponse(w, "Invalid filter parameter. Must be 'all', 'paper', or 'real'.", http.StatusBadRequest)
-		return
-	}
-
-	s.log.Debug("Getting positions", map[string]interface{}{
-		"filter": filterType,
-	})
-
-	analysis, err := pm.GetPositionAnalysis(r.Context(), filterType)
+	analysis, err := pm.GetPositionAnalysis(r.Context())
 	if err != nil {
 		sendErrorResponse(w, "Failed to get position analysis: "+err.Error(), http.StatusInternalServerError)
 		return

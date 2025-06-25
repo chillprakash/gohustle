@@ -196,14 +196,7 @@ func main() {
 			"error": err.Error(),
 		})
 	}
-	defer func() {
-		log.Info("Closing Redis connections...", nil)
-		if err := redisCache.Close(); err != nil {
-			log.Error("Error closing Redis connections", map[string]interface{}{
-				"error": err.Error(),
-			})
-		}
-	}()
+	// Redis connections will be closed in the cleanup() function
 
 	// Verify Redis connections
 	if err := redisCache.Ping(); err != nil {

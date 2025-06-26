@@ -566,7 +566,7 @@ func (pm *PositionManager) storePositionsInRedis(ctx context.Context, positions 
 		pm.log.Error("Failed to store positions timestamp", map[string]interface{}{"error": err.Error()})
 	}
 
-	pm.log.Info("Successfully synchronized positions with Redis", map[string]interface{}{"active_positions": len(activePositionsMap)})
+	pm.log.Debug("Successfully synchronized positions with Redis", map[string]interface{}{"active_positions": len(activePositionsMap)})
 	return nil
 }
 

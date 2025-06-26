@@ -61,7 +61,7 @@ var GetIndices = func() Indices {
 			NameInOptions:   "BANKNIFTY",
 			InstrumentToken: 260105,
 			NameInIndices:   "NIFTY BANK",
-			Enabled:         false,
+			Enabled:         true,
 			IndexNumber:     2, // Tertiary index
 			StrikeGap:       100,
 			UnitsPerLot:     900,

@@ -186,3 +186,42 @@ api_layer:
     - "uint32 tokens, RFC3339 timestamps"
     - "Standardized JSON responses"
     - "Appropriate HTTP status codes"
+
+position_response_structure:
+  api_structure:
+    - "GET /api/positions returns top-level format: {success: true, data: {summary: {...}, open_positions: [...]}}"
+    - "Summary section contains aggregate values for calls/puts and total position value"
+    - "Open positions array contains detailed position objects with moves data"
+  
+  position_object:
+    - "trading_symbol follows format: {index}{strike}{option_type} (e.g., 'NIFTY25450CE')"
+    - "Contains strike, expiry, option_type, quantity, prices, and instrument_token"
+    - "Includes diff (price difference) and value (total position value)"
+  
+  moves_section:
+    ordering_requirements:
+      - "MUST maintain strict ordering consistency for UI display"
+      - "Each position MUST have exactly 2 'away' and 2 'closer' moves"
+      - "All moves MUST be ordered consistently by strike distance"
+      - "Strike selection based on regular intervals using index.StrikeGap"
+      
+    directionality_rules:
+      call_options:
+        - "away: Higher strikes (more OTM) - ordered by ascending distance"
+        - "closer: Lower strikes (more ITM) - ordered by ascending distance"
+      
+      put_options:
+        - "away: Lower strikes (more OTM) - ordered by ascending distance"
+        - "closer: Higher strikes (more ITM) - ordered by ascending distance"
+    
+    move_entry_structure:
+      - "strike: The strike price"
+      - "premium: Current market price from LTP cache"
+      - "instrument_token: Unique token identifier"
+      - "steps: Always includes ['1/4', '1/2', '1'] for partial adjustments"
+  
+  dummy_positions_rules:
+    - "Quantities based on index lot sizes from core/indices.go"
+    - "Consistent structure with real positions API"
+    - "30-day TTL on Redis keys for automatic cleanup"
+    - "Must maintain position:all_positions consolidated list format"

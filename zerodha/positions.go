@@ -739,31 +739,71 @@ func (pm *PositionManager) calculateMoves(ctx context.Context, pos kiteconnect.P
 	strike := utils.StringToFloat64(tokenMeta.StrikePrice)
 	optionType := tokenMeta.InstrumentType
 
-	// Process moves in parallel
-	var wg sync.WaitGroup
-	var mu sync.Mutex
+	// Process moves sequentially to guarantee consistent ordering
 
 	// Process away moves (2 strikes)
 	for i := 1; i <= 2; i++ {
-		wg.Add(1)
-		go func(step int) {
-			defer wg.Done()
-			newStrike := strike + (float64(step) * strikeGap)
-			pm.processMove(ctx, &moves, &mu, newStrike, optionType, tokenMeta.Expiry, steps, true)
-		}(i)
+		newStrike := 0.0
+		if optionType == "CE" {
+			// For CE: away = higher strikes (more OTM)
+			newStrike = strike + (float64(i) * strikeGap)
+		} else {
+			// For PE: away = lower strikes (more OTM)
+			newStrike = strike - (float64(i) * strikeGap)
+		}
+
+		// Process directly without goroutines to maintain consistent order
+		tokenStr, err := pm.cacheMetaInstance.GetInstrumentTokenForStrike(ctx, newStrike, optionType, tokenMeta.Expiry)
+		if err == nil {
+			move := MoveStep{
+				Strike:          newStrike,
+				Steps:           steps,
+				InstrumentToken: tokenStr,
+				Premium:         getPremium(tokenStr),
+			}
+			moves.Away = append(moves.Away, move)
+		} else {
+			pm.log.Debug("No instrument token found for away strike",
+				map[string]interface{}{
+					"strike":      newStrike,
+					"option_type": optionType,
+					"expiry":      tokenMeta.Expiry,
+					"error":       err.Error(),
+				})
+		}
 	}
 
 	// Process closer moves (2 strikes)
 	for i := 1; i <= 2; i++ {
-		wg.Add(1)
-		go func(step int) {
-			defer wg.Done()
-			newStrike := strike - (float64(step) * strikeGap)
-			pm.processMove(ctx, &moves, &mu, newStrike, optionType, tokenMeta.Expiry, steps, false)
-		}(i)
-	}
+		newStrike := 0.0
+		if optionType == "CE" {
+			// For CE: closer = lower strikes (more ITM)
+			newStrike = strike - (float64(i) * strikeGap)
+		} else {
+			// For PE: closer = higher strikes (more ITM)
+			newStrike = strike + (float64(i) * strikeGap)
+		}
 
-	wg.Wait()
+		// Process directly without goroutines to maintain consistent order
+		tokenStr, err := pm.cacheMetaInstance.GetInstrumentTokenForStrike(ctx, newStrike, optionType, tokenMeta.Expiry)
+		if err == nil {
+			move := MoveStep{
+				Strike:          newStrike,
+				Steps:           steps,
+				InstrumentToken: tokenStr,
+				Premium:         getPremium(tokenStr),
+			}
+			moves.Closer = append(moves.Closer, move)
+		} else {
+			pm.log.Debug("No instrument token found for closer strike",
+				map[string]interface{}{
+					"strike":      newStrike,
+					"option_type": optionType,
+					"expiry":      tokenMeta.Expiry,
+					"error":       err.Error(),
+				})
+		}
+	}
 	return moves
 }
 

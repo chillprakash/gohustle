@@ -919,6 +919,234 @@ func (s *APIServer) handleGetTimeSeriesMetrics(w http.ResponseWriter, r *http.Re
 	})
 }
 
+func (s *APIServer) handleGenerateDummyPositions(w http.ResponseWriter, r *http.Request) {
+	// Parse index and expiry from query params (same as option-chain)
+	index := r.URL.Query().Get("index")
+	expiry := r.URL.Query().Get("expiry")
+
+	// Validate required parameters
+	if index == "" || expiry == "" {
+		s.log.Error("Missing required parameters", map[string]interface{}{
+			"error": "index and expiry are required parameters",
+		})
+		sendErrorResponse(w, "index and expiry are required parameters", http.StatusBadRequest)
+		return
+	}
+
+	// Get Redis client for positions DB
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		s.log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "failed to get Redis cache", http.StatusInternalServerError)
+		return
+	}
+	positionsDB := redisCache.GetPositionsDB2()
+	if positionsDB == nil {
+		s.log.Error("Redis positions DB not initialized", nil)
+		sendErrorResponse(w, "Redis positions DB not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Get option chain manager
+	optionChainManager := optionchain.GetOptionChainManager()
+	if optionChainManager == nil {
+		s.log.Error("Option chain manager not initialized", nil)
+		sendErrorResponse(w, "option chain manager not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Default to 1 strike (just ATM) if not specified
+	strikesCount := 1
+
+	// Calculate option chain to get ATM options
+	optionChain, err := optionChainManager.CalculateOptionChain(r.Context(), index, expiry, strikesCount)
+	if err != nil {
+		s.log.Error("Failed to calculate option chain", map[string]interface{}{
+			"error":  err.Error(),
+			"index":  index,
+			"expiry": expiry,
+		})
+		sendErrorResponse(w, fmt.Sprintf("failed to calculate option chain: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Get lot size for the index from core package
+	indices := core.GetIndices()
+	indexObj := indices.GetIndexByName(index)
+	if indexObj == nil {
+		s.log.Error("Invalid index", map[string]interface{}{
+			"index": index,
+		})
+		sendErrorResponse(w, "invalid index", http.StatusBadRequest)
+		return
+	}
+
+	// Use one lot as the position quantity
+	quantity := indexObj.GetMaxLotsPerOrder() * 5
+	s.log.Debug("Using lot size for index", map[string]interface{}{
+		"index":    index,
+		"lot_size": quantity,
+	})
+
+	// Prepare variables for position data
+	positions := []string{} // Will hold "tokenID_quantity" strings for all_positions
+	positionTimestamp := time.Now().Format(time.RFC3339)
+
+	// Find the ATM strike data (prefer one marked as ATM, otherwise use first)
+	atmStrikeData := optionChain.Chain[0]
+	for _, strike := range optionChain.Chain {
+		if strike.IsATM {
+			atmStrikeData = strike
+			break
+		}
+	}
+
+	// Generate CE position (buy)
+	if atmStrikeData.CE != nil {
+		ceOption := atmStrikeData.CE
+		// Get the instrument token from the CE option
+		ceToken, err := strconv.ParseUint(ceOption.InstrumentToken, 10, 32)
+		if err != nil {
+			s.log.Error("Failed to parse instrument token", map[string]interface{}{
+				"error": err.Error(),
+				"token": ceOption.InstrumentToken,
+			})
+			// Continue anyway, we'll skip this position
+		} else {
+			// Generate tradingsymbol based on token (simplified version for dummy data)
+			tradingSymbol := fmt.Sprintf("%s%d%s", index, int(atmStrikeData.Strike), "CE")
+
+			// Format: position:{tradingsymbol}:{token}
+			cePositionKey := fmt.Sprintf("position:%s:%s", tradingSymbol, ceOption.InstrumentToken)
+			cePosition := map[string]interface{}{
+				"instrument_token": ceToken,
+				"tradingsymbol":    tradingSymbol,
+				"quantity":         quantity, // Using index lot size
+				"average_price":    ceOption.LTP,
+				"last_price":       ceOption.LTP,
+				"pnl":              0.0, // Initial P&L is 0
+				"product":          "NRML",
+				"exchange":         "NFO",
+			}
+			// Convert to JSON
+			cePositionJSON, _ := json.Marshal(cePosition)
+
+			// Store directly in Redis (using hash structure)
+			err = positionsDB.HSet(r.Context(), "positions", cePositionKey, string(cePositionJSON)).Err()
+			if err != nil {
+				s.log.Error("Failed to store CE position in Redis", map[string]interface{}{
+					"error": err.Error(),
+					"key":   cePositionKey,
+				})
+			}
+
+			// Set TTL (30 days)
+			err = positionsDB.Expire(r.Context(), cePositionKey, 30*24*time.Hour).Err()
+			if err != nil {
+				s.log.Error("Failed to set TTL for CE position", map[string]interface{}{
+					"error": err.Error(),
+					"key":   cePositionKey,
+				})
+			}
+
+			// Add to positions list
+			positions = append(positions, fmt.Sprintf("%d_%d", ceToken, quantity))
+		}
+	}
+
+	// Generate PE position (buy)
+	if atmStrikeData.PE != nil {
+		peOption := atmStrikeData.PE
+		// Get the instrument token from the PE option
+		peToken, err := strconv.ParseUint(peOption.InstrumentToken, 10, 32)
+		if err != nil {
+			s.log.Error("Failed to parse instrument token", map[string]interface{}{
+				"error": err.Error(),
+				"token": peOption.InstrumentToken,
+			})
+			// Continue anyway, we'll skip this position
+		} else {
+			// Generate tradingsymbol based on token (simplified version for dummy data)
+			tradingSymbol := fmt.Sprintf("%s%d%s", index, int(atmStrikeData.Strike), "PE")
+
+			// Format: position:{tradingsymbol}:{token}
+			pePositionKey := fmt.Sprintf("position:%s:%s", tradingSymbol, peOption.InstrumentToken)
+			pePosition := map[string]interface{}{
+				"instrument_token": peToken,
+				"tradingsymbol":    tradingSymbol,
+				"quantity":         quantity, // Using index lot size
+				"average_price":    peOption.LTP,
+				"last_price":       peOption.LTP,
+				"pnl":              0.0, // Initial P&L is 0
+				"product":          "NRML",
+				"exchange":         "NFO",
+			}
+			// Convert to JSON
+			pePositionJSON, _ := json.Marshal(pePosition)
+
+			// Store directly in Redis (using hash structure)
+			err = positionsDB.HSet(r.Context(), "positions", pePositionKey, string(pePositionJSON)).Err()
+			if err != nil {
+				s.log.Error("Failed to store PE position in Redis", map[string]interface{}{
+					"error": err.Error(),
+					"key":   pePositionKey,
+				})
+			}
+
+			// Set TTL (30 days)
+			err = positionsDB.Expire(r.Context(), pePositionKey, 30*24*time.Hour).Err()
+			if err != nil {
+				s.log.Error("Failed to set TTL for PE position", map[string]interface{}{
+					"error": err.Error(),
+					"key":   pePositionKey,
+				})
+			}
+
+			// Add to positions list
+			positions = append(positions, fmt.Sprintf("%d_%d", peToken, quantity))
+		}
+	}
+
+	// Sort positions to ensure consistent output
+	sort.Strings(positions)
+
+	// Set the consolidated list of positions
+	allPositionsValue := strings.Join(positions, ",")
+	err = positionsDB.Set(r.Context(), "position:all_positions", allPositionsValue, 0).Err()
+	if err != nil {
+		s.log.Error("Failed to set consolidated positions list", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Set timestamp for position updates
+	err = positionsDB.Set(r.Context(), "position:all_positions:timestamp", positionTimestamp, 0).Err()
+	if err != nil {
+		s.log.Error("Failed to set positions timestamp", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	// Create success response
+	response := Response{
+		Success: true,
+		Message: "Dummy positions created successfully",
+		Data: map[string]interface{}{
+			"index":                index,
+			"expiry":               expiry,
+			"atm_strike":           atmStrikeData.Strike,
+			"ce_position_quantity": quantity,
+			"pe_position_quantity": quantity,
+			"positions_created":    len(positions),
+			"lot_size":             quantity,
+		},
+	}
+
+	sendJSONResponse(w, response)
+}
+
 // handleGeneral handles the /general endpoint that returns general market information
 func (s *APIServer) handleGeneral(w http.ResponseWriter, r *http.Request) {
 	// Get all indices to include their metadata

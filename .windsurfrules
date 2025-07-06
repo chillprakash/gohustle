@@ -1,8 +1,227 @@
-This is a trade Exectuion Application, built on Go.
-Here is what the application mainly does:
-1)Logs in to Zerodha
-2)Download the complete instruments data from Zerodha
-3)Synchs the instrument data to Redis.
-4)Get the instument tokens for upcoming expiry and subscribe to the websocket.
+description: "Go-based trade execution application"
+technical_architecture:
+  language: "Go"
+  data_store: "Redis"
+  architecture_type: "Monolithic"
+  development_tools:
+  redis_management:
+    - tool: "Redis Insight"
+      description: "GUI client for managing Redis data"
+      usage_pattern: "Used for inspecting keys, monitoring cache, troubleshooting"
+      key_features:
+        - "Visualization of Redis data structures"
+        - "Real-time monitoring of operations"
+        - "Direct Redis command execution"
+        - "Tree view of key namespaces"
+      typical_operations:
+        - "Inspecting position data in 'position:*' keys"
+        - "Monitoring instrument metadata caching"
+        - "Checking market data values (LTP, OI)"
+        - "Verifying TTL settings"
+        - "Clearing specific keys for testing"
+  dependencies:
+    - "Zerodha Kite Connect API for trading operations"
+    - "Redis for caching and state management"
+  design_patterns:
+    - "Singleton pattern for managers (Position, Order, Instruments)"
+    - "Repository pattern for data access"
+  notable_characteristics:
+    - "Self-contained with no external services besides Redis"
+    - "In-memory data with Redis persistence"
+    - "No traditional database, Redis as primary store"
+    - "Optimized for low-latency trading"
+main_features:
+  - "Zerodha login via Kite Connect API"
+  - "Daily instrument data downloads from Zerodha API"
+  - "Filtering by indices (NIFTY, BANKNIFTY) and expiries"
+  - "Instrument data normalization for efficient lookup"
+  - "Redis syncing with multiple access patterns"
+  - "Instrument token subscription for upcoming expiries"
+  - "Multiple websocket connections to Zerodha ticker"
+  - "Real-time market data processing"
+  - "Trading with position data integration"
+  - "Redis position management with stale cleanup"
+  - "Support for various order types"
+positions_storage_architecture:
+  data_structure: "Redis Hash 'positions' with keys format 'position:{tradingsymbol}:{token}'"
+  json_values:
+    - "instrument_token (uint32)"
+    - "tradingsymbol"
+    - "quantity" 
+    - "prices"
+    - "pnl"
+  index_keys:
+    - "position:all_positions (consolidated list)"
+    - "position:all_positions:timestamp (update time)"
+  implementation_details:
+    - "Only non-zero quantity positions stored"
+    - "Auto-removes stale positions"
+    - "30-day TTL on position data"
+    - "uint32 for instrument tokens consistency"
+user_preferences: "I run the app from terminal separately. Don't ask/suggest to run build/run commands."
+order_placement:
+  implementation:
+    - "Kite Connect API via zerodha/orders.go"
+    - "PlaceOrder() with standardized PlaceOrderRequest struct"
+    - "Regular and iceberg orders support"
+  order_types:
+    - "OrderTypeCreateBuy/Sell: Creates positions"
+    - "OrderTypeModifyAway/Closer: Adjusts positions"
+    - "OrderTypeExit: Closes positions"
+  position_integration:
+    - "Redis position queries via getQuantityOfPositionsforInstrumentToken()"
+    - "Auto-determines order side based on position"
+    - "Paired orders for position modifications"
+  workflow:
+    - "Gets instrument metadata from cache"
+    - "Determines parameters based on position data"
+    - "Handles quantity calculations"
+    - "Places order via Zerodha API"
+    - "Position updates reflected after polling"
+  data_types:
+    - "uint32 for instrument tokens"
+    - "Standardized OrderResponse struct"
+instrument_data_architecture:
+  file_management:
+    - "Singleton InstrumentsFileHandler"
+    - "Gzipped protobuf files with date-based naming"
+    - "Daily Zerodha downloads"
+    - "Index-based filtering (NIFTY, BANKNIFTY)"
+  redis_caching:
+    - "SyncAllInstrumentDataToCache() for Redis syncing"
+    - "Multiple lookup patterns"
+    - "Bidirectional symbol-token mappings"
+    - "Strike price and option chain caching"
+  data_structures:
+    - "OptionTokenPair: Links symbols with tokens and strikes"
+    - "ExpiryOptions: Arrays of calls/puts by expiry"
+    - "InstrumentExpiryMap: Maps to expiry dates"
+    - "TokenInfo: Instrument token metadata"
+  key_workflows:
+    - "Download: Zerodha API to gzipped protobuf"
+    - "Caching: Multiple Redis access patterns"
+    - "ATM Selection: LTP-based strike matching"
+    - "OI Filtering: Prioritizes liquid contracts"
+  type_standardization:
+    - "uint32 for tokens, time.Time for expiries"
+instrument_sync_workflow:
+  sync_process:
+    - "Reads from gzipped protobuf files"
+    - "Normalizes indices (NIFTY 50→NIFTY)"
+    - "Focuses on future expiries only"
+    - "Limits to nearest expiries per index"
+    - "Integer strike prices for consistency"
+    - "Hierarchical index→expiry→strike mapping"
+    - "OI-based filtering for liquid contracts"
+  
+  redis_updates:
+    - "SyncInstrumentExpiries: Sorted expiry dates"
+    - "StoreExpiryStrikes: Available strikes by expiry"
+    - "SyncInstrumentMetadata: Token/symbol lookups"
+    - "GetFilteredInstrumentsBasedOnOI: OI prioritization"
 
-I run the app from terminal separately. Dont ask/suggest to run build/run commands from terminal.
+  optimizations:
+    - "Limited expiry processing for performance"
+    - "Past expiry filtering"
+    - "Higher OI prioritization"
+    - "Integer strikes for faster comparison"
+    - "Multiple Redis access patterns"
+websocket_ticker:
+  implementation:
+    - "Kite Connect ticker API for real-time data"
+    - "Multiple websocket connections"
+    - "Distributed token subscriptions"
+    - "Connection event callbacks"
+    - "handleTick method for processing"
+  
+  subscription_process:
+    - "Optimal token distribution across connections"
+    - "ModeFull for detailed market data"
+    - "Automatic reconnection handling"
+  
+  tick_processing:
+    - "Concurrent goroutine processing"
+    - "12-hour TTL Redis storage"
+    - "In-memory token lookup cache"
+  
+  redis_storage:
+    - "Key formats: {token}_ltp, {token}_volume, etc."
+    - "Redis pipelining for batch updates"
+    - "Filtering of zero values"
+  
+  optimizations:
+    - "Goroutines for parallelism"
+    - "In-memory caching for lookups"
+    - "Context timeouts to prevent hangs"
+api_layer:
+  server_architecture:
+    - "Singleton pattern with sync.Once"
+    - "Default port 8080 with configurable timeouts"
+    - "CORS middleware, JWT authentication"
+    - "Context-based graceful shutdown"
+
+  endpoint_categories:
+    authentication:
+      - "/api/auth/login, /logout, /check endpoints"
+    
+    system:
+      - "Health, status, and general info endpoints"
+    
+    instruments:
+      - "Indices, instruments, expiries, option-chain endpoints"
+    
+    trading:
+      - "Order placement, position management, exit endpoints"
+    
+    analytics:
+      - "P&L, parameters, metrics endpoints"
+
+  integration_points:
+    - "OrderManager for Zerodha API integration"
+    - "Redis for position and market data"
+    - "OptionChainManager for calculations"
+    - "AppParameterManager for settings"
+
+  standards:
+    - "uint32 tokens, RFC3339 timestamps"
+    - "Standardized JSON responses"
+    - "Appropriate HTTP status codes"
+
+position_response_structure:
+  api_structure:
+    - "GET /api/positions returns top-level format: {success: true, data: {summary: {...}, open_positions: [...]}}"
+    - "Summary section contains aggregate values for calls/puts and total position value"
+    - "Open positions array contains detailed position objects with moves data"
+  
+  position_object:
+    - "trading_symbol follows format: {index}{strike}{option_type} (e.g., 'NIFTY25450CE')"
+    - "Contains strike, expiry, option_type, quantity, prices, and instrument_token"
+    - "Includes diff (price difference) and value (total position value)"
+  
+  moves_section:
+    ordering_requirements:
+      - "MUST maintain strict ordering consistency for UI display"
+      - "Each position MUST have exactly 2 'away' and 2 'closer' moves"
+      - "All moves MUST be ordered consistently by strike distance"
+      - "Strike selection based on regular intervals using index.StrikeGap"
+      
+    directionality_rules:
+      call_options:
+        - "away: Higher strikes (more OTM) - ordered by ascending distance"
+        - "closer: Lower strikes (more ITM) - ordered by ascending distance"
+      
+      put_options:
+        - "away: Lower strikes (more OTM) - ordered by ascending distance"
+        - "closer: Higher strikes (more ITM) - ordered by ascending distance"
+    
+    move_entry_structure:
+      - "strike: The strike price"
+      - "premium: Current market price from LTP cache"
+      - "instrument_token: Unique token identifier"
+      - "steps: Always includes ['1/4', '1/2', '1'] for partial adjustments"
+  
+  dummy_positions_rules:
+    - "Quantities based on index lot sizes from core/indices.go"
+    - "Consistent structure with real positions API"
+    - "30-day TTL on Redis keys for automatic cleanup"
+    - "Must maintain position:all_positions consolidated list format"

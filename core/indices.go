@@ -64,8 +64,8 @@ var GetIndices = func() Indices {
 			Enabled:         true,
 			IndexNumber:     2, // Tertiary index
 			StrikeGap:       100,
-			UnitsPerLot:     900,
-			MaxLotsPerOrder: 35,
+			UnitsPerLot:     600,
+			MaxLotsPerOrder: 30,
 		},
 	}
 }

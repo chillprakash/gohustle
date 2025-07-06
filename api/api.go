@@ -1294,12 +1294,15 @@ func (s *APIServer) handleUpdateSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Convert request to response
+	settingsResponse := SettingsResponse{
+		LimitOrder: req.LimitOrder,
+	}
+
 	// Return the updated settings
 	response := Response{
 		Success: true,
-		Data: SettingsResponse{
-			LimitOrder: req.LimitOrder,
-		},
+		Data:    settingsResponse,
 	}
 
 	sendJSONResponse(w, response)

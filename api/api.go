@@ -263,12 +263,14 @@ type TimeSeriesMetricsRequest struct {
 
 // SettingsResponse contains settings data returned by the API
 type SettingsResponse struct {
-	LimitOrder string `json:"limit_order"`
+	LimitOrder        string `json:"limit_order"`
+	LimitOrderPercent int    `json:"limit_order_percent,omitempty"`
 }
 
 // UpdateSettingsRequest contains settings data to be updated
 type UpdateSettingsRequest struct {
-	LimitOrder string `json:"limit_order"`
+	LimitOrder        string `json:"limit_order"`
+	LimitOrderPercent *int   `json:"limit_order_percent,omitempty"`
 }
 
 // ValidIntervals contains the list of valid interval values and their durations
@@ -1243,11 +1245,40 @@ func (s *APIServer) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Create response data
+	settingsResponse := SettingsResponse{
+		LimitOrder: limitOrder,
+	}
+
+	// Get limit_order_percent setting from Redis if limit_order is enabled
+	if limitOrder == "enabled" {
+		percentStr, err := settingsDB.Get(r.Context(), "limit_order_percent").Result()
+		if err == redis.Nil {
+			// If key doesn't exist, return default value
+			settingsResponse.LimitOrderPercent = 0
+		} else if err != nil {
+			s.log.Error("Failed to get limit order percent from Redis", map[string]interface{}{
+				"error": err.Error(),
+			})
+			// Non-critical error, continue with default
+			settingsResponse.LimitOrderPercent = 0
+		} else {
+			// Convert string to int
+			percent, err := strconv.Atoi(percentStr)
+			if err != nil {
+				s.log.Error("Invalid limit order percent value in Redis", map[string]interface{}{
+					"error": err.Error(),
+				})
+				settingsResponse.LimitOrderPercent = 0
+			} else {
+				settingsResponse.LimitOrderPercent = percent
+			}
+		}
+	}
+
 	response := Response{
 		Success: true,
-		Data: SettingsResponse{
-			LimitOrder: limitOrder,
-		},
+		Data:    settingsResponse,
 	}
 
 	sendJSONResponse(w, response)
@@ -1294,9 +1325,63 @@ func (s *APIServer) handleUpdateSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Convert request to response
+	// Create the response
 	settingsResponse := SettingsResponse{
 		LimitOrder: req.LimitOrder,
+	}
+
+	// Handle limit_order_percent if limit_order is enabled
+	if req.LimitOrder == "enabled" {
+		// Validate and store limit_order_percent if provided
+		if req.LimitOrderPercent != nil {
+			// Validate the percentage range
+			if *req.LimitOrderPercent < 0 || *req.LimitOrderPercent > 100 {
+				sendErrorResponse(w, "Invalid limit_order_percent value, must be between 0 and 100", http.StatusBadRequest)
+				return
+			}
+
+			// Store the percentage in Redis with the same TTL as limit_order
+			err = settingsDB.Set(r.Context(), "limit_order_percent", strconv.Itoa(*req.LimitOrderPercent), 30*24*time.Hour).Err()
+			if err != nil {
+				s.log.Error("Failed to store limit order percent in Redis", map[string]interface{}{
+					"error": err.Error(),
+				})
+				sendErrorResponse(w, "Failed to update settings", http.StatusInternalServerError)
+				return
+			}
+
+			// Update the response with the percentage
+			settingsResponse.LimitOrderPercent = *req.LimitOrderPercent
+		} else {
+			// If percentage wasn't provided, retrieve current value
+			percentStr, err := settingsDB.Get(r.Context(), "limit_order_percent").Result()
+			if err == redis.Nil {
+				// No value exists, default to 0 and store it
+				err = settingsDB.Set(r.Context(), "limit_order_percent", "0", 30*24*time.Hour).Err()
+				if err != nil {
+					s.log.Error("Failed to store default limit order percent in Redis", map[string]interface{}{
+						"error": err.Error(),
+					})
+				}
+				settingsResponse.LimitOrderPercent = 0
+			} else if err != nil {
+				s.log.Error("Failed to get limit order percent from Redis", map[string]interface{}{
+					"error": err.Error(),
+				})
+				// Non-critical error, continue with default
+				settingsResponse.LimitOrderPercent = 0
+			} else {
+				percent, err := strconv.Atoi(percentStr)
+				if err != nil {
+					s.log.Error("Invalid limit order percent value in Redis", map[string]interface{}{
+						"error": err.Error(),
+					})
+					settingsResponse.LimitOrderPercent = 0
+				} else {
+					settingsResponse.LimitOrderPercent = percent
+				}
+			}
+		}
 	}
 
 	// Return the updated settings

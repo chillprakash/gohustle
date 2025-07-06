@@ -162,3 +162,51 @@ websocket_ticker:
     - "Implements in-memory caching to reduce Redis lookups for token-to-index mapping"
     - "Uses context with timeout to prevent hanging operations"
     - "Employs Redis pipelining for batch updates rather than individual commands"
+api_layer:
+  server_architecture:
+    - "Singleton pattern with sync.Once and mutex protection"
+    - "Default port 8080 with configurable read/write/idle timeouts"
+    - "CORS middleware allowing all origins"
+    - "JWT-based authentication for protected routes"
+    - "Context-based graceful shutdown"
+
+  endpoint_categories:
+    authentication:
+      - "/api/auth/login (POST): Authenticates with Zerodha credentials"
+      - "/api/auth/logout (POST): Ends user session"
+      - "/api/auth/check (GET): Verifies authentication status"
+    
+    system:
+      - "/api/health (GET): System health check"
+      - "/api/status (GET): Current market status"
+      - "/api/general (GET): General market information"
+    
+    instruments:
+      - "/api/indices (GET): Lists available indices"
+      - "/api/instruments (GET): Lists available instruments"
+      - "/api/expiries (GET): Returns expiry dates for indices"
+      - "/api/option-chain (GET): Structured option chain data"
+    
+    trading:
+      - "/api/orders (POST): Places/modifies/exits trading positions"
+      - "/api/positions (GET): Position analysis and details"
+      - "/api/positions/exit (POST): Exits all positions by type"
+    
+    analytics:
+      - "/api/pnl (GET): P&L calculations"
+      - "/api/pnl/params (GET/POST): Retrieves/updates P&L parameters"
+      - "/api/pnl/summary (GET): Latest P&L summary"
+      - "/api/metrics (GET): Time series market metrics"
+
+  integration_workflows:
+    - "Order placement integrates with Zerodha API via OrderManager"
+    - "Position data stored in Redis with standardized key formats"
+    - "Option chain calculations use Redis LTP data and instrument metadata"
+    - "Time series metrics use Redis with configured TTLs"
+    - "Application parameters stored and retrieved via AppParameterManager"
+
+  data_standardization:
+    - "Instrument tokens consistently represented as uint32"
+    - "Standardized JSON response structure with success flags"
+    - "Time values in RFC3339 format"
+    - "Appropriate HTTP status codes for different error conditions"

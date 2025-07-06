@@ -396,33 +396,3 @@ func getQuantityOfPositionsforInstrumentToken(instrumentToken string) (int, erro
 
 	return 0, nil
 }
-
-func processModifyOrder(placeOrderRequest PlaceOrderRequest, indexMeta *cache.InstrumentData) (*[]OrderResponse, error) {
-	positionsManager := GetPositionManager()
-	positions, err := positionsManager.GetOpenPositionTokensVsQuanityFromRedis(context.Background())
-	if err != nil {
-		log.Error("Failed to get open positions from Redis", map[string]interface{}{
-			"error": err.Error(),
-		})
-		return nil, err
-	}
-	//Modify can happen only with existing positions as base.
-	for _, position := range positions {
-		if position.InstrumentToken == utils.Uint32ToString(indexMeta.InstrumentToken) {
-			// existingQuantity := position.Quantity
-			if placeOrderRequest.OrderType == OrderTypeModifyAway {
-				if err != nil {
-					log.Error("Failed to calculate strike to move", map[string]interface{}{
-						"error": err.Error(),
-					})
-					return nil, err
-				}
-
-			}
-			if placeOrderRequest.OrderType == OrderTypeModifyAway {
-
-			}
-		}
-	}
-	return nil, nil
-}

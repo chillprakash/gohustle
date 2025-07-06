@@ -39,6 +39,9 @@ func (s *APIServer) setupRoutes() {
 	// Option chain endpoint
 	authenticatedRouter.HandleFunc("/option-chain", s.handleGetOptionChain).Methods("GET")
 
+	// Dummy positions endpoint for UI testing
+	authenticatedRouter.HandleFunc("/dummy-positions", s.handleGenerateDummyPositions).Methods("GET")
+
 	authenticatedRouter.HandleFunc("/orders", s.handlePlaceOrder).Methods("POST")
 
 	// Position routes

@@ -225,3 +225,48 @@ position_response_structure:
     - "Consistent structure with real positions API"
     - "30-day TTL on Redis keys for automatic cleanup"
     - "Must maintain position:all_positions consolidated list format"
+
+app_parameters_architecture:
+  storage_pattern:
+    - "Uses Redis DB1 with key format 'app:param:{parameter_name}'"
+    - "24-hour TTL on all parameter values"
+    - "JSON serialization for complex parameter objects"
+    - "Parameters stored with timestamps (created_at, updated_at)"
+
+  type_definitions:
+    - "AppParameterTypes: String type for parameter keys"
+    - "ProductType: String type for order product types (MIS, NRML)"
+    - "OrderType: String type for order types (MARKET, LIMIT)"
+
+  predefined_parameters:
+    order_parameters:
+      - "AppParamOrderProductType: Controls order product type (MIS/NRML)"
+      - "AppParamOrderType: Controls order execution type (MARKET/LIMIT)"
+    pnl_parameters:
+      - "AppParamExitPNL: P&L threshold to exit positions"
+      - "AppParamTargetPNL: Target P&L for positions"
+
+  singleton_implementation:
+    - "Thread-safe using sync.Once pattern"
+    - "Lazy initialization via GetAppParameterManager()"
+    - "Automatic Redis connection establishment"
+    - "Graceful error handling for Redis failures"
+
+  key_operations:
+    - "GetOrderAppParameters(): Returns product and order types"
+    - "GetParameter()/GetParameters(): Retrieves parameter values"
+    - "SetParameter(): Creates or updates parameters with timestamps"
+    - "DeleteParameter(): Removes parameters by key"
+    - "ParameterExists(): Verifies parameter existence"
+
+  batch_operations:
+    - "Efficient Redis MGet for multiple parameter retrieval"
+    - "Pipeline commands for bulk operations"
+    - "Automatic default values for missing parameters"
+    - "JSON marshaling/unmarshaling for structured data"
+
+  integration_points:
+    - "Used by order placement code to determine execution parameters"
+    - "Provides configurable PNL thresholds for trading decisions"
+    - "Settings separate from user-specific settings in DB6"
+    - "System-wide configuration separate from per-user preferences"

@@ -332,6 +332,11 @@ func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 		}
 		modifyQuantity := populateModifyQuantityForModifyRequest(req, existingQuantity, &indexMeta.Name)
 		targetIndexMeta, err := cacheMeta.GetMetadataOfToken(context.Background(), utils.Uint32ToString(req.TargetInstrumentToken))
+		log.Info("Target index meta", map[string]interface{}{
+			"target_index_meta": targetIndexMeta,
+			"modify_quantity":   modifyQuantity,
+			"existing_quantity": existingQuantity,
+		})
 		if err != nil {
 			log.Error("Failed to get target index meta", map[string]interface{}{
 				"error": err.Error(),
@@ -350,6 +355,9 @@ func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 			kiteOrdersTobePlaced = append(kiteOrdersTobePlaced, populateKiteOrderStruct(modifyQuantity, targetPositionSide, &targetIndexMeta))
 		}
 	}
+	log.Info("Kite orders to be placed", map[string]interface{}{
+		"kite_orders": kiteOrdersTobePlaced,
+	})
 
 	// Place all orders at Zerodha
 	for _, order := range kiteOrdersTobePlaced {

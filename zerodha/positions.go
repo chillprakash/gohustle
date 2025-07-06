@@ -377,6 +377,9 @@ func (pm *PositionManager) GetOpenPositionTokensVsQuanityFromRedis(ctx context.C
 
 	// Get the comma-separated position data from Redis
 	allPositions, err := pm.positionsRedis.Get(ctx, PositionsKeyFormat).Result()
+	pm.log.Debug("All positions from Redis", map[string]interface{}{
+		"positions": allPositions,
+	})
 
 	if err == redis.Nil {
 		pm.log.Debug("No positions found in Redis", map[string]interface{}{

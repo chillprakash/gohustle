@@ -310,6 +310,9 @@ func PlaceOrder(req PlaceOrderRequest) ([]OrderResponse, error) {
 
 	if req.OrderType == OrderTypeExit {
 		quantity, err := getQuantityOfPositionsforInstrumentToken(utils.Uint32ToString(indexMeta.InstrumentToken))
+		log.Info("Quantity of positions for exit order", map[string]interface{}{
+			"quantity": quantity,
+		})
 		if err != nil {
 			log.Error("Failed to get quantity of positions", map[string]interface{}{
 				"error": err.Error(),

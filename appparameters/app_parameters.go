@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"gohustle/cache"
 	"gohustle/logger"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 
 // Redis key constants
 const (
-	AppParamKeyPrefix = "app:param:"
+	AppParamKeyPrefix = "app:"
 	AppParamTTL       = 24 * time.Hour
 )
 
@@ -44,10 +43,7 @@ const (
 
 // AppParameter represents a configurable application parameter
 type AppParameter struct {
-	ID        int       `json:"id"`
-	Key       string    `json:"key"`
 	Value     string    `json:"value"`
-	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -84,7 +80,7 @@ func GetAppParameterManager() *AppParameterManager {
 		// Initialize the instance
 		appParamInstance = &AppParameterManager{
 			log:   log,
-			cache: redisCache.GetCacheDB1(),
+			cache: redisCache.GetSettingsDB6(),
 		}
 
 		log.Info("AppParameterManager initialized successfully")
@@ -145,9 +141,7 @@ func (apm *AppParameterManager) GetParameters(ctx context.Context, keys []AppPar
 					if err := json.Unmarshal([]byte(valueStr), &param); err != nil {
 						// If not JSON, just use the value directly
 						param = AppParameter{
-							Key:       originalKey,
 							Value:     valueStr,
-							CreatedAt: time.Now(),
 							UpdatedAt: time.Now(),
 						}
 					}
@@ -186,9 +180,7 @@ func (apm *AppParameterManager) GetParameters(ctx context.Context, keys []AppPar
 		// Create parameter with default value
 		now := time.Now()
 		param := &AppParameter{
-			Key:       string(key),
 			Value:     defaultValue,
-			CreatedAt: now,
 			UpdatedAt: now,
 		}
 
@@ -239,17 +231,14 @@ func (apm *AppParameterManager) GetAllParameters(ctx context.Context) ([]AppPara
 		}
 
 		// Process results
-		for i, cmd := range cmds {
+		for _, cmd := range cmds {
 			valueStr, err := cmd.Result()
 			if err == nil {
 				var param AppParameter
 				if err := json.Unmarshal([]byte(valueStr), &param); err != nil {
 					// If not JSON, create a parameter with the raw value
-					key := strings.TrimPrefix(keys[i], AppParamKeyPrefix)
 					param = AppParameter{
-						Key:       key,
 						Value:     valueStr,
-						CreatedAt: time.Now(),
 						UpdatedAt: time.Now(),
 					}
 				}
@@ -296,11 +285,9 @@ func (apm *AppParameterManager) SetParameter(ctx context.Context, key AppParamet
 	}
 
 	// If parameter doesn't exist or couldn't be unmarshaled, create a new one
-	if param.Key == "" {
+	if param.Value == "" {
 		param = AppParameter{
-			Key:       string(key),
 			Value:     value,
-			CreatedAt: now,
 			UpdatedAt: now,
 		}
 	}

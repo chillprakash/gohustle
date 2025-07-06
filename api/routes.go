@@ -64,4 +64,8 @@ func (s *APIServer) setupRoutes() {
 
 	// General endpoint
 	authenticatedRouter.HandleFunc("/general", s.handleGeneral).Methods("GET")
+
+	// Settings endpoints
+	authenticatedRouter.HandleFunc("/settings", s.handleGetSettings).Methods("GET")
+	authenticatedRouter.HandleFunc("/settings", s.handleUpdateSettings).Methods("POST")
 }

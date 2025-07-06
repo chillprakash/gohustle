@@ -261,6 +261,16 @@ type TimeSeriesMetricsRequest struct {
 	LastKnownTimestamp string `json:"last_known_timestamp,omitempty"` // Optional: Only get points newer than this (for realtime mode)
 }
 
+// SettingsResponse contains settings data returned by the API
+type SettingsResponse struct {
+	LimitOrder string `json:"limit_order"`
+}
+
+// UpdateSettingsRequest contains settings data to be updated
+type UpdateSettingsRequest struct {
+	LimitOrder string `json:"limit_order"`
+}
+
 // ValidIntervals contains the list of valid interval values and their durations
 var ValidIntervals = map[string]time.Duration{
 	"5s":  5 * time.Second,
@@ -1203,4 +1213,94 @@ func HandleGetLatestPnLSummary(w http.ResponseWriter, r *http.Request) {
 			"last_updated":   time.Now().Format(time.RFC3339),
 		},
 	})
+}
+
+// handleGetSettings handles GET /settings endpoint to retrieve application settings
+func (s *APIServer) handleGetSettings(w http.ResponseWriter, r *http.Request) {
+	// Get Redis cache instance
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		s.log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to connect to Redis", http.StatusInternalServerError)
+		return
+	}
+
+	// Get settings DB
+	settingsDB := redisCache.GetSettingsDB6()
+
+	// Get limit_order setting from Redis, default to "disabled" if not set
+	limitOrder, err := settingsDB.Get(r.Context(), "limit_order").Result()
+	if err == redis.Nil {
+		// If key doesn't exist, return default value
+		limitOrder = "disabled"
+	} else if err != nil {
+		s.log.Error("Failed to get settings from Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to retrieve settings", http.StatusInternalServerError)
+		return
+	}
+
+	response := Response{
+		Success: true,
+		Data: SettingsResponse{
+			LimitOrder: limitOrder,
+		},
+	}
+
+	sendJSONResponse(w, response)
+}
+
+// handleUpdateSettings handles POST /settings endpoint to update application settings
+func (s *APIServer) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
+	// Get Redis cache instance
+	redisCache, err := cache.GetRedisCache()
+	if err != nil {
+		s.log.Error("Failed to get Redis cache", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to connect to Redis", http.StatusInternalServerError)
+		return
+	}
+
+	// Get settings DB
+	settingsDB := redisCache.GetSettingsDB6()
+
+	// Parse request body
+	var req UpdateSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.log.Error("Failed to decode settings update request", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate limit_order value
+	if req.LimitOrder != "enabled" && req.LimitOrder != "disabled" {
+		sendErrorResponse(w, "Invalid limit_order value, must be 'enabled' or 'disabled'", http.StatusBadRequest)
+		return
+	}
+
+	// Store the setting in Redis with a long TTL (30 days)
+	err = settingsDB.Set(r.Context(), "limit_order", req.LimitOrder, 30*24*time.Hour).Err()
+	if err != nil {
+		s.log.Error("Failed to store settings in Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+		sendErrorResponse(w, "Failed to update settings", http.StatusInternalServerError)
+		return
+	}
+
+	// Return the updated settings
+	response := Response{
+		Success: true,
+		Data: SettingsResponse{
+			LimitOrder: req.LimitOrder,
+		},
+	}
+
+	sendJSONResponse(w, response)
 }

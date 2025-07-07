@@ -22,6 +22,22 @@ type AppParameterTypes string
 type ProductType string
 type OrderType string
 
+// Define constants for AppParameterTypes
+const (
+	AppParamOrderProductType  AppParameterTypes = "order_product_type" //CNC, MIS, NRML
+	AppParamOrderType         AppParameterTypes = "order_type"         //LIMIT, MARKET
+	AppParamLimitOrder        AppParameterTypes = "limit_order"        //enabled/disabled
+	AppParamLimitOrderPercent AppParameterTypes = "limit_order_percent"
+	AppParamExitPNL           AppParameterTypes = "exit_pnl"
+	AppParamTargetPNL         AppParameterTypes = "target_pnl"
+)
+
+// AppParameter represents a configurable application parameter
+type AppParameter struct {
+	Value     string    `json:"value"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 // Define constants for ProductType
 const (
 	ProductMIS  ProductType = "MIS"
@@ -34,17 +50,16 @@ const (
 	OrderTypeLIMIT  OrderType = "LIMIT"
 )
 
-const (
-	AppParamOrderProductType AppParameterTypes = "order_product_type" //CNC, MIS, NRML
-	AppParamOrderType        AppParameterTypes = "order_type"         //LIMIT, MARKET
-	AppParamExitPNL          AppParameterTypes = "exit_pnl"
-	AppParamTargetPNL        AppParameterTypes = "target_pnl"
-)
+// PnLParameter represents a PnL threshold with enabled/disabled state
+type PnLParameter struct {
+	Enabled bool    `json:"enabled"`
+	Value   float64 `json:"value"`
+}
 
-// AppParameter represents a configurable application parameter
-type AppParameter struct {
-	Value     string    `json:"value"`
-	UpdatedAt time.Time `json:"updated_at"`
+// LimitOrderParameter represents limit order settings with enabled/disabled state
+type LimitOrderParameter struct {
+	Enabled bool `json:"enabled"`
+	Value   int  `json:"value"` // Percentage value
 }
 
 type OrderAppParameters struct {
@@ -166,13 +181,9 @@ func (apm *AppParameterManager) GetParameters(ctx context.Context, keys []AppPar
 		var defaultValue string
 		switch key {
 		case AppParamOrderProductType:
-			defaultValue = string(ProductMIS)
+			defaultValue = string(ProductNRML)
 		case AppParamOrderType:
 			defaultValue = string(OrderTypeMARKET)
-		case AppParamExitPNL:
-			defaultValue = "-1000"
-		case AppParamTargetPNL:
-			defaultValue = "1000"
 		default:
 			defaultValue = ""
 		}
